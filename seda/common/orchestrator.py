@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from seda.common.retailer_runner import configure_retailer, run_module, step_env
-from seda.step00_config import csv_count, dated_run_root, product_line, read_json, run_root
+from seda.step00_config import csv_count, dated_run_root, product_line, run_root
 
 
 @dataclass(frozen=True)
@@ -26,13 +26,11 @@ def steps_for(package_name):
         Step(2, "main_targets", f"{package_name}.step02_main_targets"),
         Step(3, "bsr_list", f"{package_name}.step03_bsr_list"),
         Step(4, "bsr_rank", f"{package_name}.step04_bsr_rank"),
-        Step(5, "promotion_deals", f"{package_name}.step05_promotion_deals"),
-        Step(6, "trending_deals", f"{package_name}.step06_trending_deals"),
-        Step(7, "final_targets", f"{package_name}.step07_final_targets"),
-        Step(8, "detail_enrichment", f"{package_name}.step08_detail_enrichment"),
-        Step(9, "review20", f"{package_name}.step09_review20"),
+        Step(5, "final_targets", f"{package_name}.step07_final_targets"),
+        Step(6, "detail_enrichment", f"{package_name}.step08_detail_enrichment"),
+        Step(7, "review20", f"{package_name}.step09_review20"),
     ]
-    next_number = 10
+    next_number = 8
     if package_name.endswith(".casas_bahia"):
         steps.extend(
             [
@@ -84,10 +82,6 @@ def step_complete(step):
         if path.suffix.lower() == ".csv":
             return csv_count(path) > 0, label
         return path.exists(), label
-    if step.name in {"promotion_deals", "trending_deals"}:
-        rel = "promotion/manifest_promotion_deals.json" if step.name == "promotion_deals" else "trending/manifest_trending_deals.json"
-        manifest = read_json(root / rel)
-        return manifest.get("success") is True, manifest.get("skip_reason", step.name)
     if step.name in {"status_check", "s3_sync", "local_cleanup", "db_prepare", "db_load"}:
         return False, "always refresh when selected"
     return False, "no completion rule"
