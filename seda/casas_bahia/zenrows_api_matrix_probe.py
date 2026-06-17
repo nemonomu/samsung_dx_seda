@@ -18,6 +18,12 @@ from seda.step00_config import RETAILERS, run_root, write_json
 ZENROWS_API_URL = "https://api.zenrows.com/v1/"
 SENSITIVE_PARAMS = {"apikey"}
 SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key", "apikey"}
+ZENROWS_TARGET_HEADER_KEYS = (
+    "Zr-Content-Type",
+    "Zr-Cookies",
+    "Zr-Final-Url",
+    "Zr-Original-Status",
+)
 BLOCK_MARKERS = (
     "ops! algo deu errado",
     "akamai",
@@ -114,6 +120,49 @@ def _cvip(zipcode):
     return f"IPI-CasasBahia=UsuarioGUID=00000000-0000-4000-8000-000000000001&cepClienteProvavel={zip_digits}"
 
 
+def _session_id(args):
+    raw = str(args.session_id or os.getenv("SEDA_ZENROWS_SESSION_ID") or "").strip()
+    if raw:
+        digits = re.sub(r"\D+", "", raw)
+        if digits:
+            value = max(1, min(99999, int(digits)))
+            return str(value)
+    return str((int(time.time()) % 99998) + 1)
+
+
+def _chain_steps(listing_url, pdp_url, freight_url, target, zipcode, session_id, page_params, freight_params=None):
+    page_params = dict(page_params or {})
+    freight_params = dict(freight_params or page_params)
+    for params in (page_params, freight_params):
+        params["session_id"] = str(session_id)
+        params["custom_headers"] = "true"
+    listing_headers = dict(CASAS_HEADERS)
+    pdp_headers = dict(CASAS_HEADERS)
+    pdp_headers["referer"] = listing_url
+    freight_headers = _freight_headers(target, zipcode)
+    freight_headers["referer"] = pdp_url
+    return [
+        {
+            "step": "listing",
+            "url": listing_url,
+            "params": page_params,
+            "headers": listing_headers,
+        },
+        {
+            "step": "pdp",
+            "url": pdp_url,
+            "params": page_params,
+            "headers": pdp_headers,
+        },
+        {
+            "step": "freight",
+            "url": freight_url,
+            "params": freight_params,
+            "headers": freight_headers,
+        },
+    ]
+
+
 def _case_matrix(targets, args):
     first = targets[0]
     listing_url = args.listing_url or RETAILERS["casas_bahia"].main_url
@@ -122,8 +171,87 @@ def _case_matrix(targets, args):
     batch_pdp_url = pdp_url
     batch_listing_url = listing_url
     batch_js = _batch_js(targets, args.zipcode)
+    session_id = _session_id(args)
 
     return [
+        {
+            "name": "chain_session_cookie_auto_global",
+            "target_type": "chain",
+            "url": freight_url,
+            "steps": _chain_steps(
+                listing_url,
+                pdp_url,
+                freight_url,
+                first,
+                args.zipcode,
+                session_id,
+                {"mode": "auto", "original_status": "true"},
+            ),
+        },
+        {
+            "name": "chain_session_cookie_auto_br",
+            "target_type": "chain",
+            "url": freight_url,
+            "steps": _chain_steps(
+                listing_url,
+                pdp_url,
+                freight_url,
+                first,
+                args.zipcode,
+                session_id,
+                {"mode": "auto", "proxy_country": "br", "original_status": "true"},
+            ),
+        },
+        {
+            "name": "chain_session_cookie_js_premium_global",
+            "target_type": "chain",
+            "url": freight_url,
+            "steps": _chain_steps(
+                listing_url,
+                pdp_url,
+                freight_url,
+                first,
+                args.zipcode,
+                session_id,
+                {
+                    "js_render": "true",
+                    "premium_proxy": "true",
+                    "wait": str(args.wait_ms),
+                    "block_resources": args.block_resources,
+                    "original_status": "true",
+                },
+                freight_params={
+                    "premium_proxy": "true",
+                    "original_status": "true",
+                },
+            ),
+        },
+        {
+            "name": "chain_session_cookie_js_premium_br",
+            "target_type": "chain",
+            "url": freight_url,
+            "steps": _chain_steps(
+                listing_url,
+                pdp_url,
+                freight_url,
+                first,
+                args.zipcode,
+                session_id,
+                {
+                    "js_render": "true",
+                    "premium_proxy": "true",
+                    "proxy_country": "br",
+                    "wait": str(args.wait_ms),
+                    "block_resources": args.block_resources,
+                    "original_status": "true",
+                },
+                freight_params={
+                    "premium_proxy": "true",
+                    "proxy_country": "br",
+                    "original_status": "true",
+                },
+            ),
+        },
         {
             "name": "pdp_auto_br",
             "target_type": "pdp",
@@ -339,7 +467,15 @@ def _estimate_multiplier(params):
     return "1x"
 
 
+def _case_estimate(case):
+    if case.get("steps"):
+        return "chain:" + " -> ".join(_estimate_multiplier(step.get("params") or {}) for step in case["steps"])
+    return _estimate_multiplier(case.get("params") or {})
+
+
 def _execute_case(case, api_key, args):
+    if case.get("steps"):
+        return _execute_chain_case(case, api_key, args)
     params = dict(case.get("params") or {})
     params["url"] = case["url"]
     params["apikey"] = api_key
@@ -362,12 +498,93 @@ def _execute_case(case, api_key, args):
     return _summarize_case_result(case, params, headers, response, text, error, elapsed, args)
 
 
+def _execute_chain_case(case, api_key, args):
+    cookie_header = ""
+    step_results = []
+    for step in case.get("steps") or []:
+        params = dict(step.get("params") or {})
+        params["url"] = step["url"]
+        params["apikey"] = api_key
+        headers = dict(step.get("headers") or {})
+        injected_cookie = bool(cookie_header)
+        if cookie_header:
+            headers["Cookie"] = _merge_cookie_headers(headers.get("Cookie", ""), cookie_header)
+            params["custom_headers"] = "true"
+        started = time.time()
+        try:
+            response = requests.get(
+                ZENROWS_API_URL,
+                params=params,
+                headers=headers,
+                timeout=args.timeout,
+            )
+            error = ""
+            text = response.text or ""
+        except Exception as exc:
+            response = None
+            error = f"{type(exc).__name__}: {exc}"
+            text = ""
+        elapsed = round(time.time() - started, 3)
+        result = _summarize_case_result(
+            {
+                "name": f"{case['name']}:{step['step']}",
+                "target_type": step.get("step", ""),
+                "url": step["url"],
+            },
+            params,
+            headers,
+            response,
+            text,
+            error,
+            elapsed,
+            args,
+        )
+        result["step"] = step["step"]
+        result["injected_cookie"] = injected_cookie
+        zr_cookies = _target_cookies(response)
+        result["zr_cookie_present"] = bool(zr_cookies)
+        result["zr_cookie_length"] = len(zr_cookies)
+        if zr_cookies:
+            cookie_header = _merge_cookie_headers(cookie_header, zr_cookies)
+        step_results.append(result)
+
+    last = step_results[-1] if step_results else {}
+    cost_total = sum(_safe_float((item.get("zenrows_headers") or {}).get("X-Request-Cost", "0")) for item in step_results)
+    return {
+        "case": case["name"],
+        "target_type": case.get("target_type", ""),
+        "url": case["url"],
+        "estimated_multiplier": _case_estimate(case),
+        "request_params": {"steps": len(step_results)},
+        "request_headers": {},
+        "status_code": last.get("status_code", 0),
+        "ok": bool(step_results and all(item.get("ok") for item in step_results)),
+        "usable_ok": bool(step_results and all(item.get("usable_ok") for item in step_results)),
+        "elapsed_seconds": round(sum(float(item.get("elapsed_seconds") or 0) for item in step_results), 3),
+        "error": "; ".join(item.get("error", "") for item in step_results if item.get("error")),
+        "zenrows_headers": {"X-Request-Cost": str(cost_total)} if cost_total else {},
+        "content_type": last.get("content_type", ""),
+        "body_length": last.get("body_length", 0),
+        "json_like": last.get("json_like", False),
+        "json_top_keys": last.get("json_top_keys", []),
+        "zenrows_error_title": last.get("zenrows_error_title", ""),
+        "looks_blocked": any(item.get("looks_blocked") for item in step_results),
+        "block_markers": sorted({marker for item in step_results for marker in item.get("block_markers", [])}),
+        "batch_summary": last.get("batch_summary", {}),
+        "body_prefix": last.get("body_prefix", ""),
+        "chain_steps": step_results,
+        "chain_cookie_observed": any(item.get("zr_cookie_present") for item in step_results),
+        "chain_cookie_injected": any(item.get("injected_cookie") for item in step_results),
+    }
+
+
 def _summarize_case_result(case, params, headers, response, text, error, elapsed, args):
     status_code = response.status_code if response is not None else 0
     response_headers = response.headers if response is not None else {}
     parsed_json = _parse_json(text)
     batch_summary = _batch_summary(text)
     body_prefix = _body_prefix(text, args.body_prefix_chars)
+    usable_ok = bool(response is not None and response.ok and not _looks_blocked(text) and not _zenrows_error_title(parsed_json))
     return {
         "case": case["name"],
         "target_type": case.get("target_type", ""),
@@ -377,18 +594,23 @@ def _summarize_case_result(case, params, headers, response, text, error, elapsed
         "request_headers": _safe_dict(headers, SENSITIVE_HEADERS),
         "status_code": status_code,
         "ok": bool(response is not None and response.ok),
+        "usable_ok": usable_ok,
         "elapsed_seconds": elapsed,
         "error": error,
         "zenrows_headers": {
             key: response_headers.get(key, "")
-            for key in ("X-Request-Cost", "Concurrency-Limit", "Concurrency-Remaining", "X-Request-Id")
+            for key in ("X-Request-Cost", "Concurrency-Limit", "Concurrency-Remaining", "X-Request-Id", "Zr-Final-Url", "Zr-Original-Status")
             if response_headers.get(key)
+        },
+        "target_headers_present": {
+            key: bool(response_headers.get(key))
+            for key in ZENROWS_TARGET_HEADER_KEYS
         },
         "content_type": response_headers.get("content-type", ""),
         "body_length": len(text),
         "json_like": bool(parsed_json),
         "json_top_keys": list(parsed_json.keys())[:20] if isinstance(parsed_json, dict) else [],
-        "zenrows_error_title": parsed_json.get("title", "") if isinstance(parsed_json, dict) else "",
+        "zenrows_error_title": _zenrows_error_title(parsed_json),
         "looks_blocked": _looks_blocked(text),
         "block_markers": _block_markers(text),
         "batch_summary": batch_summary,
@@ -404,6 +626,34 @@ def _parse_json(text):
     except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {"_list_length": len(parsed)}
+
+
+def _zenrows_error_title(parsed_json):
+    return parsed_json.get("title", "") if isinstance(parsed_json, dict) else ""
+
+
+def _target_cookies(response):
+    if response is None:
+        return ""
+    return response.headers.get("Zr-Cookies", "") or response.headers.get("zr-cookies", "")
+
+
+def _merge_cookie_headers(*headers):
+    values = {}
+    order = []
+    for header in headers:
+        for part in str(header or "").split(";"):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            if key not in values:
+                order.append(key)
+            values[key] = value.strip()
+    return "; ".join(f"{key}={values[key]}" for key in order)
 
 
 def _batch_summary(text):
@@ -472,10 +722,13 @@ def _write_csv_summary(path, results):
         "estimated_multiplier",
         "status_code",
         "ok",
+        "usable_ok",
         "x_request_cost",
         "elapsed_seconds",
         "body_length",
         "looks_blocked",
+        "chain_cookie_observed",
+        "chain_cookie_injected",
         "zenrows_error_title",
         "batch_ok_count",
         "batch_status_counts",
@@ -492,10 +745,13 @@ def _write_csv_summary(path, results):
                     "estimated_multiplier": item.get("estimated_multiplier", ""),
                     "status_code": item.get("status_code", ""),
                     "ok": item.get("ok", ""),
+                    "usable_ok": item.get("usable_ok", ""),
                     "x_request_cost": (item.get("zenrows_headers") or {}).get("X-Request-Cost", ""),
                     "elapsed_seconds": item.get("elapsed_seconds", ""),
                     "body_length": item.get("body_length", ""),
                     "looks_blocked": item.get("looks_blocked", ""),
+                    "chain_cookie_observed": item.get("chain_cookie_observed", ""),
+                    "chain_cookie_injected": item.get("chain_cookie_injected", ""),
                     "zenrows_error_title": item.get("zenrows_error_title", ""),
                     "batch_ok_count": (item.get("batch_summary") or {}).get("ok_count", ""),
                     "batch_status_counts": json.dumps((item.get("batch_summary") or {}).get("status_counts", {}), ensure_ascii=False),
@@ -523,9 +779,19 @@ def run(args):
             "case": case["name"],
             "target_type": case.get("target_type", ""),
             "url": case["url"],
-            "estimated_multiplier": _estimate_multiplier(case.get("params") or {}),
+            "estimated_multiplier": _case_estimate(case),
             "params": _safe_dict(case.get("params") or {}, SENSITIVE_PARAMS),
             "headers": _safe_dict(case.get("headers") or {}, SENSITIVE_HEADERS),
+            "steps": [
+                {
+                    "step": step.get("step", ""),
+                    "url": step.get("url", ""),
+                    "estimated_multiplier": _estimate_multiplier(step.get("params") or {}),
+                    "params": _safe_dict(step.get("params") or {}, SENSITIVE_PARAMS),
+                    "headers": _safe_dict(step.get("headers") or {}, SENSITIVE_HEADERS),
+                }
+                for step in case.get("steps", [])
+            ],
         }
         for case in cases
     ]
@@ -546,10 +812,17 @@ def run(args):
     for index, case in enumerate(cases, start=1):
         print(
             f"[casas_zenrows_api_matrix] {index}/{len(cases)} "
-            f"{case['name']} multiplier={_estimate_multiplier(case.get('params') or {})}",
+            f"{case['name']} multiplier={_case_estimate(case)}",
             flush=True,
         )
-        results.append(_execute_case(case, api_key, args))
+        result = _execute_case(case, api_key, args)
+        results.append(result)
+        print(
+            f"[casas_zenrows_api_matrix] result {case['name']} "
+            f"status={result.get('status_code')} ok={result.get('ok')} usable={result.get('usable_ok')} "
+            f"blocked={result.get('looks_blocked')} cost={(result.get('zenrows_headers') or {}).get('X-Request-Cost', '')}",
+            flush=True,
+        )
         if args.sleep_seconds > 0 and index < len(cases):
             time.sleep(args.sleep_seconds)
 
@@ -563,6 +836,7 @@ def run(args):
         "results": results,
         "summary": {
             "ok_cases": [item["case"] for item in results if item.get("ok")],
+            "usable_cases": [item["case"] for item in results if item.get("usable_ok")],
             "blocked_cases": [item["case"] for item in results if item.get("looks_blocked")],
             "x_request_cost_total_observed": sum(
                 _safe_float((item.get("zenrows_headers") or {}).get("X-Request-Cost", "0"))
@@ -601,6 +875,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="Allow execution without SEDA_ALLOW_ZENROWS=1.")
     parser.add_argument("--timeout", type=int, default=int(os.getenv("SEDA_ZENROWS_TIMEOUT", "180")))
     parser.add_argument("--wait-ms", type=int, default=int(os.getenv("SEDA_ZENROWS_MATRIX_WAIT_MS", "8000")))
+    parser.add_argument("--session-id", default=os.getenv("SEDA_ZENROWS_SESSION_ID", ""), help="ZenRows session_id, 1-99999. Defaults to an ephemeral value.")
     parser.add_argument("--sleep-seconds", type=float, default=float(os.getenv("SEDA_ZENROWS_MATRIX_SLEEP_SECONDS", "1")))
     parser.add_argument("--block-resources", default=os.getenv("SEDA_ZENROWS_MATRIX_BLOCK", "image,media,font,stylesheet"))
     parser.add_argument("--body-prefix-chars", type=int, default=int(os.getenv("SEDA_ZENROWS_MATRIX_BODY_PREFIX_CHARS", "1200")))
