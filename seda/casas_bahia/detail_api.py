@@ -1,0 +1,593 @@
+import json
+import os
+import re
+import time
+import unicodedata
+import uuid
+from pathlib import Path
+
+import requests
+
+from ..parsers import clean_text, model_number_from_text, model_year_from_text, screen_size_from_text
+from ..step00_config import run_root
+
+
+PDP_API = "https://pdp-api.casasbahia.com.br"
+RECS_API = "https://recs.casasbahia.com.br/v1/recommendations"
+PICKUP_API = "https://vv-retira-ponto-retirada-api-retira.viavarejo.com.br/api/v2/PontosRetirada/melhorLoja/cep"
+PRODUCT_SOURCE_URL = f"{PDP_API}/api/v2/sku/source/CB"
+
+
+def fetch_product_source(sku_id, timeout=None):
+    if not sku_id:
+        return {"success": False, "error": "missing_sku"}
+    timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    url = f"{PRODUCT_SOURCE_URL}?skuId={sku_id}"
+    cached = _read_product_source_cache(sku_id)
+    if cached is not None:
+        return {
+            "success": True,
+            "detail": _product_source_detail(cached),
+            "method": "casas_bahia_product_source_cache",
+            "headers": {},
+        }
+    attempts = _product_source_attempts()
+    last_error = "not_attempted"
+    for attempt in attempts:
+        retries = int(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRIES", "1"))
+        for retry in range(retries + 1):
+            if retry:
+                time.sleep(float(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRY_SLEEP_SECONDS", "1.5")) * retry)
+            if attempt == "zenrows":
+                result = _fetch_product_source_zenrows(url, timeout=timeout)
+            else:
+                result = _fetch_product_source_direct(url, timeout=timeout)
+            if result.get("success"):
+                _write_product_source_cache(sku_id, result.get("data") or {})
+                detail = _product_source_detail(result.get("data") or {})
+                return {
+                    "success": True,
+                    "detail": detail,
+                    "method": result.get("method", "casas_bahia_product_source_api"),
+                    "headers": result.get("headers") or {},
+                }
+            last_error = result.get("error", "unknown")
+    return {"success": False, "error": last_error}
+
+
+def _product_source_cache_path(sku_id):
+    if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_CACHE", "1").lower() in {"0", "false", "no", "n"}:
+        return None
+    override = os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_CACHE_DIR", "").strip()
+    directory = Path(override) if override else run_root() / "detail" / "product_source"
+    safe_sku = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(sku_id or "").strip())[:80] or "sku"
+    return directory / f"{safe_sku}.json"
+
+
+def _read_product_source_cache(sku_id):
+    path = _product_source_cache_path(sku_id)
+    if not path or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_product_source_cache(sku_id, data):
+    path = _product_source_cache_path(sku_id)
+    if not path or not isinstance(data, dict):
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _product_source_attempts():
+    mode = os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_MODE", "direct_first").lower().strip()
+    if mode in {"0", "false", "no", "n", "off"}:
+        return []
+    if mode == "direct":
+        return ["direct"]
+    if mode == "direct_first":
+        return ["direct", "zenrows"]
+    if mode == "zenrows":
+        return ["zenrows"]
+    return ["zenrows", "direct"]
+
+
+def _fetch_product_source_direct(url, timeout=None):
+    try:
+        response = requests.get(url, headers=_headers(), timeout=timeout)
+    except Exception as exc:
+        return {"success": False, "error": f"direct_{type(exc).__name__}: {exc}", "method": "casas_bahia_product_source_direct"}
+    if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+        prefix = "blocked" if _blocked_response(response.text, response.status_code) else "status"
+        return {
+            "success": False,
+            "error": f"direct_{prefix}_{response.status_code}",
+            "method": "casas_bahia_product_source_direct",
+        }
+    try:
+        data = response.json()
+    except ValueError:
+        return {"success": False, "error": "direct_invalid_json", "method": "casas_bahia_product_source_direct"}
+    return {"success": True, "data": data, "method": "casas_bahia_product_source_direct"}
+
+
+def _fetch_product_source_zenrows(url, timeout=None):
+    if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS", "1").lower() in {"0", "false", "no", "n"}:
+        return {"success": False, "error": "zenrows_disabled", "method": "casas_bahia_product_source_zenrows"}
+    try:
+        from ..magalu.zenrows_client import request_url
+    except Exception as exc:
+        return {"success": False, "error": f"zenrows_import_{type(exc).__name__}: {exc}", "method": "casas_bahia_product_source_zenrows"}
+
+    restore = {
+        "SEDA_ALLOW_ZENROWS": os.environ.get("SEDA_ALLOW_ZENROWS"),
+        "SEDA_ZENROWS_DRY_RUN": os.environ.get("SEDA_ZENROWS_DRY_RUN"),
+    }
+    os.environ["SEDA_ALLOW_ZENROWS"] = "1"
+    os.environ["SEDA_ZENROWS_DRY_RUN"] = "0"
+    try:
+        result = request_url(url, profile=os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_PROFILE", "premium_html"), timeout=timeout)
+    finally:
+        for key, value in restore.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if not result.success:
+        return {
+            "success": False,
+            "error": f"zenrows_{result.error or result.status_code}",
+            "method": f"casas_bahia_product_source_zenrows:{result.estimated_multiplier}",
+            "headers": result.headers,
+        }
+    try:
+        data = json.loads(result.text or "")
+    except ValueError:
+        return {
+            "success": False,
+            "error": "zenrows_invalid_json",
+            "method": f"casas_bahia_product_source_zenrows:{result.estimated_multiplier}",
+            "headers": result.headers,
+        }
+    return {
+        "success": True,
+        "data": data,
+        "method": f"casas_bahia_product_source_zenrows:{result.estimated_multiplier}",
+        "headers": result.headers,
+    }
+
+
+def _product_source_detail(data):
+    product = data.get("product") if isinstance(data.get("product"), dict) else {}
+    sku = data.get("sku") if isinstance(data.get("sku"), dict) else {}
+    spec_values = _spec_values(product.get("specGroups"))
+    name = _known_text(product.get("name") or product.get("rawName"))
+    sku_name = _known_text(sku.get("name"))
+    model = (
+        _first_spec(spec_values, ["modelo"])
+        or model_number_from_text(" ".join(part for part in [name, sku_name] if part))
+    )
+    screen_size = _screen_size_from_specs(spec_values, name)
+    energy_use = _known_text(_first_spec(spec_values, ["consumo de energia", "consumo aproximado de energia"]))
+    if not energy_use:
+        energy_use = _energy_use_from_specs(spec_values)
+    model_year = _known_text(_first_spec(spec_values, ["ano de lancamento", "ano de lançamento", "ano"]))
+    if not model_year:
+        model_year = model_year_from_text(" ".join(part for part in [name, sku_name] if part))
+    return {
+        "retailer_sku_name": name,
+        "sku": model,
+        "screen_size": screen_size,
+        "estimated_annual_electricity_use": energy_use,
+        "model_year": model_year,
+        "retailer_product_id": _known_text(product.get("id")),
+    }
+
+
+def _spec_values(groups):
+    specs = {}
+    if not isinstance(groups, list):
+        return specs
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for item in group.get("specs") or []:
+            if not isinstance(item, dict):
+                continue
+            key = _normalize_key(item.get("name"))
+            value = _known_text(item.get("value"))
+            if key and value:
+                specs.setdefault(key, []).append(value)
+    return specs
+
+
+def _first_spec(specs, labels):
+    for label in labels:
+        wanted = _normalize_key(label)
+        for key, values in specs.items():
+            if wanted == key or wanted in key:
+                for value in values:
+                    if _known_text(value):
+                        return _known_text(value)
+    return ""
+
+
+def _screen_size_from_specs(specs, title):
+    values = []
+    wanted = _normalize_key("tamanho da tela")
+    for key, items in specs.items():
+        if wanted == key or wanted in key:
+            values.extend(items)
+    for value in values:
+        extracted = _screen_size_from_tamanho_tela(value)
+        if extracted:
+            return extracted
+    return screen_size_from_text(title)
+
+
+def _screen_size_from_tamanho_tela(value):
+    text = _known_text(value)
+    if not text:
+        return ""
+    explicit = re.search(r"^\s*-?\s*(\d{2,3})\s*(?:\"|''|polegadas|pol\b|in\b)", text, re.I)
+    if explicit:
+        return f'{explicit.group(1)}"'
+    quoted = re.search(r"(\d{2,3})\s*(?:\"|'')", text, re.I)
+    if quoted:
+        return f'{quoted.group(1)}"'
+    numeric = re.fullmatch(r"\d{2,3}", text)
+    if numeric:
+        return f'{numeric.group(0)}"'
+    if re.fullmatch(r"\d{2,3}\s*a\s*\d{2,3}\s*polegadas", text, re.I):
+        return ""
+    return screen_size_from_text(text)
+
+
+def _energy_use_from_specs(specs):
+    for values in specs.values():
+        for value in values:
+            text = _known_text(value)
+            if not text:
+                continue
+            extracted = _energy_use_from_text(text)
+            if extracted:
+                return extracted
+    return ""
+
+
+def _energy_use_from_text(text):
+    patterns = [
+        r"\bConsumo\s*/\s*m[eê]s\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*kWh(?:\s*/\s*m[eê]s)?)",
+        r"\bConsumo\s+mensal\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*kWh(?:\s*/\s*m[eê]s)?)",
+        r"\bConsumo\s+de\s+energia\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*(?:kWh(?:\s*/\s*m[eê]s)?|W))",
+        r"\bConsumo\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*(?:kWh(?:\s*/\s*m[eê]s)?|W))",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
+def _known_text(value):
+    text = clean_text(value)
+    normalized = _normalize_key(text)
+    if normalized in {"", "nao informado", "nao se aplica", "sem informacao"}:
+        return ""
+    if text in {".", "-", "--"}:
+        return ""
+    return text
+
+
+def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None):
+    if not sku_id or not seller_id:
+        return {"success": False, "error": "missing_sku_or_seller"}
+    zipcode = zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")
+    timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    url = f"{PDP_API}/api/v2/sku/{sku_id}/freight/seller/{seller_id}/zipcode/{zipcode}/source/CB"
+    params = _freight_params()
+    headers = _headers(zipcode=zipcode, include_cvip=True)
+    last_error = "not_attempted"
+    for transport in _freight_transports():
+        try:
+            response = _freight_get(transport, url, params, headers, timeout)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+        if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+            last_error = f"status_{response.status_code}"
+            continue
+        try:
+            data = response.json()
+        except ValueError:
+            last_error = "invalid_json"
+            continue
+        return {"success": True, "detail": _freight_detail(data), "method": f"{transport}_freight_api"}
+    return {"success": False, "error": last_error}
+
+
+def _freight_params():
+    params = {
+        "channel": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_CHANNEL", "DESKTOP"),
+        "orderby": "price",
+    }
+    profile = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_QUERY_PROFILE", "har").strip().lower()
+    if profile in {"utm", "legacy", "mobile"}:
+        params.update(
+            {
+                "utm_medium": os.getenv("SEDA_CASAS_BAHIA_UTM_MEDIUM", "cpc"),
+                "utm_source": os.getenv("SEDA_CASAS_BAHIA_UTM_SOURCE", "gp_branding"),
+                "utm_campaign": os.getenv("SEDA_CASAS_BAHIA_UTM_CAMPAIGN", "cb_all_gg_brand_exata"),
+            }
+        )
+    return params
+
+
+def _freight_transports():
+    raw = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_TRANSPORTS", "requests,curl_cffi")
+    transports = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    return transports or ["requests"]
+
+
+def _freight_get(transport, url, params, headers, timeout):
+    if transport == "requests":
+        return requests.get(url, params=params, headers=headers, timeout=timeout)
+    if transport == "curl_cffi":
+        from curl_cffi import requests as curl_requests
+
+        return curl_requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout,
+            impersonate=os.getenv("SEDA_CASAS_BAHIA_CURL_IMPERSONATE", "chrome"),
+        )
+    raise ValueError(f"unknown_freight_transport:{transport}")
+
+
+def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=None):
+    if not product_id:
+        return {"success": False, "error": "missing_product_id"}
+    timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    body = {
+        "pageType": "PRODUCT",
+        "device": "DESKTOP",
+        "model": os.getenv("SEDA_CASAS_BAHIA_RECS_MODEL", "similar_itens"),
+        "productIds": [str(product_id)],
+        "utmCampaign": os.getenv("SEDA_CASAS_BAHIA_UTM_CAMPAIGN", "cb_all_gg_brand_exata"),
+        "utmMedium": os.getenv("SEDA_CASAS_BAHIA_UTM_MEDIUM", "cpc"),
+        "utmSource": os.getenv("SEDA_CASAS_BAHIA_UTM_SOURCE", "gp_branding"),
+        "zipCode": os.getenv("SEDA_POSTAL_CODE", "01010-010").replace("-", ""),
+        "sessionId": os.getenv("SEDA_CASAS_BAHIA_SESSION_ID", "89ec6f5d-3c85-40ba-af9c-9bf91e8af2b0"),
+        "regionId": os.getenv("SEDA_CASAS_BAHIA_REGION_ID", "126000"),
+    }
+    if sku_id:
+        body["skuId"] = str(sku_id)
+    session = requests.Session()
+    session.trust_env = os.getenv("SEDA_CASAS_BAHIA_TRUST_ENV_PROXY", "0").lower() in {"1", "true", "yes", "y"}
+    try:
+        response = session.post(RECS_API, json=body, headers=_headers(), timeout=timeout)
+    except Exception as exc:
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+    if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+        return {"success": False, "error": f"status_{response.status_code}"}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"success": False, "error": "invalid_json"}
+    products = (data.get("data") or {}).get("products") or []
+    names = [
+        title
+        for product in products
+        for title in [str(product.get("title") or "").strip()]
+        if title and _is_tv_title(title)
+    ]
+    return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
+
+
+def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
+    if not sku_id or not seller_id:
+        return {"success": False, "error": "missing_sku_or_seller"}
+    zipcode = (zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")).replace("-", "")
+    timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    params = {
+        "cep": zipcode,
+        f"sku[{sku_id}]": "1",
+        "idLojista": seller_id,
+    }
+    try:
+        response = requests.get(PICKUP_API, params=params, headers=_pickup_headers(), timeout=timeout)
+    except Exception as exc:
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+    if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+        return {"success": False, "error": f"status_{response.status_code}"}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"success": False, "error": "invalid_json"}
+    text = _pickup_text(data)
+    return {"success": bool(text), "detail": {"pick_up_availability": text}, "error": "" if text else "empty_pickup"}
+
+
+def _is_tv_title(title):
+    text = str(title or "").lower()
+    if "smart tv" in text or " tv " in f" {text} " or "televisor" in text:
+        return True
+    return False
+
+
+def _pickup_text(data):
+    if not isinstance(data, dict):
+        return ""
+    prazo = data.get("prazo") if isinstance(data.get("prazo"), dict) else {}
+    formatted = str(prazo.get("textoFormatado") or "").strip()
+    if not formatted:
+        hours = prazo.get("prazoHorasEntrega") or data.get("prazoEmHoras")
+        days = prazo.get("prazoDiasEntrega") or data.get("prazoEmDias")
+        if hours not in ("", None):
+            formatted = f"{hours}h"
+        elif days not in ("", None):
+            formatted = f"{days} dias"
+    if not formatted:
+        return ""
+    return f"Retira Rapido Retirar em {formatted}"
+
+
+def _freight_detail(data):
+    delivery = []
+    pickup = []
+    skipped_delivery = []
+    for option in _iter_freight_options(data):
+        if not isinstance(option, dict):
+            continue
+        name = str(option.get("name") or "").strip()
+        deadline = str(
+            option.get("formattedDeadlineDelivery")
+            or option.get("deliveryDateDetailed")
+            or option.get("deadline")
+            or option.get("description")
+            or ""
+        ).strip()
+        text = " ".join(part for part in [name, deadline] if part)
+        normalized_name = _normalize_ascii(name)
+        if "retira" in normalized_name or "withdraw" in normalized_name or "pickup" in normalized_name:
+            pickup.append(text)
+        elif text and _is_normal_delivery_option(normalized_name):
+            delivery.append(text)
+        elif text:
+            skipped_delivery.append(text)
+    if not delivery and isinstance(data, dict):
+        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        message = _known_text(error.get("message"))
+        if message:
+            delivery.append(message)
+        elif pickup and not skipped_delivery:
+            delivery.append(os.getenv("SEDA_CASAS_BAHIA_NO_DELIVERY_TEXT", "Entrega indisponivel para este CEP"))
+    return {
+        "delivery_availability": "; ".join(dict.fromkeys(delivery)),
+        "pick_up_availability": "; ".join(dict.fromkeys(pickup)),
+    }
+
+
+def _is_normal_delivery_option(normalized_name):
+    text = str(normalized_name or "").strip().lower()
+    return bool(re.search(r"\bnormal\b", text))
+
+
+def _iter_freight_options(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_freight_options(item)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("name") and (
+        value.get("formattedDeadlineDelivery")
+        or value.get("deliveryDateDetailed")
+        or value.get("deadline")
+        or value.get("description")
+    ):
+        yield value
+    for key in ("options", "freights", "items", "deliveries", "shippingOptions"):
+        child = value.get(key)
+        if child:
+            yield from _iter_freight_options(child)
+
+
+def _normalize_ascii(value):
+    text = str(value or "").lower()
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    replacements = {
+        "á": "a",
+        "à": "a",
+        "â": "a",
+        "ã": "a",
+        "é": "e",
+        "ê": "e",
+        "í": "i",
+        "ó": "o",
+        "ô": "o",
+        "õ": "o",
+        "ú": "u",
+        "ç": "c",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _normalize_key(value):
+    text = unicodedata.normalize("NFKD", clean_text(value)).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _blocked_response(text, status_code=0):
+    haystack = str(text or "").lower()
+    if status_code in {401, 403, 429}:
+        return True
+    return any(marker in haystack for marker in ("akamai", "access denied", "ops! algo deu errado", "captcha", "customdeny"))
+
+
+def _headers(zipcode=None, include_cvip=False):
+    headers = {
+        "accept": "*/*",
+        "accept-language": os.getenv("SEDA_CASAS_BAHIA_ACCEPT_LANGUAGE", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
+        "cache-control": os.getenv("SEDA_CASAS_BAHIA_CACHE_CONTROL", "no-cache"),
+        "content-type": "application/json",
+        "origin": "https://www.casasbahia.com.br",
+        "priority": "u=1, i",
+        "referer": "https://www.casasbahia.com.br/",
+        "sec-ch-ua": os.getenv(
+            "SEDA_CASAS_BAHIA_SEC_CH_UA",
+            '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "user-agent": (
+            os.getenv(
+                "SEDA_CASAS_BAHIA_USER_AGENT",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            )
+        ),
+    }
+    cookie = os.getenv("SEDA_CASAS_BAHIA_API_COOKIE", "").strip()
+    if cookie:
+        headers["cookie"] = cookie
+    cvip = _cvip_header(zipcode) if include_cvip else os.getenv("SEDA_CASAS_BAHIA_X_CVIP", "").strip()
+    if cvip:
+        headers["x-cvip"] = cvip
+    return headers
+
+
+def _cvip_header(zipcode=None):
+    raw = os.getenv("SEDA_CASAS_BAHIA_X_CVIP", "").strip()
+    zip_digits = re.sub(r"\D+", "", str(zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")))
+    if raw:
+        if zip_digits and "cepClienteProvavel=" not in raw:
+            return f"{raw.rstrip('&')}&cepClienteProvavel={zip_digits}"
+        return raw
+    user_guid = (
+        os.getenv("SEDA_CASAS_BAHIA_USER_GUID", "").strip()
+        or os.getenv("SEDA_CASAS_BAHIA_SESSION_ID", "").strip()
+        or str(uuid.uuid5(uuid.NAMESPACE_URL, "casas-bahia-seda"))
+    )
+    if not zip_digits:
+        return f"IPI-CasasBahia=UsuarioGUID={user_guid}"
+    return f"IPI-CasasBahia=UsuarioGUID={user_guid}&cepClienteProvavel={zip_digits}"
+
+
+def _pickup_headers():
+    headers = _headers()
+    headers["sec-fetch-site"] = "cross-site"
+    return headers

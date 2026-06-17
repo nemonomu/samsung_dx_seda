@@ -1,0 +1,37 @@
+﻿no,country,product_line,category,retailer,page,schema,data_kor,info_kor
+61,SEDA,TV,Retail.com,Magalu,Main Page,retailer_sku_name,리테일러 표기 제품명,"리테일러에서 판매하는 제품명, e.g., Smart TV 50"" Samsung UHD 4K Crystal UHD U8600F UN50U8600FGXZD Tizen Crystal 4K Bixby e Alexa 3 HDMI"
+62,SEDA,TV,Retail.com,Magalu,Main Page,original_sku_price,출시가격,"e.g., R$7,599"
+63,SEDA,TV,Retail.com,Magalu,Main Page,final_sku_price,최종 판매가격,"e.g., R$5,999"
+64,SEDA,TV,Retail.com,Magalu,Main Page,sku_status,제품 상태,"e.g., 리테일러 광고상품(Patrocinado(Sponsored))"
+65,SEDA,TV,Retail.com,Magalu,Main Page,discount_type,할인 적용 조건,"[수집 후 번역 필요] e.g., Cupom 등"
+66,SEDA,TV,Retail.com,Magalu,Product Page,delivery_availability,배송 정보,"[수집 후 번역 필요] 배송가능여부/배송 비용/배송 일정, e.g., 'Receba até quarta-feira' (Receive by Wednesday)"
+67,SEDA,TV,Retail.com,Magalu,Product Page,pick_up_availability,픽업 정보,"[수집 후 번역 필요] e.g., 'Retire na loja a partir de amanhã' (Pick up in store starting tomorrow)"
+68,SEDA,TV,Retail.com,Magalu,Product Page,sku,제품 sku,
+69,SEDA,TV,Retail.com,Magalu,Product Page,screen_size,화면 크기,
+70,SEDA,TV,Retail.com,Magalu,Product Page,estimated_annual_electricity_use,연간 사용 전력 비용,
+71,SEDA,TV,Retail.com,Magalu,Product Page,model_year,제품 출시 연도,
+72,SEDA,TV,Retail.com,Magalu,Product Page,summarized_review_content,리뷰 요약,
+73,SEDA,TV,Retail.com,Magalu,Product Page,retailer_sku_name_similar,경쟁 제품명,"e.g., 'Quem viu este produto, também viu'(Customers who viewed this item also viewed) 제품군"
+74,SEDA,TV,Retail.com,Magalu,Product Page,star_rating,평균 별점,"e.g., 4.5 out of 5, 4.2"
+75,SEDA,TV,Retail.com,Magalu,Product Page,count_of_star_ratings,별점 평가수,
+76,SEDA,TV,Retail.com,Magalu,Product Page,count_of_reviews,리뷰수,
+77,SEDA,TV,Retail.com,Magalu,Product Page,detailed_review_content,상위 노출 리뷰 20개,
+78,SEDA,TV,Retail.com,Magalu,BSR Page,bsr_rank,TV 검색 후 인기도 관련 필터 기준 순위,"e.g., Main Page 內 'Mais Vendidos(Best Selling)' 기준 정렬"
+91,SEDA,TV,Retail.com,Casas Bahia,Main Page,retailer_sku_name,리테일러 표기 제품명,"리테일러에서 판매하는 제품명, e.g., Smart TV 50"" Samsung UHD 4K Crystal UHD U8600F UN50U8600FGXZD Tizen Crystal 4K Bixby e Alexa 3 HDMI"
+92,SEDA,TV,Retail.com,Casas Bahia,Main Page,original_sku_price,출시가격,"e.g., R$7,599"
+93,SEDA,TV,Retail.com,Casas Bahia,Main Page,savings,할인률,"e.g., Baixou 21%"
+94,SEDA,TV,Retail.com,Casas Bahia,Main Page,final_sku_price,최종 판매가격,"e.g., R$5,999"
+95,SEDA,TV,Retail.com,Casas Bahia,Main Page,discount_type,할인 적용 조건,"[수집 후 번역 필요] e.g., Desconto pagando com carnê digital, 15% De DESCONTO, Desconto no carnê"
+96,SEDA,TV,Retail.com,Casas Bahia,Main Page,sku_status,제품 상태,"e.g., 리테일러 광고상품(Patrocinado(Sponsored))"
+97,SEDA,TV,Retail.com,Casas Bahia,Product Page,pick_up_availability,픽업 정보,"[수집 후 번역 필요] e.g., 'Retire em loja', 'Retira Rápido' (Pick up in store, Fast Pick up)"
+98,SEDA,TV,Retail.com,Casas Bahia,Product Page,delivery_availability,배송 정보,"[수집 후 번역 필요] 배송가능여부/배송 비용/배송 일정, e.g., 'Receba em casa' (Receive at home)"
+99,SEDA,TV,Retail.com,Casas Bahia,Product Page,screen_size,화면 크기,
+100,SEDA,TV,Retail.com,Casas Bahia,Product Page,estimated_annual_electricity_use,연간 사용 전력 비용,
+101,SEDA,TV,Retail.com,Casas Bahia,Product Page,retailer_sku_name_similar,경쟁 제품명,"e.g., 'Similares ao que você está vendo' (유사상품) 제품군"
+102,SEDA,TV,Retail.com,Casas Bahia,Product Page,star_rating,평균 별점,"e.g., 4.5 out of 5, 4.2"
+103,SEDA,TV,Retail.com,Casas Bahia,Product Page,count_of_star_ratings,별점 평가수,
+104,SEDA,TV,Retail.com,Casas Bahia,Product Page,count_of_reviews,리뷰수,
+105,SEDA,TV,Retail.com,Casas Bahia,Product Page,recommendation_intent,추천 의향,"e.g., 'n% dos clientes recomendam esse produto' (n% Recommend this product)"
+106,SEDA,TV,Retail.com,Casas Bahia,Product Page,summarized_review_content,리뷰 요약,
+107,SEDA,TV,Retail.com,Casas Bahia,Product Page,detailed_review_content,상위 노출 리뷰 20개,
+108,SEDA,TV,Retail.com,Casas Bahia,BSR Page,bsr_rank,TV 검색 후 인기도 관련 필터 기준 순위,"e.g., Main Page 內 'Mais Vendidos(Best Selling)' 기준 정렬"

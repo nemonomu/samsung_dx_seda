@@ -1,0 +1,298 @@
+import csv
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
+from .parsers import format_brl, model_number_from_text
+from .step00_config import read_csv, run_root, write_csv
+
+
+DELIMITER = " ||| "
+
+FINAL_OUTPUT_COLUMNS = [
+    "country",
+    "product",
+    "item",
+    "account_name",
+    "page_type",
+    "retailer_sku_name",
+    "product_url",
+    "original_sku_price",
+    "final_sku_price",
+    "savings",
+    "sku_status",
+    "discount_type",
+    "delivery_availability",
+    "pick_up_availability",
+    "sku",
+    "screen_size",
+    "estimated_annual_electricity_use",
+    "model_year",
+    "summarized_review_content",
+    "retailer_sku_name_similar",
+    "star_rating",
+    "count_of_star_ratings",
+    "count_of_reviews",
+    "recommendation_intent",
+    "detailed_review_content",
+    "bsr_rank",
+    "main_rank",
+    "calendar_week",
+    "crawl_strdatetime",
+    "batch_id",
+]
+
+
+def main():
+    root = run_root()
+    source = _source_path(root)
+    rows = read_csv(source)
+    now = _run_datetime()
+    output_rows = [_format_row(row, now) for row in rows]
+    output = Path(os.getenv("SEDA_FINAL_OUTPUT_CSV", str(root / "output" / "final_output.csv")))
+    write_csv(output, output_rows, columns=FINAL_OUTPUT_COLUMNS)
+    _write_manifest(root, source, output, output_rows, now)
+    print(f"[seda] wrote {output} rows={len(output_rows)}")
+
+
+def _source_path(root):
+    override = os.getenv("SEDA_FINAL_SOURCE_CSV", "").strip()
+    if override:
+        return Path(override)
+    enriched = root / "output" / "final_output_enriched.csv"
+    if enriched.exists():
+        return enriched
+    current_final = root / "output" / "final_output.csv"
+    if current_final.exists() and _has_internal_columns(current_final):
+        return current_final
+    return root / "output" / "seda_final_targets.csv"
+
+
+def _has_internal_columns(path):
+    try:
+        with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+            fieldnames = csv.DictReader(f).fieldnames or []
+    except OSError:
+        return False
+    return "product_line" in fieldnames or "retailer" in fieldnames
+
+
+def _run_datetime():
+    raw = os.getenv("SEDA_CRAWL_STRDATETIME", "").strip()
+    if raw:
+        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    return datetime.now().replace(microsecond=0)
+
+
+def _format_row(row, now):
+    item = _item_from_url(row.get("product_url", ""))
+    sku = _sku_for_output(row, item)
+    return {
+        "country": "SEDA",
+        "product": "TV",
+        "item": row.get("item") or item or sku,
+        "account_name": row.get("retailer") or row.get("account_name", ""),
+        "page_type": _page_type(row),
+        "retailer_sku_name": row.get("retailer_sku_name", ""),
+        "product_url": row.get("product_url", ""),
+        "original_sku_price": _price_for_output(row.get("original_sku_price", "")),
+        "final_sku_price": _price_for_output(row.get("final_sku_price", "")),
+        "savings": _savings_for_output(row),
+        "sku_status": row.get("sku_status", ""),
+        "discount_type": _discount_type_for_output(row.get("discount_type", "")),
+        "delivery_availability": row.get("delivery_availability", ""),
+        "pick_up_availability": row.get("pick_up_availability", ""),
+        "sku": sku,
+        "screen_size": row.get("screen_size", ""),
+        "estimated_annual_electricity_use": row.get("estimated_annual_electricity_use", ""),
+        "model_year": row.get("model_year", ""),
+        "summarized_review_content": _join_values(row.get("summarized_review_content", "")),
+        "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
+        "star_rating": row.get("star_rating", ""),
+        "count_of_star_ratings": row.get("count_of_star_ratings", ""),
+        "count_of_reviews": row.get("count_of_reviews", ""),
+        "recommendation_intent": row.get("recommendation_intent", ""),
+        "detailed_review_content": _join_reviews(row.get("detailed_review_content", "")),
+        "bsr_rank": row.get("bsr_rank", ""),
+        "main_rank": row.get("main_rank", ""),
+        "calendar_week": f"w{now.isocalendar().week}",
+        "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "batch_id": f"c_{now.strftime('%Y%m%d_%H%M%S')}",
+    }
+
+
+def _sku_for_output(row, item):
+    sku = str(row.get("sku") or "").strip()
+    if sku and item and sku == item:
+        return model_number_from_text(row.get("retailer_sku_name", ""))
+    return sku
+
+
+def _price_for_output(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"R\$\d{1,3}(?:\.\d{3})*,\d{2}", text):
+        return text
+    if re.fullmatch(r"\d+(?:\.\d{1,2})?", text):
+        return format_brl(text)
+    return text
+
+
+def _savings_for_output(row):
+    text = str(row.get("savings") or "").strip()
+    if not text:
+        return ""
+    baixou = re.search(r"baixou\s+(\d+(?:[.,]\d+)?)%", text, re.I)
+    if baixou:
+        return f"Baixou {baixou.group(1).replace(',', '.')}%"
+    percent = re.fullmatch(r"(\d+(?:[.,]\d+)?)%", text)
+    if percent and _is_casas_bahia_row(row):
+        return f"Baixou {percent.group(1).replace(',', '.')}%"
+    return text
+
+
+def _discount_type_for_output(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+(?:[.,]\d+)?%\s*(?:OFF|discount)", text, re.I):
+        return ""
+    return text
+
+
+def _is_casas_bahia_row(row):
+    retailer = str(row.get("retailer") or row.get("account_name") or "").lower()
+    url = str(row.get("product_url") or "").lower()
+    return "casas" in retailer or "casasbahia.com.br" in url
+
+
+def _page_type(row):
+    if row.get("main_rank"):
+        return "main"
+    if row.get("bsr_rank"):
+        return "bsr"
+    return row.get("page_type", "")
+
+
+def _join_reviews(value):
+    values = _as_review_list(value)
+    if not values:
+        return ""
+    if len(values) == 1 and str(values[0]).strip().lower().startswith("review1 -"):
+        return str(values[0]).strip()
+    return DELIMITER.join(f"review{index} - {text}" for index, text in enumerate(values, start=1))
+
+
+def _join_values(value, filter_noise=False):
+    values = _as_list(value)
+    if filter_noise:
+        values = [value for value in values if not _value_noise(value)]
+    return DELIMITER.join(values)
+
+
+def _value_noise(value):
+    normalized = str(value or "").strip().lower()
+    noise_markers = (
+        "boas vindas",
+        "entre ou cadastre",
+        "cadastre-se",
+        "digite seu cep",
+        "atendimento",
+    )
+    return any(marker in normalized for marker in noise_markers)
+
+
+def _as_list(value):
+    if value in (None, ""):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    if DELIMITER in text:
+        return [part.strip() for part in text.split(DELIMITER) if part.strip()]
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return [text]
+    if isinstance(parsed, list):
+        return [_stringify(item) for item in parsed if _stringify(item)]
+    if isinstance(parsed, dict):
+        return [_stringify(parsed)]
+    return [_stringify(parsed)]
+
+
+def _as_review_list(value):
+    if value in (None, ""):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    if DELIMITER in text:
+        return [part.strip() for part in text.split(DELIMITER)]
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return [text]
+    if isinstance(parsed, list):
+        return [_stringify_review(item) for item in parsed]
+    if isinstance(parsed, dict):
+        return [_stringify(parsed)]
+    return [_stringify_review(parsed)]
+
+
+def _stringify(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, dict):
+        for key in ("name", "title", "description", "text", "reviewBody", "summary"):
+            if value.get(key):
+                return str(value[key]).strip()
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value).strip()
+
+
+def _stringify_review(value):
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return _stringify(value)
+    return str(value).strip()
+
+
+def _item_from_url(url):
+    parts = [part for part in str(url or "").split("/") if part]
+    try:
+        index = parts.index("p")
+    except ValueError:
+        return ""
+    return parts[index + 1] if len(parts) > index + 1 else ""
+
+
+def _write_manifest(root, source, output, rows, now):
+    main_count = sum(1 for row in rows if row.get("main_rank"))
+    bsr_count = sum(1 for row in rows if row.get("bsr_rank"))
+    payload = {
+        "source": str(source),
+        "output": str(output),
+        "rows": len(rows),
+        "main_rank_rows": main_count,
+        "bsr_rank_rows": bsr_count,
+        "calendar_week": f"w{now.isocalendar().week}",
+        "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "batch_id": f"c_{now.strftime('%Y%m%d_%H%M%S')}",
+    }
+    manifest_override = os.getenv("SEDA_FINAL_MANIFEST_JSON", "").strip()
+    if manifest_override:
+        path = Path(manifest_override)
+    else:
+        output_path = Path(output)
+        path = output_path.with_name(f"{output_path.stem}.manifest.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
