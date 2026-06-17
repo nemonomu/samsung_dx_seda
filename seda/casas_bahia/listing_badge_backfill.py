@@ -114,6 +114,8 @@ def _sample_args(args, listing_url, raw_stem):
     raw_dir = Path(args.raw_dir)
     return SimpleNamespace(
         cdp_url=args.cdp_url,
+        cdp_start_timeout=args.cdp_start_timeout,
+        no_auto_start_cdp=args.no_auto_start_cdp,
         url=listing_url,
         output_json=str(raw_dir / f"{raw_stem}.json"),
         output_csv=str(raw_dir / f"{raw_stem}.csv"),
@@ -211,6 +213,8 @@ def _write_csv(path, rows, fieldnames):
 def main():
     parser = argparse.ArgumentParser(description="Backfill Casas Bahia rendered listing badge values through Chrome CDP.")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
+    parser.add_argument("--cdp-start-timeout", type=int, default=20)
+    parser.add_argument("--no-auto-start-cdp", action="store_true")
     parser.add_argument("--input", default=default_input())
     parser.add_argument("--output", default=default_output())
     parser.add_argument("--raw-dir", default=default_raw_dir())

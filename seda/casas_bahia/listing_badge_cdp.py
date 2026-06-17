@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from seda.common.chrome_cdp import ensure_chrome_cdp
+
 
 DEFAULT_URL = "https://www.casasbahia.com.br/tv/b"
 DEFAULT_OUTPUT_JSON = "seda/casas_bahia/test/output/listing_badge_cdp_probe.json"
@@ -18,6 +20,17 @@ async def run(args):
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
+        cdp_status = ensure_chrome_cdp(
+            args.cdp_url,
+            timeout_seconds=args.cdp_start_timeout,
+            auto_start=not args.no_auto_start_cdp,
+        )
+        if cdp_status.get("started"):
+            print(
+                "[casas_badge_cdp] "
+                f"started Chrome CDP url={args.cdp_url} user_data_dir={cdp_status.get('user_data_dir', '')}",
+                flush=True,
+            )
         browser = await p.chromium.connect_over_cdp(args.cdp_url)
         context = browser.contexts[0] if browser.contexts else await browser.new_context(locale="pt-BR")
         page = await context.new_page()
@@ -266,6 +279,8 @@ def _write_csv(path, rows):
 def main():
     parser = argparse.ArgumentParser(description="Sample rendered Casas Bahia listing product badges through Chrome CDP.")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
+    parser.add_argument("--cdp-start-timeout", type=int, default=20)
+    parser.add_argument("--no-auto-start-cdp", action="store_true")
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--output-json", default=DEFAULT_OUTPUT_JSON)
     parser.add_argument("--output-csv", default=DEFAULT_OUTPUT_CSV)

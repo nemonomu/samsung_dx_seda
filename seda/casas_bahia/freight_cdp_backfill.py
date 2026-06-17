@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from seda.common.chrome_cdp import ensure_chrome_cdp
 from seda.step00_config import run_root
 
 from .detail_api import _freight_detail
@@ -39,6 +40,17 @@ async def run(args):
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
+        cdp_status = ensure_chrome_cdp(
+            args.cdp_url,
+            timeout_seconds=args.cdp_start_timeout,
+            auto_start=not args.no_auto_start_cdp,
+        )
+        if cdp_status.get("started"):
+            print(
+                "[casas_freight_cdp] "
+                f"started Chrome CDP url={args.cdp_url} user_data_dir={cdp_status.get('user_data_dir', '')}",
+                flush=True,
+            )
         browser = await p.chromium.connect_over_cdp(args.cdp_url)
         context = browser.contexts[0] if browser.contexts else await browser.new_context(locale="pt-BR")
         page = await context.new_page()
@@ -257,6 +269,8 @@ def _write_csv(path, rows, fieldnames):
 def main():
     parser = argparse.ArgumentParser(description="Backfill Casas Bahia freight fields through an existing Chrome CDP session.")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
+    parser.add_argument("--cdp-start-timeout", type=int, default=20)
+    parser.add_argument("--no-auto-start-cdp", action="store_true")
     parser.add_argument("--warmup-url", default=DEFAULT_WARMUP_URL)
     parser.add_argument("--zipcode", default="01010-010")
     parser.add_argument("--input", default=default_input())
