@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,16 @@ def step_by_key(steps, value):
 def step_complete(step):
     root = run_root()
     project_root = Path(__file__).resolve().parents[2]
+    if step.name == "freight_cdp_backfill":
+        manifest = _read_json(root / "output" / "final_output_delivery_backfilled.manifest.json")
+        stats = manifest.get("stats") if isinstance(manifest, dict) else {}
+        if manifest.get("aborted"):
+            return False, manifest.get("aborted_reason", "delivery manifest aborted")
+        if int((stats or {}).get("updated") or 0) > 0:
+            return True, f"delivery updated rows={stats.get('updated')}"
+        if int((stats or {}).get("targets") or 0) == 0 and csv_count(root / "output" / "final_output_delivery_backfilled.csv") > 0:
+            return True, "no delivery targets"
+        return False, "delivery manifest missing or no updated rows"
     checks = {
         "erd_schema": (project_root / "seda" / "config" / "seda_erd_schema.json", "ERD schema"),
         "main_list": (root / "main" / "parsed" / "main_occurrences.csv", "main rows"),
@@ -72,7 +83,6 @@ def step_complete(step):
         "final_targets": (root / "output" / "seda_final_targets.csv", "final targets"),
         "detail_enrichment": (root / "output" / "final_output_enriched.csv", "enriched output"),
         "review20": (root / "detail" / "manifest_review20.json", "review manifest"),
-        "freight_cdp_backfill": (root / "output" / "final_output_delivery_backfilled.csv", "delivery backfilled output"),
         "listing_badge_backfill": (root / "output" / "final_output_badged.csv", "listing badge backfilled output"),
         "final_output": (root / "output" / "final_output.csv", "final output"),
         "field_audit": (root / "output" / "field_audit_v2.json", "field audit"),
@@ -85,6 +95,13 @@ def step_complete(step):
     if step.name in {"status_check", "s3_sync", "local_cleanup", "db_prepare", "db_load"}:
         return False, "always refresh when selected"
     return False, "no completion rule"
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def resume_steps(steps):
