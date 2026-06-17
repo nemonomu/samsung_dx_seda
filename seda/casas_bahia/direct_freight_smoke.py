@@ -96,6 +96,7 @@ def run(args):
 
 
 def main():
+    configure_retailer("casas_bahia")
     parser = argparse.ArgumentParser(description="Smoke test Casas Bahia direct freight REST API without Playwright.")
     parser.add_argument("--input", default=default_input())
     parser.add_argument("--output", default=default_output())
