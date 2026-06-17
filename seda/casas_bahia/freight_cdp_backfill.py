@@ -6,6 +6,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from seda.step00_config import run_root
+
 from .detail_api import _freight_detail
 
 
@@ -13,8 +15,12 @@ DEFAULT_WARMUP_URL = (
     "https://www.casasbahia.com.br/"
     "smart-tv-32-fhd-tcl-32s5k-qled-dolby-audio-google-tv/p/55070945?frete=01010-010"
 )
-DEFAULT_INPUT = "seda/casas_bahia/test/output/final_output_enriched.csv"
-DEFAULT_OUTPUT = "seda/casas_bahia/test/output/final_output_delivery_backfilled.csv"
+def default_input():
+    return str(run_root() / "output" / "final_output_enriched.csv")
+
+
+def default_output():
+    return str(run_root() / "output" / "final_output_delivery_backfilled.csv")
 
 
 async def run(args):
@@ -253,8 +259,8 @@ def main():
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--warmup-url", default=DEFAULT_WARMUP_URL)
     parser.add_argument("--zipcode", default="01010-010")
-    parser.add_argument("--input", default=DEFAULT_INPUT)
-    parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--input", default=default_input())
+    parser.add_argument("--output", default=default_output())
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--concurrency", type=int, default=6)

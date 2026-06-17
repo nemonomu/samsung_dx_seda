@@ -6,7 +6,7 @@ import unicodedata
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
-from .step00_config import DEFAULT_COUNTRY, DEFAULT_PRODUCT_LINE, normalized_product_url
+from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
 
 
 try:
@@ -303,7 +303,7 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
     return {
         "retailer": "Magalu",
         "country": DEFAULT_COUNTRY,
-        "product_line": DEFAULT_PRODUCT_LINE,
+        "product_line": product_line(),
         "category": "Retail.com",
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",
@@ -402,7 +402,7 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
     return {
         "retailer": "Casas Bahia",
         "country": DEFAULT_COUNTRY,
-        "product_line": DEFAULT_PRODUCT_LINE,
+        "product_line": product_line(),
         "category": "Retail.com",
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",
@@ -456,7 +456,7 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
     return {
         "retailer": "Casas Bahia",
         "country": DEFAULT_COUNTRY,
-        "product_line": DEFAULT_PRODUCT_LINE,
+        "product_line": product_line(),
         "category": "Retail.com",
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",
@@ -818,7 +818,7 @@ def _listing_row(retailer, text, url, source_url, run_id, rank):
     return {
         "retailer": retailer,
         "country": DEFAULT_COUNTRY,
-        "product_line": DEFAULT_PRODUCT_LINE,
+        "product_line": product_line(),
         "category": "Retail.com",
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",

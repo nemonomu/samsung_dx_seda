@@ -1,9 +1,10 @@
 import argparse
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from seda.common.retailer_runner import configure_retailer, run_module, step_env
-from seda.step00_config import csv_count, read_json, run_root
+from seda.step00_config import csv_count, dated_run_root, product_line, read_json, run_root
 
 
 @dataclass(frozen=True)
@@ -19,7 +20,7 @@ class Step:
 
 
 def steps_for(package_name):
-    return [
+    steps = [
         Step(0, "erd_schema", f"{package_name}.step00_erd_schema"),
         Step(1, "main_list", f"{package_name}.step01_main_list"),
         Step(2, "main_targets", f"{package_name}.step02_main_targets"),
@@ -30,12 +31,28 @@ def steps_for(package_name):
         Step(7, "final_targets", f"{package_name}.step07_final_targets"),
         Step(8, "detail_enrichment", f"{package_name}.step08_detail_enrichment"),
         Step(9, "review20", f"{package_name}.step09_review20"),
-        Step(10, "status_check", f"{package_name}.step10_status_check"),
-        Step(11, "s3_sync", f"{package_name}.step11_s3_sync"),
-        Step(12, "local_cleanup", f"{package_name}.step12_local_cleanup"),
-        Step(13, "db_prepare", f"{package_name}.step13_db_prepare"),
-        Step(14, "db_load", f"{package_name}.step14_db_load"),
     ]
+    next_number = 10
+    if package_name.endswith(".casas_bahia"):
+        steps.extend(
+            [
+                Step(next_number, "freight_cdp_backfill", "seda.casas_bahia.freight_cdp_backfill"),
+                Step(next_number + 1, "listing_badge_backfill", "seda.casas_bahia.listing_badge_backfill"),
+            ]
+        )
+        next_number += 2
+    steps.extend(
+        [
+            Step(next_number, "final_output", f"{package_name}.step15_final_output"),
+            Step(next_number + 1, "field_audit", f"{package_name}.step16_field_audit"),
+            Step(next_number + 2, "s3_sync", f"{package_name}.step11_s3_sync"),
+            Step(next_number + 3, "db_prepare", f"{package_name}.step13_db_prepare"),
+            Step(next_number + 4, "db_load", f"{package_name}.step14_db_load"),
+            Step(next_number + 5, "status_check", f"{package_name}.step10_status_check"),
+            Step(next_number + 6, "local_cleanup", f"{package_name}.step12_local_cleanup"),
+        ]
+    )
+    return steps
 
 
 def step_by_key(steps, value):
@@ -55,8 +72,12 @@ def step_complete(step):
         "bsr_list": (root / "bsr" / "parsed" / "main_occurrences.csv", "bsr rows"),
         "bsr_rank": (root / "bsr" / "parsed" / "bsr_rank_map.csv", "bsr rank map"),
         "final_targets": (root / "output" / "seda_final_targets.csv", "final targets"),
-        "detail_enrichment": (root / "output" / "final_output.csv", "final output"),
+        "detail_enrichment": (root / "output" / "final_output_enriched.csv", "enriched output"),
         "review20": (root / "detail" / "manifest_review20.json", "review manifest"),
+        "freight_cdp_backfill": (root / "output" / "final_output_delivery_backfilled.csv", "delivery backfilled output"),
+        "listing_badge_backfill": (root / "output" / "final_output_badged.csv", "listing badge backfilled output"),
+        "final_output": (root / "output" / "final_output.csv", "final output"),
+        "field_audit": (root / "output" / "field_audit_v2.json", "field audit"),
     }
     if step.name in checks:
         path, label = checks[step.name]
@@ -91,7 +112,10 @@ def selected_steps(args, steps):
     if args.resume:
         return resume_steps(steps)
     if args.all:
-        return steps
+        selected = [step for step in steps if step.number != 0]
+        if args.include_setup:
+            return steps
+        return selected
     if args.from_step:
         start = step_by_key(steps, args.from_step).number
         return [step for step in steps if step.number >= start]
@@ -101,15 +125,25 @@ def selected_steps(args, steps):
 
 
 def run_retailer_orchestrator(retailer_key, package_name, description):
+    explicit_run_root = bool(str(os.environ.get("SEDA_RUN_ROOT", "")).strip())
     configure_retailer(retailer_key)
     steps = steps_for(package_name)
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("steps", nargs="*", help="Step numbers or names to run. Omit to list steps.")
     parser.add_argument("--from-step", dest="from_step", help="Run from this step through the last step.")
     parser.add_argument("--all", action="store_true", help="Run all steps.")
+    parser.add_argument("--include-setup", action="store_true", help="Include setup step 00 when --all is selected.")
     parser.add_argument("--resume", action="store_true", help="Run incomplete steps and always refresh operational steps.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
+    parser.add_argument(
+        "--product-line",
+        default=product_line(),
+        help="Product line key, e.g. TV, REF, LDY. Current Magalu implementation is TV-only.",
+    )
     args = parser.parse_args()
+    os.environ["SEDA_PRODUCT_LINE"] = str(args.product_line).strip().upper()
+    if not explicit_run_root:
+        os.environ["SEDA_RUN_ROOT"] = str(dated_run_root(retailer=retailer_key))
     chosen = selected_steps(args, steps)
     if not chosen:
         print(f"{retailer_key} pipeline steps:")

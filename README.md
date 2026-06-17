@@ -13,11 +13,53 @@ Targets from `erd.xlsx`:
 The pipeline prefers structured page data when available, then rendered HTML through
 ZenRows or UC when the site blocks plain requests.
 
-## Run
+## Full Run
 
 ```powershell
-python -m seda.seda_orchestrator --all
+python -m seda.magalu.magalu_orchestrator --all --product-line TV
+python -m seda.casas_bahia.casas_bahia_orchestrator --all --product-line TV
 ```
+
+`--all` is the operational full run. It includes collection, final CSV creation,
+field audit, optional S3 sync, DB table preparation/load, status check, email
+notification, and optional local cleanup.
+
+Operational `--all` starts from step 01. Run step 00 only when regenerating ERD
+config:
+
+```powershell
+python -m seda.magalu.magalu_orchestrator --all --include-setup --product-line TV
+python -m seda.magalu.magalu_orchestrator 00 --product-line TV
+```
+
+For Magalu TV production runs, set the runtime context in `.env`:
+
+```text
+SEDA_RETAILERS=magalu
+SEDA_ACTIVE_RETAILER=magalu
+SEDA_PRODUCT_LINE=TV
+SEDA_EMAIL_NOTIFY=1
+SEDA_EMAIL_DRY_RUN=0
+```
+
+You can also pass the product line explicitly:
+
+```powershell
+python -m seda.magalu.magalu_orchestrator --product-line TV --all
+```
+
+DB insert is controlled by `DB_CONFIG` and `SEDA_DB_FINAL_TABLE` or
+`SEDA_OUTPUT_TABLE`. Product-line-specific table overrides are also supported:
+
+```text
+SEDA_DB_FINAL_TABLE_TV=tv_retail_com_seda
+SEDA_DB_FINAL_TABLE_REF=ref_retail_com_seda
+SEDA_DB_FINAL_TABLE_LDY=ldy_retail_com_seda
+```
+
+Email notification is sent by `step10_status_check` after DB load. A full run is
+successful only when the final CSV has rows, DB inserted row count equals final
+CSV row count, and email status is `sent`.
 
 Useful test run:
 
@@ -54,23 +96,64 @@ python -m seda.seda_orchestrator --resume
 07 final_targets
 08 detail_enrichment
 09 review20
-10 status_check
-11 s3_sync
-12 local_cleanup
+10 final_output
+11 field_audit
+12 s3_sync
 13 db_prepare
 14 db_load
+15 status_check
+16 local_cleanup
+```
+
+Casas Bahia adds two retailer-specific steps between `review20` and
+`final_output`:
+
+```text
+10 freight_cdp_backfill
+11 listing_badge_backfill
+12 final_output
+13 field_audit
+14 s3_sync
+15 db_prepare
+16 db_load
+17 status_check
+18 local_cleanup
 ```
 
 ## Environment
 
-Place `.env` in the `seda` folder:
+Place `.env` in the project root or the `seda` folder:
 
 ```text
+C:\samsung_dx_seda\.env
 seda/.env
 ```
 
-The loader reads `seda/.env` first and then project-root `.env`. The `.env` file is
-ignored by `.gitignore`; do not commit it.
+The loader reads `seda/.env` first and then project-root `.env`. The `.env` file
+is ignored by `.gitignore`; do not commit it.
+
+`erd.xlsx` is also ignored by git. For a clean RDP setup, place it at:
+
+```text
+C:\samsung_dx_seda\erd.xlsx
+```
+
+Set `SEDA_ERD_PATH` only if the ERD is stored elsewhere.
+
+## Product Scope
+
+The current Magalu implementation targets TV. Runtime folders are separated by
+retailer, product line, and run date:
+
+```text
+seda/data/magalu/tv/YYYYMMDD
+seda/data/magalu/ref/YYYYMMDD
+seda/data/magalu/ldy/YYYYMMDD
+```
+
+Future SEDA product modules such as REF and LDY should add their own URL,
+parser-filter, and field rules while reusing the same orchestrator and DB/mail
+steps.
 
 ## HAR Capture
 

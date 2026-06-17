@@ -9,12 +9,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
+from seda.step00_config import run_root
+
 from .listing_badge_cdp import run as run_badge_sampler
 
 
-DEFAULT_INPUT = "seda/casas_bahia/test/output/final_output_delivery_backfilled_energy.csv"
-DEFAULT_OUTPUT = "seda/casas_bahia/test/output/final_output_delivery_backfilled_energy_badged.csv"
-DEFAULT_RAW_DIR = "seda/casas_bahia/test/output/listing_badge_cdp_pages"
+def default_input():
+    return str(run_root() / "output" / "final_output_delivery_backfilled.csv")
+
+
+def default_output():
+    return str(run_root() / "output" / "final_output_badged.csv")
+
+
+def default_raw_dir():
+    return str(run_root() / "output" / "listing_badge_cdp_pages")
 
 
 async def run(args):
@@ -202,9 +211,9 @@ def _write_csv(path, rows, fieldnames):
 def main():
     parser = argparse.ArgumentParser(description="Backfill Casas Bahia rendered listing badge values through Chrome CDP.")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
-    parser.add_argument("--input", default=DEFAULT_INPUT)
-    parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--raw-dir", default=DEFAULT_RAW_DIR)
+    parser.add_argument("--input", default=default_input())
+    parser.add_argument("--output", default=default_output())
+    parser.add_argument("--raw-dir", default=default_raw_dir())
     parser.add_argument("--listing-url", action="append", default=[])
     parser.add_argument("--limit-urls", type=int, default=0)
     parser.add_argument("--samples", type=int, default=3)

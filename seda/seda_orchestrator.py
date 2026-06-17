@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .step00_config import csv_count, read_json, run_root
+from .step00_config import csv_count, product_line, read_json, run_root
 
 
 PYTHON = sys.executable
@@ -34,11 +34,13 @@ STEPS = [
     Step(7, "final_targets", "seda.step07_final_targets"),
     Step(8, "detail_enrichment", "seda.step08_detail_enrichment"),
     Step(9, "review20", "seda.step09_review20"),
-    Step(10, "status_check", "seda.step10_status_check"),
-    Step(11, "s3_sync", "seda.step11_s3_sync"),
-    Step(12, "local_cleanup", "seda.step12_local_cleanup"),
+    Step(10, "final_output", "seda.step15_final_output"),
+    Step(11, "field_audit", "seda.step16_field_audit"),
+    Step(12, "s3_sync", "seda.step11_s3_sync"),
     Step(13, "db_prepare", "seda.step13_db_prepare"),
     Step(14, "db_load", "seda.step14_db_load"),
+    Step(15, "status_check", "seda.step10_status_check"),
+    Step(16, "local_cleanup", "seda.step12_local_cleanup"),
 ]
 
 
@@ -53,7 +55,9 @@ def selected_steps(args):
     if args.resume:
         return resume_steps()
     if args.all:
-        return STEPS
+        if args.include_setup:
+            return STEPS
+        return [step for step in STEPS if step.number != 0]
     if args.from_step:
         start = step_by_key(args.from_step).number
         return [step for step in STEPS if step.number >= start]
@@ -72,8 +76,10 @@ def step_complete(step):
         "bsr_list": (root / "bsr" / "parsed" / "main_occurrences.csv", "bsr rows"),
         "bsr_rank": (root / "bsr" / "parsed" / "bsr_rank_map.csv", "bsr rank map"),
         "final_targets": (root / "output" / "seda_final_targets.csv", "final targets"),
-        "detail_enrichment": (root / "output" / "final_output.csv", "final output"),
+        "detail_enrichment": (root / "output" / "final_output_enriched.csv", "enriched output"),
         "review20": (root / "detail" / "manifest_review20.json", "review manifest"),
+        "final_output": (root / "output" / "final_output.csv", "final output"),
+        "field_audit": (root / "output" / "field_audit_v2.json", "field audit"),
     }
     if step.name in checks:
         path, label = checks[step.name]
@@ -126,9 +132,12 @@ def main():
     parser.add_argument("steps", nargs="*", help="Step numbers or names to run. Omit to list steps.")
     parser.add_argument("--from-step", dest="from_step", help="Run from this step through the last step.")
     parser.add_argument("--all", action="store_true", help="Run all steps.")
+    parser.add_argument("--include-setup", action="store_true", help="Include setup step 00 when --all is selected.")
     parser.add_argument("--resume", action="store_true", help="Run incomplete steps and always refresh operational steps.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
+    parser.add_argument("--product-line", default=product_line(), help="Product line key, e.g. TV, REF, LDY.")
     args = parser.parse_args()
+    os.environ["SEDA_PRODUCT_LINE"] = str(args.product_line).strip().upper()
     steps = selected_steps(args)
     if not steps:
         print_steps()

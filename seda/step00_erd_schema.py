@@ -2,7 +2,7 @@ import csv
 import os
 from pathlib import Path
 
-from .step00_config import OUTPUT_COLUMNS, PROJECT_ROOT, write_json
+from .step00_config import OUTPUT_COLUMNS, PROJECT_ROOT, product_line, write_json
 
 
 def _rows_from_erd(path):
@@ -16,7 +16,7 @@ def _rows_from_erd(path):
     rows = []
     for row in sheet.iter_rows(min_row=9, values_only=True):
         values = list(row)
-        if len(values) < 10 or values[2] != "SEDA" or values[3] != "TV":
+        if len(values) < 10 or values[2] != "SEDA" or str(values[3]).strip().upper() != product_line():
             continue
         rows.append(
             {

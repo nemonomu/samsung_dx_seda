@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .parsers import format_brl, model_number_from_text
-from .step00_config import read_csv, run_root, write_csv
+from .step00_config import product_line, read_csv, run_root, write_csv
 
 
 DELIMITER = " ||| "
@@ -61,6 +61,12 @@ def _source_path(root):
     override = os.getenv("SEDA_FINAL_SOURCE_CSV", "").strip()
     if override:
         return Path(override)
+    badged = root / "output" / "final_output_badged.csv"
+    if badged.exists():
+        return badged
+    delivery_backfilled = root / "output" / "final_output_delivery_backfilled.csv"
+    if delivery_backfilled.exists():
+        return delivery_backfilled
     enriched = root / "output" / "final_output_enriched.csv"
     if enriched.exists():
         return enriched
@@ -91,7 +97,7 @@ def _format_row(row, now):
     sku = _sku_for_output(row, item)
     return {
         "country": "SEDA",
-        "product": "TV",
+        "product": product_line(),
         "item": row.get("item") or item or sku,
         "account_name": row.get("retailer") or row.get("account_name", ""),
         "page_type": _page_type(row),

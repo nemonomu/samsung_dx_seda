@@ -16,6 +16,11 @@ DEFAULT_PRODUCT_LINE = "TV"
 DEFAULT_COUNTRY = "SEDA"
 DEFAULT_POSTAL_CODE = "01001-001"
 DEFAULT_OUTPUT_TABLE = "tv_retail_com_seda"
+OUTPUT_TABLES_BY_PRODUCT_LINE = {
+    "TV": "tv_retail_com_seda",
+    "REF": "ref_retail_com_seda",
+    "LDY": "ldy_retail_com_seda",
+}
 
 
 def env_candidate_paths(path=None):
@@ -132,12 +137,40 @@ def run_date():
     return os.getenv("SEDA_RUN_DATE", datetime.now().strftime("%Y%m%d"))
 
 
+def product_line():
+    return os.getenv("SEDA_PRODUCT_LINE", DEFAULT_PRODUCT_LINE).strip().upper() or DEFAULT_PRODUCT_LINE
+
+
+def dated_run_root(retailer=None, run_date_value=None, product_line_value=None):
+    parts = [DEFAULT_RUNS_BASE]
+    if retailer:
+        parts.append(str(retailer).strip().lower())
+    parts.append((product_line_value or product_line()).strip().lower())
+    parts.append(run_date_value or run_date())
+    root = parts[0]
+    for part in parts[1:]:
+        root = root / part
+    return root
+
+
 def run_root(run_date_value=None):
-    return Path(os.getenv("SEDA_RUN_ROOT", DEFAULT_RUNS_BASE / (run_date_value or run_date())))
+    return Path(os.getenv("SEDA_RUN_ROOT", dated_run_root(run_date_value=run_date_value)))
 
 
 def output_table():
-    return os.getenv("SEDA_DB_FINAL_TABLE", os.getenv("SEDA_OUTPUT_TABLE", DEFAULT_OUTPUT_TABLE)).strip()
+    line = product_line()
+    specific = (
+        os.getenv(f"SEDA_DB_FINAL_TABLE_{line}")
+        or os.getenv(f"SEDA_OUTPUT_TABLE_{line}")
+    )
+    if specific:
+        return specific.strip()
+    generic = os.getenv("SEDA_DB_FINAL_TABLE") or os.getenv("SEDA_OUTPUT_TABLE")
+    if line == "TV" and generic:
+        return generic.strip()
+    if generic and os.getenv("SEDA_ALLOW_GENERIC_OUTPUT_TABLE_FOR_ALL", "0").lower() in {"1", "true", "yes", "y"}:
+        return generic.strip()
+    return OUTPUT_TABLES_BY_PRODUCT_LINE.get(line, f"{line.lower()}_retail_com_seda").strip()
 
 
 def selected_retailers():
@@ -276,14 +309,17 @@ def db_connect():
     database = config.get("database") or config.get("dbname")
     if not database:
         raise RuntimeError("DB_CONFIG database/dbname is required for PostgreSQL")
-    return psycopg2.connect(
-        host=config.get("host"),
-        port=int(config.get("port") or 5432),
-        dbname=database,
-        user=config.get("user"),
-        password=config.get("password"),
-        connect_timeout=int(os.getenv("SEDA_DB_CONNECT_TIMEOUT", "10")),
-    )
+    kwargs = {
+        "host": config.get("host"),
+        "port": int(config.get("port") or 5432),
+        "dbname": database,
+        "user": config.get("user"),
+        "password": config.get("password"),
+        "connect_timeout": int(os.getenv("SEDA_DB_CONNECT_TIMEOUT", "10")),
+    }
+    if config.get("options"):
+        kwargs["options"] = config.get("options")
+    return psycopg2.connect(**kwargs)
 
 
 def safe_status_message(message):

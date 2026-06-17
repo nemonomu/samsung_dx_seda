@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from seda.step00_config import DEFAULT_COUNTRY, DEFAULT_PRODUCT_LINE, OUTPUT_COLUMNS
+from seda.step00_config import DEFAULT_COUNTRY, OUTPUT_COLUMNS, product_line
 
 
 IMAGE_HOSTS = {"a-static.mlcdn.com.br", "i.mlcdn.com.br", "assets.mlcdn.com.br"}
@@ -52,7 +52,7 @@ def extract_from_har(path):
             {
                 "retailer": "Magalu",
                 "country": DEFAULT_COUNTRY,
-                "product_line": DEFAULT_PRODUCT_LINE,
+                "product_line": product_line(),
                 "category": "Retail.com",
                 "main_rank": len(rows) + 1,
                 "product_url": product_url(slug, seller, product_id),

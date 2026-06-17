@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from seda.step00_config import DEFAULT_RUNS_BASE, run_date
+from seda.step00_config import dated_run_root, product_line
 
 
 PYTHON = sys.executable
@@ -13,9 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def configure_retailer(retailer_key):
     os.environ["SEDA_RETAILERS"] = retailer_key
     os.environ.setdefault("SEDA_ACTIVE_RETAILER", retailer_key)
+    os.environ.setdefault("SEDA_PRODUCT_LINE", product_line())
     default_fetch_mode = "magalu_browser_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
     os.environ.setdefault("SEDA_FETCH_MODE", default_fetch_mode)
-    os.environ.setdefault("SEDA_RUN_ROOT", str(DEFAULT_RUNS_BASE / retailer_key / run_date()))
+    os.environ.setdefault("SEDA_RUN_ROOT", str(dated_run_root(retailer=retailer_key)))
 
 
 def run_common_step(retailer_key, module_name):
@@ -40,8 +41,9 @@ def step_env(retailer_key, extra=None):
     env = {
         "SEDA_RETAILERS": retailer_key,
         "SEDA_ACTIVE_RETAILER": retailer_key,
+        "SEDA_PRODUCT_LINE": product_line(),
         "SEDA_FETCH_MODE": default_fetch_mode,
-        "SEDA_RUN_ROOT": str(DEFAULT_RUNS_BASE / retailer_key / run_date()),
+        "SEDA_RUN_ROOT": str(dated_run_root(retailer=retailer_key)),
     }
     if extra:
         env.update(extra)
