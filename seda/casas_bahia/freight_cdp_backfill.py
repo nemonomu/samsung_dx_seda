@@ -32,6 +32,7 @@ async def run(args):
 
     stats = Counter(rows=len(rows), targets=len(targets))
     errors = []
+    aborted_reason = ""
 
     if not targets:
         _write_csv(Path(args.output), rows, fieldnames)
@@ -62,6 +63,7 @@ async def run(args):
             for offset in range(0, len(targets), args.batch_size):
                 batch = targets[offset : offset + args.batch_size]
                 result = await _fetch_batch(page, batch, args)
+                status_counts = Counter(str(item.get("status", "unknown")) for item in result.get("items", []))
                 stats.update(
                     cdp_calls=1,
                     cdp_rows=len(batch),
@@ -73,8 +75,14 @@ async def run(args):
                 print(
                     "[casas_freight_cdp] "
                     f"{min(offset + len(batch), len(targets))}/{len(targets)} "
-                    f"updated={stats['updated']} failed={stats['failed']}"
+                    f"updated={stats['updated']} failed={stats['failed']} "
+                    f"statuses={_status_summary(status_counts)}"
                 )
+                if args.fail_fast_failures and stats["updated"] == 0 and stats["failed"] >= args.fail_fast_failures:
+                    aborted_reason = f"fail_fast_no_updates_after_{stats['failed']}_failures"
+                    errors.append({"error": aborted_reason, "status_counts": dict(status_counts)})
+                    print(f"[casas_freight_cdp] aborted {aborted_reason}", flush=True)
+                    break
         finally:
             await page.close()
             if args.close_browser:
@@ -86,10 +94,18 @@ async def run(args):
         "output": args.output,
         "stats": dict(stats),
         "errors": errors[:100],
+        "aborted": bool(aborted_reason),
+        "aborted_reason": aborted_reason,
     }
     manifest_path = Path(args.output).with_suffix(".manifest.json")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
+
+
+def _status_summary(status_counts):
+    if not status_counts:
+        return "-"
+    return ",".join(f"{status}:{count}" for status, count in sorted(status_counts.items()))
 
 
 async def _fetch_batch(page, batch, args):
@@ -201,6 +217,8 @@ def _merge_result(rows, item, stats, errors):
                 "seller_id": item.get("seller_id"),
                 "status": status,
                 "error": item.get("error", ""),
+                "content_type": item.get("content_type", ""),
+                "text_preview": str(item.get("text") or "")[:200],
             }
         )
         return
@@ -280,6 +298,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument("--fail-fast-failures", type=int, default=50)
     parser.add_argument("--timeout-ms", type=int, default=60000)
     parser.add_argument("--wait-ms", type=int, default=5000)
     parser.add_argument("--force", action="store_true")
@@ -287,6 +306,8 @@ def main():
     args = parser.parse_args()
     result = asyncio.run(run(args))
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=True))
+    if result.get("aborted"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
