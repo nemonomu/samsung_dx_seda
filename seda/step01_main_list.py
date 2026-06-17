@@ -23,7 +23,7 @@ def page_numbers(run_id=None):
 def _default_pages(is_bsr):
     retailer = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().lower()
     if retailer == "casas_bahia":
-        return "7" if is_bsr else "16"
+        return "7" if is_bsr else "20"
     return "3" if is_bsr else "9"
 
 
