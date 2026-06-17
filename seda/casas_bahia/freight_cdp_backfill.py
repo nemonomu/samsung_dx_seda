@@ -173,15 +173,60 @@ async def _fetch_batch(page, batch, args):
     }
     """
     zip_digits = re.sub(r"\D+", "", args.zipcode)
-    return await page.evaluate(
-        script,
-        {
-            "items": batch,
-            "zipDigits": zip_digits,
-            "zipcode": args.zipcode,
-            "concurrency": args.concurrency,
-        },
+    payload = {
+        "items": batch,
+        "zipDigits": zip_digits,
+        "zipcode": args.zipcode,
+        "concurrency": args.concurrency,
+    }
+    last_error = ""
+    for attempt in range(args.evaluate_retries + 1):
+        try:
+            return await page.evaluate(script, payload)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if not _retryable_evaluate_error(last_error) or attempt >= args.evaluate_retries:
+                break
+            print(
+                "[casas_freight_cdp] "
+                f"retry evaluate after navigation/context reset attempt={attempt + 1}/{args.evaluate_retries}",
+                flush=True,
+            )
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=args.timeout_ms)
+            except Exception:
+                pass
+            await page.wait_for_timeout(args.evaluate_retry_wait_ms)
+    return _failed_batch(batch, last_error)
+
+
+def _retryable_evaluate_error(message):
+    text = str(message or "").lower()
+    return (
+        "execution context was destroyed" in text
+        or "most likely because of a navigation" in text
+        or "frame was detached" in text
     )
+
+
+def _failed_batch(batch, error):
+    return {
+        "hasCvip": False,
+        "hasCvipCep": False,
+        "items": [
+            {
+                "row_index": item.get("row_index"),
+                "sku_id": item.get("sku_id"),
+                "seller_id": item.get("seller_id"),
+                "status": 0,
+                "ok": False,
+                "content_type": "",
+                "error": error,
+                "text": "",
+            }
+            for item in batch
+        ],
+    }
 
 
 def _targets(rows, args):
@@ -301,6 +346,8 @@ def main():
     parser.add_argument("--fail-fast-failures", type=int, default=50)
     parser.add_argument("--timeout-ms", type=int, default=60000)
     parser.add_argument("--wait-ms", type=int, default=5000)
+    parser.add_argument("--evaluate-retries", type=int, default=3)
+    parser.add_argument("--evaluate-retry-wait-ms", type=int, default=2000)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--close-browser", action="store_true")
     args = parser.parse_args()
