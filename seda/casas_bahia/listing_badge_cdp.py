@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from seda.common.chrome_cdp import ensure_chrome_cdp
+from seda.common.chrome_cdp import ensure_chrome_cdp, ensure_playwright_temp_dir
 
 
 DEFAULT_URL = "https://www.casasbahia.com.br/tv/b"
@@ -17,6 +17,8 @@ DEFAULT_OUTPUT_CSV = "seda/casas_bahia/test/output/listing_badge_cdp_probe.csv"
 
 
 async def run(args):
+    ensure_playwright_temp_dir()
+
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:

@@ -7,6 +7,31 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 
+def ensure_playwright_temp_dir():
+    override = os.getenv("SEDA_PLAYWRIGHT_TEMP_DIR", "").strip() or os.getenv("SEDA_TEMP_DIR", "").strip()
+    candidates = []
+    if override:
+        candidates.append(Path(override))
+    for key in ("TEMP", "TMP", "TMPDIR"):
+        value = os.getenv(key, "").strip()
+        if value:
+            candidates.append(Path(value))
+    candidates.append(Path(__file__).resolve().parents[1] / "data" / "_tmp" / "playwright")
+
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if candidate.exists():
+            value = str(candidate)
+            os.environ["TEMP"] = value
+            os.environ["TMP"] = value
+            os.environ["TMPDIR"] = value
+            return value
+    raise RuntimeError("Could not create a writable temp directory for Playwright.")
+
+
 def ensure_chrome_cdp(cdp_url, timeout_seconds=20, auto_start=True):
     if _is_cdp_ready(cdp_url):
         return {"ready": True, "started": False, "url": cdp_url}

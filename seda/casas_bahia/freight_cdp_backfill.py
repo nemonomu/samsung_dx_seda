@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from seda.common.chrome_cdp import ensure_chrome_cdp
+from seda.common.chrome_cdp import ensure_chrome_cdp, ensure_playwright_temp_dir
 from seda.step00_config import run_root
 
 from .detail_api import _freight_detail
@@ -36,6 +36,8 @@ async def run(args):
     if not targets:
         _write_csv(Path(args.output), rows, fieldnames)
         return {"stats": dict(stats), "errors": errors, "output": args.output}
+
+    ensure_playwright_temp_dir()
 
     from playwright.async_api import async_playwright
 
