@@ -6,10 +6,8 @@ def _key(row):
 
 
 def _rank_key(row):
-    return (
-        (row.get("retailer"), normalized_product_url(row.get("product_url", ""))),
-        (row.get("retailer"), row.get("sku")),
-    )
+    url = normalized_product_url(row.get("product_url", ""))
+    return (row.get("retailer"), url) if url else ("", "")
 
 
 def main():
@@ -21,9 +19,9 @@ def main():
     bsr_rank_keys = set()
     for row in bsr_rank_rows:
         bsr_rank_keys.add(_key(row))
-        for key in _rank_key(row):
-            if key[1]:
-                bsr_by_key.setdefault(key, row.get("bsr_rank", ""))
+        key = _rank_key(row)
+        if key[1]:
+            bsr_by_key.setdefault(key, row.get("bsr_rank", ""))
 
     final_rows = []
     seen = set()
@@ -31,12 +29,7 @@ def main():
         row_key = _key(row)
         if row_key in seen:
             continue
-        row["bsr_rank"] = row.get("bsr_rank") or bsr_by_key.get(
-            (row.get("retailer"), normalized_product_url(row.get("product_url", "")))
-        ) or bsr_by_key.get(
-            (row.get("retailer"), row.get("sku")),
-            "",
-        )
+        row["bsr_rank"] = row.get("bsr_rank") or bsr_by_key.get(_rank_key(row), "")
         seen.add(row_key)
         final_rows.append(row)
 
@@ -45,10 +38,7 @@ def main():
         if row_key in seen or row_key not in bsr_rank_keys:
             continue
         row["main_rank"] = ""
-        row["bsr_rank"] = bsr_by_key.get((row.get("retailer"), normalized_product_url(row.get("product_url", "")))) or bsr_by_key.get(
-            (row.get("retailer"), row.get("sku")),
-            row.get("bsr_rank", ""),
-        )
+        row["bsr_rank"] = bsr_by_key.get(_rank_key(row), row.get("bsr_rank", ""))
         seen.add(row_key)
         final_rows.append(row)
 
