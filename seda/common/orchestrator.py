@@ -149,7 +149,7 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
     parser.add_argument(
         "--product-line",
         default=product_line(),
-        help="Product line key, e.g. TV, REF, LDY. Current Magalu implementation is TV-only.",
+        help="Product line key, e.g. TV, REF, LDY.",
     )
     args = parser.parse_args()
     os.environ["SEDA_PRODUCT_LINE"] = str(args.product_line).strip().upper()

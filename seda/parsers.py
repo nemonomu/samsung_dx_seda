@@ -270,7 +270,7 @@ def _parse_magalu_next_listing(html_text, base_url, source_url, run_id):
     for product in products:
         if not isinstance(product, dict):
             continue
-        if not _magalu_is_tv_product(product):
+        if not _magalu_is_relevant_product(product):
             continue
         rows.append(_magalu_product_row(product, base_url, source_url, run_id, len(rows) + 1))
     return rows
@@ -289,6 +289,31 @@ MAGALU_STRONG_TV_TITLE_RE = re.compile(
     r"^\s*(?:smart\s+tv|tv|televisor)\b|\b(?:smart\s+tv|google\s+tv|roku\s+tv|qled|oled|nanocell|crystal\s+uhd)\b",
     re.I,
 )
+MAGALU_REF_EXCLUDE_RE = re.compile(
+    r"\b(?:filtro|refil|prateleira|gaveta|puxador|borracha|termostato|organizador|adesivo|capa)\b",
+    re.I,
+)
+MAGALU_REF_TITLE_RE = re.compile(
+    r"\b(?:geladeira|refrigerador(?:a)?|freezer|frigobar|side\s+by\s+side|frost\s+free|duplex)\b",
+    re.I,
+)
+MAGALU_LDY_EXCLUDE_RE = re.compile(
+    r"\b(?:tanquinho|centrifuga|centr[ií]fuga|lava\s+jato|pe[çc]a|mangueira|filtro|suporte|capa|kit)\b",
+    re.I,
+)
+MAGALU_LDY_TITLE_RE = re.compile(
+    r"\b(?:lavadora|lava\s+e\s+seca|secadora|m[aá]quina\s+de\s+lavar|maquina\s+de\s+lavar|washer)\b",
+    re.I,
+)
+
+
+def _magalu_is_relevant_product(product):
+    line = product_line()
+    if line == "REF":
+        return _magalu_is_ref_product(product)
+    if line == "LDY":
+        return _magalu_is_ldy_product(product)
+    return _magalu_is_tv_product(product)
 
 
 def _magalu_is_tv_product(product):
@@ -307,6 +332,24 @@ def _magalu_is_tv_product(product):
     if accessory_path and not strong_tv_title:
         return False
     return strong_tv_title
+
+
+def _magalu_is_ref_product(product):
+    title = clean_text(product.get("title") or product.get("name"))
+    path = clean_text(product.get("path"))
+    haystack = f"{title} {path}"
+    if MAGALU_REF_EXCLUDE_RE.search(haystack):
+        return False
+    return bool(MAGALU_REF_TITLE_RE.search(haystack))
+
+
+def _magalu_is_ldy_product(product):
+    title = clean_text(product.get("title") or product.get("name"))
+    path = clean_text(product.get("path"))
+    haystack = f"{title} {path}"
+    if MAGALU_LDY_EXCLUDE_RE.search(haystack):
+        return False
+    return bool(MAGALU_LDY_TITLE_RE.search(haystack))
 
 
 def _magalu_product_row(product, base_url, source_url, run_id, rank):
@@ -336,7 +379,7 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
         "retailer_sku_name": clean_text(product.get("title")),
         "original_sku_price": format_brl(price.get("fullPrice")),
         "final_sku_price": format_brl(price.get("bestPrice") or price.get("price")),
-        "savings": _magalu_savings(price),
+        "savings": "",
         "sku_status": magalu_sku_status(product),
         "discount_type": magalu_coupon_text(tags),
         "delivery_availability": clean_text(shipping.get("time")),
@@ -1300,11 +1343,12 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
 
     html_summary = _summary_review_content(html_text)
-    return {
+    line = product_line()
+    model = _magalu_factsheet_value(item, ["modelo"])
+    reference = _magalu_factsheet_value(item, ["referencia", "referência"])
+    detail = {
         "retailer": "Magalu",
-        "sku": _magalu_factsheet_value(item, ["modelo"])
-        or clean_text(item.get("offerId") or item.get("id"))
-        or sku_from_url(product_url),
+        "sku": _magalu_sku_for_product_line(line, reference, model, item, product_url),
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
@@ -1327,6 +1371,39 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "detailed_review_content": compact_json(_magalu_review_descriptions(product_rating, limit=20)),
         "parse_status": "detail_next_data",
     }
+    if line == "REF":
+        detail.update(
+            {
+                "ref_refrigerator_type": _magalu_factsheet_value(item, ["porta"]),
+                "ref_capacity": _magalu_factsheet_value(
+                    item,
+                    ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
+                ),
+            }
+        )
+    if line == "LDY":
+        detail.update(
+            {
+                "ldy_loading_type": _magalu_factsheet_value(
+                    item,
+                    [
+                        "tipo de abertura",
+                        "tipo de abertura eletrodomestico",
+                        "tipo de abertura eletrodoméstico",
+                        "tipo de abertura electrodomestico",
+                    ],
+                ),
+                "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"]),
+            }
+        )
+    return detail
+
+
+def _magalu_sku_for_product_line(line, reference, model, item, product_url):
+    fallback = clean_text(item.get("offerId") or item.get("id")) or sku_from_url(product_url)
+    if line in {"REF", "LDY"}:
+        return reference or model or fallback
+    return model or fallback
 
 
 def _magalu_first_offer(item):
@@ -1360,7 +1437,7 @@ def _iter_magalu_facts(facts):
     for fact in facts:
         if not isinstance(fact, dict):
             continue
-        if fact.get("keyName") and fact.get("elements"):
+        if fact.get("keyName") or fact.get("slug"):
             yield fact
         children = fact.get("elements")
         if isinstance(children, list):

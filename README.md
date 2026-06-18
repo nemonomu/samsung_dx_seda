@@ -142,8 +142,7 @@ Set `SEDA_ERD_PATH` only if the ERD is stored elsewhere.
 
 ## Product Scope
 
-The current Magalu implementation targets TV. Runtime folders are separated by
-retailer, product line, and run date:
+Runtime folders are separated by retailer, product line, and run date:
 
 ```text
 seda/data/magalu/tv/YYYYMMDD
@@ -151,9 +150,33 @@ seda/data/magalu/ref/YYYYMMDD
 seda/data/magalu/ldy/YYYYMMDD
 ```
 
-Future SEDA product modules such as REF and LDY should add their own URL,
-parser-filter, and field rules while reusing the same orchestrator and DB/mail
-steps.
+Magalu supports product-line-specific listing URLs. Defaults are:
+
+```text
+TV  main https://www.magazineluiza.com.br/busca/tv/
+TV  bsr  https://www.magazineluiza.com.br/busca/tv/?sortType=soldQuantity&sortOrientation=desc
+REF main https://www.magazineluiza.com.br/busca/geladeira/
+REF bsr  https://www.magazineluiza.com.br/busca/geladeira/?page=1&sortOrientation=desc&sortType=soldQuantity
+LDY main https://www.magazineluiza.com.br/busca/maquina+de+lavar/
+LDY bsr  https://www.magazineluiza.com.br/busca/maquina+de+lavar/?page=1&sortOrientation=desc&sortType=soldQuantity
+```
+
+Override them in `.env` only when needed:
+
+```text
+SEDA_MAGALU_MAIN_URL_REF=
+SEDA_MAGALU_BSR_URL_REF=
+SEDA_MAGALU_MAIN_URL_LDY=
+SEDA_MAGALU_BSR_URL_LDY=
+```
+
+Run by product line:
+
+```powershell
+python -m seda.magalu.magalu_orchestrator --product-line TV --all
+python -m seda.magalu.magalu_orchestrator --product-line REF --all
+python -m seda.magalu.magalu_orchestrator --product-line LDY --all
+```
 
 ## HAR Capture
 

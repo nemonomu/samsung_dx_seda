@@ -10,6 +10,7 @@ from ..parsers import (
     model_year_from_text,
     screen_size_from_text,
 )
+from ..step00_config import product_line
 
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
@@ -411,10 +412,12 @@ def _detail_from_item(item):
     offer = _first_offer(item)
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
     rating = item.get("rating") if isinstance(item.get("rating"), dict) else {}
+    line = product_line()
     model = _factsheet_value(item, ["modelo"])
-    return {
+    reference = _factsheet_value(item, ["referencia", "referência"])
+    detail = {
         "retailer": "Magalu",
-        "sku": model or clean_text(item.get("offerId") or item.get("id")),
+        "sku": _sku_for_product_line(line, reference, model, item),
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
@@ -425,6 +428,39 @@ def _detail_from_item(item):
         "count_of_star_ratings": clean_text(rating.get("count")),
         "parse_status": "detail_item_graphql",
     }
+    if line == "REF":
+        detail.update(
+            {
+                "ref_refrigerator_type": _factsheet_value(item, ["porta"]),
+                "ref_capacity": _factsheet_value(
+                    item,
+                    ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
+                ),
+            }
+        )
+    if line == "LDY":
+        detail.update(
+            {
+                "ldy_loading_type": _factsheet_value(
+                    item,
+                    [
+                        "tipo de abertura",
+                        "tipo de abertura eletrodomestico",
+                        "tipo de abertura eletrodoméstico",
+                        "tipo de abertura electrodomestico",
+                    ],
+                ),
+                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"]),
+            }
+        )
+    return detail
+
+
+def _sku_for_product_line(line, reference, model, item):
+    fallback = clean_text(item.get("offerId") or item.get("id"))
+    if line in {"REF", "LDY"}:
+        return reference or model or fallback
+    return model or fallback
 
 
 def _first_offer(item):
@@ -527,7 +563,7 @@ def _iter_facts(facts):
     for fact in facts:
         if not isinstance(fact, dict):
             continue
-        if fact.get("keyName") and fact.get("elements"):
+        if fact.get("keyName") or fact.get("slug"):
             yield fact
         yield from _iter_facts(fact.get("elements") or [])
 

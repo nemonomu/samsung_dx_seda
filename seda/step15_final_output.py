@@ -36,7 +36,7 @@ COMMON_FINAL_COLUMNS = [
 
 PRODUCT_EXTRA_COLUMNS = {
     "TV": ["sku", "screen_size", "estimated_annual_electricity_use", "model_year"],
-    "REF": ["ref_refrigerator_type", "ref_capacity", "sku_short_version"],
+    "REF": ["ref_refrigerator_type", "ref_capacity", "sku_short_version", "sku"],
     "LDY": ["ldy_loading_type", "ldy_color", "ldy_capacity", "sku_short_version", "sku"],
 }
 
@@ -123,7 +123,7 @@ def _format_row(row, now):
         "country": "SEDA",
         "product": product_line(),
         "item": row.get("item") or item or sku,
-        "account_name": row.get("retailer") or row.get("account_name", ""),
+        "account_name": _account_name_for_output(row),
         "page_type": _page_type(row),
         "retailer_sku_name": row.get("retailer_sku_name", ""),
         "product_url": row.get("product_url", ""),
@@ -218,6 +218,8 @@ def _price_number(value):
 
 
 def _savings_for_output(row):
+    if _is_magalu_row(row):
+        return ""
     text = str(row.get("savings") or "").strip()
     if not text:
         return ""
@@ -243,6 +245,18 @@ def _is_casas_bahia_row(row):
     retailer = str(row.get("retailer") or row.get("account_name") or "").lower()
     url = str(row.get("product_url") or "").lower()
     return "casas" in retailer or "casasbahia.com.br" in url
+
+
+def _is_magalu_row(row):
+    retailer = str(row.get("retailer") or row.get("account_name") or "").lower()
+    url = str(row.get("product_url") or "").lower()
+    return "magalu" in retailer or "magazineluiza.com.br" in url
+
+
+def _account_name_for_output(row):
+    if _is_magalu_row(row):
+        return "Magalu"
+    return row.get("retailer") or row.get("account_name", "")
 
 
 def _page_type(row):

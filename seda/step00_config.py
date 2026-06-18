@@ -16,6 +16,20 @@ DEFAULT_PRODUCT_LINE = "TV"
 DEFAULT_COUNTRY = "SEDA"
 DEFAULT_POSTAL_CODE = "01001-001"
 DEFAULT_OUTPUT_TABLE = "tv_retail_com_seda"
+MAGALU_URLS_BY_PRODUCT_LINE = {
+    "TV": {
+        "main": "https://www.magazineluiza.com.br/busca/tv/",
+        "bsr": "https://www.magazineluiza.com.br/busca/tv/?sortType=soldQuantity&sortOrientation=desc",
+    },
+    "REF": {
+        "main": "https://www.magazineluiza.com.br/busca/geladeira/",
+        "bsr": "https://www.magazineluiza.com.br/busca/geladeira/?page=1&sortOrientation=desc&sortType=soldQuantity",
+    },
+    "LDY": {
+        "main": "https://www.magazineluiza.com.br/busca/maquina+de+lavar/",
+        "bsr": "https://www.magazineluiza.com.br/busca/maquina+de+lavar/?page=1&sortOrientation=desc&sortType=soldQuantity",
+    },
+}
 CASAS_BAHIA_URLS_BY_PRODUCT_LINE = {
     "TV": {
         "main": "https://www.casasbahia.com.br/tv/b",
@@ -222,6 +236,18 @@ def page_url(config, page, run_id="main"):
 
 def retailer_listing_url(config, run_id="main", product_line_value=None):
     key = "bsr" if str(run_id or "").lower() == "bsr" else "main"
+    if config.key == "magalu":
+        line = (product_line_value or product_line()).strip().upper()
+        env_key = f"SEDA_MAGALU_{key.upper()}_URL_{line}"
+        if os.getenv(env_key):
+            return os.getenv(env_key).strip()
+        generic_env = os.getenv(f"SEDA_MAGALU_{key.upper()}_URL", "").strip()
+        if generic_env and (
+            line == "TV"
+            or os.getenv("SEDA_ALLOW_GENERIC_MAGALU_URL_FOR_ALL", "0").lower() in {"1", "true", "yes", "y"}
+        ):
+            return generic_env
+        return MAGALU_URLS_BY_PRODUCT_LINE.get(line, MAGALU_URLS_BY_PRODUCT_LINE["TV"])[key]
     if config.key == "casas_bahia":
         line = (product_line_value or product_line()).strip().upper()
         env_key = f"SEDA_CASAS_BAHIA_{key.upper()}_URL_{line}"

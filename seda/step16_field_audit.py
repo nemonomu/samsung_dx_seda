@@ -27,8 +27,10 @@ PARSER_CRITERIA = {
     "sku_status": "listing card Patrocinado mapped to Sponsored; otherwise blank.",
     "reviews": "count fields from total review count; detailed_review_content joins non-empty review bodies with delimiter.",
     "similar": "similar product names joined with delimiter.",
-    "ref_refrigerator_type": "Casas Bahia product source Caracteristicas > Modelo.",
-    "ref_capacity": "Casas Bahia product source Especificacoes Tecnicas > Capacidade de armazenagem total (L).",
+    "ref_refrigerator_type": "REF type from retailer detail specs, e.g. Magalu Ficha Tecnica > Porta.",
+    "ref_capacity": "REF capacity from retailer detail specs, e.g. Magalu Ficha Tecnica > Capacidade Liquida total.",
+    "ldy_loading_type": "LDY loading/opening type from retailer detail specs, e.g. Tipo de Abertura.",
+    "ldy_capacity": "LDY washing capacity from retailer detail specs, e.g. Capacidade de Lavagem.",
     "sku_short_version": "Short model code from retailer_sku_name, e.g. RS58 or RF29D.",
 }
 
