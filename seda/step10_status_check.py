@@ -30,6 +30,85 @@ def _send_email(subject, body):
     return "sent"
 
 
+def _retailer_report_label():
+    active = os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS", "")
+    key = active.split(",", 1)[0].strip().lower()
+    labels = {
+        "casas_bahia": "CasasBahia",
+        "magalu": "Magalu",
+    }
+    if key in labels:
+        return labels[key]
+    if not key:
+        return "SEDA"
+    return "".join(part.capitalize() for part in key.replace("-", "_").split("_") if part)
+
+
+def _email_subject(status):
+    prefix = "" if status.get("data_success") else "WARNING "
+    return f"{prefix}[SEDA] {_retailer_report_label()} {product_line()} crawling report"
+
+
+def _format_success(value):
+    return "SUCCESS" if value else "CHECK NEEDED"
+
+
+def _append_if(lines, label, value):
+    if value not in (None, "", {}):
+        lines.append(f"- {label}: {value}")
+
+
+def _run_date_from_status(status):
+    run_root_value = str(status.get("run_root") or "").rstrip("\\/")
+    return os.path.basename(run_root_value) if run_root_value else ""
+
+
+def _build_email_body(status):
+    db_prepare = status.get("db_prepare") if isinstance(status.get("db_prepare"), dict) else {}
+    db_load = status.get("db_load") if isinstance(status.get("db_load"), dict) else {}
+    s3_sync = status.get("s3_sync") if isinstance(status.get("s3_sync"), dict) else {}
+
+    final_rows = int(status.get("final_output_rows") or 0)
+    inserted_rows = int(status.get("db_inserted_rows") or 0)
+    table = db_load.get("table") or db_prepare.get("table") or ""
+
+    lines = [
+        f"[SEDA] {_retailer_report_label()} {product_line()} crawling report",
+        "",
+        f"Status: {_format_success(status.get('data_success'))}",
+        f"Product line: {product_line()}",
+        f"Run date: {_run_date_from_status(status)}",
+        "",
+        "Rows:",
+        f"- Main listing: {status.get('main_rows')}",
+        f"- Main targets: {status.get('main_target_rows')}",
+        f"- BSR listing: {status.get('bsr_rows')}",
+        f"- Final targets: {status.get('final_target_rows')}",
+        f"- Final output: {final_rows}",
+        f"- DB inserted: {inserted_rows}",
+        "",
+        "DB:",
+    ]
+    _append_if(lines, "Table", table)
+    lines.append(f"- Load status: {_format_success(db_load.get('success') is True)}")
+
+    issues = []
+    if final_rows <= 0:
+        issues.append("Final output row count is 0.")
+    if db_load.get("success") is not True:
+        issues.append("DB load did not report success.")
+    if inserted_rows != final_rows:
+        issues.append(f"DB inserted rows mismatch: inserted={inserted_rows}, final_output={final_rows}.")
+    if s3_sync and s3_sync.get("success") is False:
+        issues.append(f"S3 sync failed: {s3_sync.get('error') or s3_sync.get('skip_reason') or 'unknown reason'}")
+
+    if issues:
+        lines.extend(["", "Issues:"])
+        lines.extend(f"- {issue}" for issue in issues)
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def main():
     root = run_root()
     status = {
@@ -58,15 +137,15 @@ def main():
     output = root / "status" / "status_summary.json"
     write_json(output, status)
 
-    body = "\n".join(f"{key}: {value}" for key, value in status.items() if key not in {"main_manifest", "bsr_manifest"})
+    body = _build_email_body(status)
+    subject = _email_subject(status)
+    (root / "status" / "email_report.txt").write_text(body, encoding="utf-8")
     try:
-        email_status = _send_email(
-            f"SEDA {product_line()} crawler status - {'success' if status['data_success'] else 'check needed'}",
-            body,
-        )
+        email_status = _send_email(subject, body)
     except Exception as exc:
         email_status = f"failed:{type(exc).__name__}: {exc}"
     status["email_status"] = email_status
+    status["email_subject"] = subject
     status["success"] = status["data_success"] and email_status == "sent"
     write_json(output, status)
     print(f"[seda] wrote {output} email={email_status}")
