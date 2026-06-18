@@ -37,6 +37,7 @@ async def run(args):
     badge_by_item = {}
     savings_by_url = {}
     savings_by_item = {}
+    sampled_savings_by_source = {}
     sampled_urls = set()
     errors = []
 
@@ -74,6 +75,7 @@ async def run(args):
                 savings_by_item[item] = savings
         stats.update(sampled_badge_cards=page_badges)
         stats.update(sampled_savings_cards=page_savings)
+        sampled_savings_by_source[_normalize_url(listing_url)] = page_savings
         print(
             "[casas_badge_backfill] "
             f"{index}/{len(listing_urls)} cards={len(merged)} badge_cards={page_badges} "
@@ -114,10 +116,12 @@ async def run(args):
             stats.update(updated_savings=1)
             continue
 
-        if source_url in sampled_urls and current_savings and not savings:
+        if source_url in sampled_urls and current_savings and not savings and sampled_savings_by_source.get(source_url, 0) > 0:
             row["savings"] = ""
             row["parse_status"] = _append_token(row.get("parse_status", ""), "savings_cdp_cleared_not_rendered")
             stats.update(cleared_savings_not_rendered=1)
+        elif source_url in sampled_urls and current_savings and not savings:
+            stats.update(kept_savings_no_rendered_savings_observed=1)
 
     _write_csv(Path(args.output), rows, fieldnames)
     manifest = {
