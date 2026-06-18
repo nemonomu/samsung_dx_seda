@@ -173,13 +173,11 @@ def _translate_ref_refrigerator_type(text):
 
 
 def _translate_ldy_loading_type(text):
-    if "(" in str(text):
-        return text
     normalized = _normalize(text)
-    if normalized == "superior":
-        return "Superior(Top load)"
-    if normalized == "frontal":
-        return "Frontal(Front load)"
+    if normalized.startswith("superior"):
+        return "Top load"
+    if normalized.startswith("frontal"):
+        return "Front load"
     return text
 
 
