@@ -148,7 +148,7 @@ def _fetch_graphql(url, timeout):
             method=result.get("method") or "graphql",
             error=f"{result.get('error', 'graphql_failed')}:{result.get('trace', [])}",
         )
-    if "casasbahia.com.br" in url and "/tv/b" in url:
+    if "casasbahia.com.br" in url:
         try:
             from .casas_bahia.search_api import fetch_search_listing
 
