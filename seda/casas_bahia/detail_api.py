@@ -8,8 +8,17 @@ from pathlib import Path
 
 import requests
 
-from ..parsers import clean_text, model_number_from_text, model_year_from_text, screen_size_from_text
-from ..step00_config import run_root
+from ..parsers import (
+    clean_text,
+    ldy_color_from_text,
+    ldy_sku_from_text,
+    ldy_sku_short_version_from_text,
+    model_number_from_text,
+    model_year_from_text,
+    ref_sku_short_version_from_text,
+    screen_size_from_text,
+)
+from ..step00_config import product_line, run_root
 
 
 PDP_API = "https://pdp-api.casasbahia.com.br"
@@ -167,13 +176,13 @@ def _fetch_product_source_zenrows(url, timeout=None):
 def _product_source_detail(data):
     product = data.get("product") if isinstance(data.get("product"), dict) else {}
     sku = data.get("sku") if isinstance(data.get("sku"), dict) else {}
-    spec_values = _spec_values(product.get("specGroups"))
+    spec_groups = product.get("specGroups")
+    spec_values = _spec_values(spec_groups)
+    grouped_specs = _grouped_spec_values(spec_groups)
     name = _known_text(product.get("name") or product.get("rawName"))
     sku_name = _known_text(sku.get("name"))
-    model = (
-        _first_spec(spec_values, ["modelo"])
-        or model_number_from_text(" ".join(part for part in [name, sku_name] if part))
-    )
+    line = product_line()
+    model = _first_spec(spec_values, ["modelo"]) or model_number_from_text(" ".join(part for part in [name, sku_name] if part))
     screen_size = _screen_size_from_specs(spec_values, name)
     energy_use = _known_text(_first_spec(spec_values, ["consumo de energia", "consumo aproximado de energia"]))
     if not energy_use:
@@ -181,14 +190,58 @@ def _product_source_detail(data):
     model_year = _known_text(_first_spec(spec_values, ["ano de lancamento", "ano de lançamento", "ano"]))
     if not model_year:
         model_year = model_year_from_text(" ".join(part for part in [name, sku_name] if part))
-    return {
+    detail = {
         "retailer_sku_name": name,
-        "sku": model,
         "screen_size": screen_size,
         "estimated_annual_electricity_use": energy_use,
         "model_year": model_year,
         "retailer_product_id": _known_text(product.get("id")),
     }
+    if line == "TV":
+        detail["sku"] = model
+    if line == "REF":
+        detail.update(
+            {
+                "ref_refrigerator_type": _known_text(
+                    _first_group_spec(grouped_specs, ["caracteristicas"], ["modelo"])
+                    or _first_spec(spec_values, ["modelo"])
+                ),
+                "ref_capacity": _known_text(
+                    _first_group_spec(
+                        grouped_specs,
+                        ["especificacoes tecnicas"],
+                        ["capacidade de armazenagem total (l)", "capacidade de armazenagem total"],
+                    )
+                    or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total"])
+                ),
+                "sku_short_version": ref_sku_short_version_from_text(name),
+            }
+        )
+    if line == "LDY":
+        detail.update(
+            {
+                "ldy_loading_type": _known_text(
+                    _first_group_spec(grouped_specs, ["caracteristicas"], ["acesso ao cesto"])
+                    or _first_spec(spec_values, ["acesso ao cesto"])
+                ),
+                "ldy_color": _known_text(
+                    _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
+                    or _first_spec(spec_values, ["cor"])
+                    or ldy_color_from_text(name)
+                ),
+                "ldy_capacity": _known_text(
+                    _first_group_spec(
+                        grouped_specs,
+                        ["caracteristicas"],
+                        ["capacidade kg de roupas", "capacidade"],
+                    )
+                    or _first_spec(spec_values, ["capacidade kg de roupas", "capacidade"])
+                ),
+                "sku_short_version": ldy_sku_short_version_from_text(name),
+                "sku": ldy_sku_from_text(name),
+            }
+        )
+    return detail
 
 
 def _spec_values(groups):
@@ -208,6 +261,27 @@ def _spec_values(groups):
     return specs
 
 
+def _grouped_spec_values(groups):
+    grouped = {}
+    if not isinstance(groups, list):
+        return grouped
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_name = _normalize_key(group.get("name") or group.get("title") or group.get("description"))
+        if not group_name:
+            continue
+        group_specs = grouped.setdefault(group_name, {})
+        for item in group.get("specs") or []:
+            if not isinstance(item, dict):
+                continue
+            key = _normalize_key(item.get("name"))
+            value = _known_text(item.get("value"))
+            if key and value:
+                group_specs.setdefault(key, []).append(value)
+    return grouped
+
+
 def _first_spec(specs, labels):
     for label in labels:
         wanted = _normalize_key(label)
@@ -216,6 +290,22 @@ def _first_spec(specs, labels):
                 for value in values:
                     if _known_text(value):
                         return _known_text(value)
+    return ""
+
+
+def _first_group_spec(grouped_specs, group_labels, spec_labels):
+    wanted_groups = [_normalize_key(label) for label in group_labels]
+    wanted_specs = [_normalize_key(label) for label in spec_labels]
+    for group_key, specs in grouped_specs.items():
+        if not any(wanted == group_key or wanted in group_key for wanted in wanted_groups):
+            continue
+        for spec_key, values in specs.items():
+            if not any(wanted == spec_key or wanted in spec_key for wanted in wanted_specs):
+                continue
+            for value in values:
+                text = _known_text(value)
+                if text:
+                    return text
     return ""
 
 
@@ -387,7 +477,7 @@ def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=N
         title
         for product in products
         for title in [str(product.get("title") or "").strip()]
-        if title and _is_tv_title(title)
+        if title and _is_relevant_title(title)
     ]
     return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
 
@@ -416,11 +506,14 @@ def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
     return {"success": bool(text), "detail": {"pick_up_availability": text}, "error": "" if text else "empty_pickup"}
 
 
-def _is_tv_title(title):
+def _is_relevant_title(title):
+    line = product_line()
     text = str(title or "").lower()
-    if "smart tv" in text or " tv " in f" {text} " or "televisor" in text:
-        return True
-    return False
+    if line == "REF":
+        return bool(re.search(r"\b(?:geladeira|refrigerador|refrigeradora|freezer|frigobar)\b", text, re.I))
+    if line == "LDY":
+        return bool(re.search(r"\b(?:lavadora|lava\s+e\s+seca|secadora|m[aá]quina\s+de\s+lavar)\b", text, re.I))
+    return "smart tv" in text or " tv " in f" {text} " or "televisor" in text
 
 
 def _pickup_text(data):

@@ -2,10 +2,13 @@ import html
 import json
 import os
 import time
+import unicodedata
 import uuid
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+
+from seda.step00_config import casas_bahia_listing_slugs, casas_bahia_search_term
 
 
 SEARCH_URL = "https://api-partner-prd.casasbahia.com.br/api/v3/web/busca"
@@ -13,7 +16,7 @@ SEARCH_URL = "https://api-partner-prd.casasbahia.com.br/api/v3/web/busca"
 
 def fetch_search_listing(url, timeout=None):
     parsed = urlparse(url)
-    if "casasbahia.com.br" not in parsed.netloc or "/tv/b" not in parsed.path:
+    if "casasbahia.com.br" not in parsed.netloc or not _supported_listing_path(parsed.path):
         return {"success": False, "error": "not_casas_bahia_listing_url", "text": "", "trace": []}
 
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
@@ -82,7 +85,7 @@ def _params(url):
         "regionid": os.getenv("SEDA_CASAS_BAHIA_REGION_ID", "126000"),
         "multiselection": "true",
         "partnerkey": "elastic",
-        "terms": os.getenv("SEDA_CASAS_BAHIA_SEARCH_TERM", "tv"),
+        "terms": casas_bahia_search_term(),
         "sessionid": os.getenv("SEDA_CASAS_BAHIA_SESSION_ID", "89ec6f5d-3c85-40ba-af9c-9bf91e8af2b0")
         or str(uuid.uuid4()),
         "userid": os.getenv("SEDA_CASAS_BAHIA_USER_ID", ""),
@@ -92,6 +95,18 @@ def _params(url):
     if sort:
         params["sortby"] = sort.replace("-", "")
     return params
+
+
+def _supported_listing_path(path):
+    normalized = _normalize_path(path)
+    allowed = casas_bahia_listing_slugs()
+    return any(f"{_normalize_path(slug)}/b" in normalized for slug in allowed)
+
+
+def _normalize_path(value):
+    text = unquote(str(value or "")).lower()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return text.strip("/")
 
 
 def _attach_prices(products, timeout=None):
@@ -134,19 +149,20 @@ def _headers(url):
 
 
 def _as_next_data_html(search, url):
+    term = casas_bahia_search_term()
     data = {
         "props": {
             "pageProps": {
                 "initialState": {
                     "search": {
                         "query": search.get("queries") or {},
-                        "searchTerm": "tv",
+                        "searchTerm": term,
                         "results": {"products": search.get("products") or []},
                     }
                 }
             }
         },
-        "page": "/tv/b",
+        "page": urlparse(url).path or "/tv/b",
         "query": {"source_url": url},
     }
     raw = json.dumps(data, ensure_ascii=False)

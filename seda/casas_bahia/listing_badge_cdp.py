@@ -84,8 +84,10 @@ async def _sample_page(page):
         /\bdesconto\s+(?:pagando\s+com\s+)?carn[eê]\s+digital\b/i,
         /\bdesconto\s+no\s+carn[eê]\b/i,
       ];
+      const savingsPatterns = [
+        /\bbaixou\s+-?\d+(?:[,.]\d+)?%/i,
+      ];
       const blockedPatterns = [
-        /\bbaixou\s+\d/i,
         /\bno\s+pix\b/i,
         /\bsem\s+juros\b/i,
         /\bat[eé]\s+\d+x\b/i,
@@ -159,6 +161,16 @@ async def _sample_page(page):
         return [...new Set(candidates)]
           .filter(value => value && !blockedPatterns.some(pattern => pattern.test(value)));
       }
+      function extractSavings(card) {
+        const candidates = [];
+        for (const text of nodeTexts(card)) {
+          for (const pattern of savingsPatterns) {
+            const matches = text.match(new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g')) || [];
+            for (const match of matches) candidates.push(normalizeText(match));
+          }
+        }
+        return [...new Set(candidates)];
+      }
       function extractName(card, anchor) {
         const anchorText = normalizeText(anchor.innerText || anchor.textContent || '');
         if (anchorText && !anchorText.includes('R$')) return anchorText.slice(0, 240);
@@ -179,6 +191,7 @@ async def _sample_page(page):
           item: productId(url),
           name: extractName(card, anchor),
           badges: extractBadges(card),
+          savings: extractSavings(card),
           card_text_preview: normalizeText(card.innerText || card.textContent || '').slice(0, 700),
         });
       }
@@ -195,6 +208,7 @@ async def _sample_page(page):
 def _merge_snapshots(source_url, snapshots):
     cards = {}
     badge_samples = defaultdict(list)
+    savings_samples = defaultdict(list)
     for snapshot in snapshots:
         sample_index = snapshot.get("sample_index")
         for card in snapshot.get("cards") or []:
@@ -209,7 +223,9 @@ def _merge_snapshots(source_url, snapshots):
                     "item": card.get("item", ""),
                     "name": card.get("name", ""),
                     "badges": [],
+                    "savings": [],
                     "sample_hits": [],
+                    "savings_sample_hits": [],
                     "card_text_preview": card.get("card_text_preview", ""),
                 },
             )
@@ -221,6 +237,10 @@ def _merge_snapshots(source_url, snapshots):
                 clean = _clean_badge(badge)
                 if clean:
                     badge_samples[url].append((clean, sample_index))
+            for savings in card.get("savings") or []:
+                clean = _clean_savings(savings)
+                if clean:
+                    savings_samples[url].append((clean, sample_index))
     for url, values in badge_samples.items():
         badges = []
         sample_hits = []
@@ -230,6 +250,15 @@ def _merge_snapshots(source_url, snapshots):
             sample_hits.append(f"{sample_index}:{badge}")
         cards[url]["badges"] = badges
         cards[url]["sample_hits"] = sample_hits
+    for url, values in savings_samples.items():
+        savings_values = []
+        sample_hits = []
+        for savings, sample_index in values:
+            if savings not in savings_values:
+                savings_values.append(savings)
+            sample_hits.append(f"{sample_index}:{savings}")
+        cards[url]["savings"] = savings_values
+        cards[url]["savings_sample_hits"] = sample_hits
     return list(cards.values())
 
 
@@ -241,6 +270,16 @@ def _clean_badge(value):
     text = re.sub(r"\buse\s+o\s+cupom\b", "Use o cupom", text, flags=re.I)
     text = re.sub(r"\bdesconto\b", "Desconto", text, flags=re.I)
     return text
+
+
+def _clean_savings(value):
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    match = re.search(r"\bbaixou\s+(-?\d+(?:[,.]\d+)?)%", text, re.I)
+    if not match:
+        return ""
+    return f"Baixou {match.group(1).replace(',', '.')}%"
 
 
 def _normalize_url(value):
@@ -260,7 +299,17 @@ def _write_json(path, payload):
 
 def _write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["source_url", "product_url", "item", "name", "discount_type", "sample_hits", "card_text_preview"]
+    fieldnames = [
+        "source_url",
+        "product_url",
+        "item",
+        "name",
+        "savings",
+        "discount_type",
+        "sample_hits",
+        "savings_sample_hits",
+        "card_text_preview",
+    ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -271,8 +320,10 @@ def _write_csv(path, rows):
                     "product_url": row.get("product_url", ""),
                     "item": row.get("item", ""),
                     "name": row.get("name", ""),
+                    "savings": "; ".join(row.get("savings") or []),
                     "discount_type": "; ".join(row.get("badges") or []),
                     "sample_hits": "; ".join(row.get("sample_hits") or []),
+                    "savings_sample_hits": "; ".join(row.get("savings_sample_hits") or []),
                     "card_text_preview": row.get("card_text_preview", ""),
                 }
             )

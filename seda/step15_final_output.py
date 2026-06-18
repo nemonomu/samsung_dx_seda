@@ -5,13 +5,19 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .parsers import format_brl, model_number_from_text
+from .parsers import (
+    format_brl,
+    ldy_sku_from_text,
+    ldy_sku_short_version_from_text,
+    model_number_from_text,
+    ref_sku_short_version_from_text,
+)
 from .step00_config import product_line, read_csv, run_root, write_csv
 
 
 DELIMITER = " ||| "
 
-FINAL_OUTPUT_COLUMNS = [
+COMMON_FINAL_COLUMNS = [
     "country",
     "product",
     "item",
@@ -26,10 +32,15 @@ FINAL_OUTPUT_COLUMNS = [
     "discount_type",
     "delivery_availability",
     "pick_up_availability",
-    "sku",
-    "screen_size",
-    "estimated_annual_electricity_use",
-    "model_year",
+]
+
+PRODUCT_EXTRA_COLUMNS = {
+    "TV": ["sku", "screen_size", "estimated_annual_electricity_use", "model_year"],
+    "REF": ["ref_refrigerator_type", "ref_capacity", "sku_short_version"],
+    "LDY": ["ldy_loading_type", "ldy_color", "ldy_capacity", "sku_short_version", "sku"],
+}
+
+REVIEW_FINAL_COLUMNS = [
     "summarized_review_content",
     "retailer_sku_name_similar",
     "star_rating",
@@ -44,6 +55,14 @@ FINAL_OUTPUT_COLUMNS = [
     "batch_id",
 ]
 
+FINAL_OUTPUT_COLUMNS = COMMON_FINAL_COLUMNS + PRODUCT_EXTRA_COLUMNS["TV"] + REVIEW_FINAL_COLUMNS
+
+
+def final_output_columns(product_line_value=None):
+    line = (product_line_value or product_line()).strip().upper()
+    extras = PRODUCT_EXTRA_COLUMNS.get(line, PRODUCT_EXTRA_COLUMNS["TV"])
+    return COMMON_FINAL_COLUMNS + extras + REVIEW_FINAL_COLUMNS
+
 
 def main():
     root = run_root()
@@ -52,7 +71,8 @@ def main():
     now = _run_datetime()
     output_rows = [_format_row(row, now) for row in rows]
     output = Path(os.getenv("SEDA_FINAL_OUTPUT_CSV", str(root / "output" / "final_output.csv")))
-    write_csv(output, output_rows, columns=FINAL_OUTPUT_COLUMNS)
+    columns = final_output_columns()
+    write_csv(output, output_rows, columns=columns)
     _write_manifest(root, source, output, output_rows, now)
     print(f"[seda] wrote {output} rows={len(output_rows)}")
 
@@ -118,6 +138,12 @@ def _format_row(row, now):
         "screen_size": row.get("screen_size", ""),
         "estimated_annual_electricity_use": row.get("estimated_annual_electricity_use", ""),
         "model_year": row.get("model_year", ""),
+        "ref_refrigerator_type": row.get("ref_refrigerator_type", ""),
+        "ref_capacity": row.get("ref_capacity", ""),
+        "ldy_loading_type": row.get("ldy_loading_type", ""),
+        "ldy_color": row.get("ldy_color", ""),
+        "ldy_capacity": row.get("ldy_capacity", ""),
+        "sku_short_version": _sku_short_version_for_output(row),
         "summarized_review_content": _join_values(row.get("summarized_review_content", "")),
         "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
         "star_rating": row.get("star_rating", ""),
@@ -134,10 +160,27 @@ def _format_row(row, now):
 
 
 def _sku_for_output(row, item):
+    if product_line() == "LDY":
+        full = ldy_sku_from_text(row.get("retailer_sku_name", ""))
+        if full:
+            return full
     sku = str(row.get("sku") or "").strip()
     if sku and item and sku == item:
         return model_number_from_text(row.get("retailer_sku_name", ""))
     return sku
+
+
+def _sku_short_version_for_output(row):
+    value = str(row.get("sku_short_version") or "").strip()
+    if value:
+        return value
+    line = product_line()
+    name = row.get("retailer_sku_name", "")
+    if line == "REF":
+        return ref_sku_short_version_from_text(name)
+    if line == "LDY":
+        return ldy_sku_short_version_from_text(name)
+    return ""
 
 
 def _price_for_output(value):
@@ -178,7 +221,7 @@ def _savings_for_output(row):
     text = str(row.get("savings") or "").strip()
     if not text:
         return ""
-    baixou = re.search(r"baixou\s+(\d+(?:[.,]\d+)?)%", text, re.I)
+    baixou = re.search(r"baixou\s+(-?\d+(?:[.,]\d+)?)%", text, re.I)
     if baixou:
         return f"Baixou {baixou.group(1).replace(',', '.')}%"
     percent = re.fullmatch(r"(\d+(?:[.,]\d+)?)%", text)

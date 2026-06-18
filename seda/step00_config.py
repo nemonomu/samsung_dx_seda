@@ -16,6 +16,30 @@ DEFAULT_PRODUCT_LINE = "TV"
 DEFAULT_COUNTRY = "SEDA"
 DEFAULT_POSTAL_CODE = "01001-001"
 DEFAULT_OUTPUT_TABLE = "tv_retail_com_seda"
+CASAS_BAHIA_URLS_BY_PRODUCT_LINE = {
+    "TV": {
+        "main": "https://www.casasbahia.com.br/tv/b",
+        "bsr": "https://www.casasbahia.com.br/tv/b?ordenacao=maisvendidos",
+    },
+    "REF": {
+        "main": "https://www.casasbahia.com.br/geladeira/b",
+        "bsr": "https://www.casasbahia.com.br/geladeira/b?origem=history&ordenacao=maisvendidos",
+    },
+    "LDY": {
+        "main": "https://www.casasbahia.com.br/maquina-de-lavar/b",
+        "bsr": "https://www.casasbahia.com.br/m%C3%A1quina-de-lavar/b?origem=autocomplete&ordenacao=maisvendidos",
+    },
+}
+CASAS_BAHIA_SEARCH_TERMS_BY_PRODUCT_LINE = {
+    "TV": "tv",
+    "REF": "geladeira",
+    "LDY": "maquina de lavar",
+}
+CASAS_BAHIA_LISTING_SLUGS_BY_PRODUCT_LINE = {
+    "TV": ("tv",),
+    "REF": ("geladeira",),
+    "LDY": ("maquina-de-lavar", "máquina-de-lavar"),
+}
 OUTPUT_TABLES_BY_PRODUCT_LINE = {
     "TV": "tv_retail_com_seda",
     "REF": "ref_retail_com_seda",
@@ -117,6 +141,12 @@ OUTPUT_COLUMNS = [
     "screen_size",
     "estimated_annual_electricity_use",
     "model_year",
+    "ref_refrigerator_type",
+    "ref_capacity",
+    "ldy_loading_type",
+    "ldy_color",
+    "ldy_capacity",
+    "sku_short_version",
     "summarized_review_content",
     "retailer_sku_name_similar",
     "star_rating",
@@ -183,11 +213,42 @@ def selected_retailers():
 
 
 def page_url(config, page, run_id="main"):
-    base = config.bsr_url if run_id == "bsr" else config.main_url
+    base = retailer_listing_url(config, run_id=run_id)
     if "{page}" in base:
         return base.format(page=page)
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}{urlencode({'page': page})}" if page > 1 else base
+
+
+def retailer_listing_url(config, run_id="main", product_line_value=None):
+    key = "bsr" if str(run_id or "").lower() == "bsr" else "main"
+    if config.key == "casas_bahia":
+        line = (product_line_value or product_line()).strip().upper()
+        env_key = f"SEDA_CASAS_BAHIA_{key.upper()}_URL_{line}"
+        if os.getenv(env_key):
+            return os.getenv(env_key).strip()
+        generic_env = os.getenv(f"SEDA_CASAS_BAHIA_{key.upper()}_URL", "").strip()
+        if generic_env and (
+            line == "TV"
+            or os.getenv("SEDA_ALLOW_GENERIC_CASAS_BAHIA_URL_FOR_ALL", "0").lower() in {"1", "true", "yes", "y"}
+        ):
+            return generic_env
+        return CASAS_BAHIA_URLS_BY_PRODUCT_LINE.get(line, CASAS_BAHIA_URLS_BY_PRODUCT_LINE["TV"])[key]
+    return config.bsr_url if key == "bsr" else config.main_url
+
+
+def casas_bahia_search_term(product_line_value=None):
+    line = (product_line_value or product_line()).strip().upper()
+    return (
+        os.getenv(f"SEDA_CASAS_BAHIA_SEARCH_TERM_{line}")
+        or os.getenv("SEDA_CASAS_BAHIA_SEARCH_TERM")
+        or CASAS_BAHIA_SEARCH_TERMS_BY_PRODUCT_LINE.get(line, CASAS_BAHIA_SEARCH_TERMS_BY_PRODUCT_LINE["TV"])
+    )
+
+
+def casas_bahia_listing_slugs(product_line_value=None):
+    line = (product_line_value or product_line()).strip().upper()
+    return CASAS_BAHIA_LISTING_SLUGS_BY_PRODUCT_LINE.get(line, CASAS_BAHIA_LISTING_SLUGS_BY_PRODUCT_LINE["TV"])
 
 
 def write_csv(path, rows, columns=OUTPUT_COLUMNS):

@@ -126,6 +126,30 @@ def model_year_from_text(text):
     return str(max(years)) if years else ""
 
 
+def ref_sku_short_version_from_text(text):
+    match = re.search(r"\b((?:RS|RF|RT|RB|RL|RR)\d{2}[A-Z]?)", str(text or "").upper())
+    return match.group(1) if match else ""
+
+
+def ldy_sku_short_version_from_text(text):
+    match = re.search(r"\b((?:WW|WD|WF|WA)\d{2}[A-Z]{1,2})", str(text or "").upper())
+    return match.group(1) if match else ""
+
+
+def ldy_sku_from_text(text):
+    match = re.search(r"\b((?:WW|WD|WF|WA)\d{2}[A-Z0-9]{4,12})\b", str(text or "").upper())
+    return match.group(1) if match else ""
+
+
+def ldy_color_from_text(text):
+    match = re.search(
+        r"\b(Inox|Black|Branca|Branco|Preta|Preto|Prata|Cinza|Grafite|Titanium|Tit[aâ]nio)\b",
+        str(text or ""),
+        re.I,
+    )
+    return clean_text(match.group(1)) if match else ""
+
+
 def extract_jsonld(html_text):
     blocks = []
     for match in re.finditer(
@@ -850,7 +874,7 @@ def _name_from_listing_text(text):
 
 
 def _savings_from_text(text):
-    baixou = re.search(r"Baixou\s+(\d+(?:[.,]\d+)?)%", text, re.I)
+    baixou = re.search(r"Baixou\s+(-?\d+(?:[.,]\d+)?)%", text, re.I)
     if baixou:
         return f"Baixou {baixou.group(1).replace(',', '.')}%"
     match = re.search(r"(?:(\d+(?:[.,]\d+)?)%\s+OFF|(\d+(?:[.,]\d+)?)%\s+de\s+desconto)", text, re.I)

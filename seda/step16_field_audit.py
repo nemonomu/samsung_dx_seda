@@ -5,42 +5,11 @@ from collections import Counter
 from pathlib import Path
 
 from .step00_config import read_csv, run_root, write_json
+from .step15_final_output import final_output_columns
 
 
 DELIMITER = " ||| "
-
-FINAL_OUTPUT_COLUMNS = [
-    "country",
-    "product",
-    "item",
-    "account_name",
-    "page_type",
-    "retailer_sku_name",
-    "product_url",
-    "original_sku_price",
-    "final_sku_price",
-    "savings",
-    "sku_status",
-    "discount_type",
-    "delivery_availability",
-    "pick_up_availability",
-    "sku",
-    "screen_size",
-    "estimated_annual_electricity_use",
-    "model_year",
-    "summarized_review_content",
-    "retailer_sku_name_similar",
-    "star_rating",
-    "count_of_star_ratings",
-    "count_of_reviews",
-    "recommendation_intent",
-    "detailed_review_content",
-    "bsr_rank",
-    "main_rank",
-    "calendar_week",
-    "crawl_strdatetime",
-    "batch_id",
-]
+FINAL_OUTPUT_COLUMNS = final_output_columns()
 
 
 PARSER_CRITERIA = {
@@ -58,6 +27,9 @@ PARSER_CRITERIA = {
     "sku_status": "listing card Patrocinado mapped to Sponsored; otherwise blank.",
     "reviews": "count fields from total review count; detailed_review_content joins non-empty review bodies with delimiter.",
     "similar": "similar product names joined with delimiter.",
+    "ref_refrigerator_type": "Casas Bahia product source Caracteristicas > Modelo.",
+    "ref_capacity": "Casas Bahia product source Especificacoes Tecnicas > Capacidade de armazenagem total (L).",
+    "sku_short_version": "Short model code from retailer_sku_name, e.g. RS58 or RF29D.",
 }
 
 
@@ -90,7 +62,11 @@ def audit_rows(final_output, rows, enriched_rows=None):
         "extra_columns": [column for column in columns if column not in FINAL_OUTPUT_COLUMNS],
         "parser_criteria": PARSER_CRITERIA,
         "field_stats": _field_stats(rows),
-        "energy_class_counts": dict(Counter(_energy_class(row.get("estimated_annual_electricity_use", "")) for row in rows)),
+        "energy_class_counts": (
+            dict(Counter(_energy_class(row.get("estimated_annual_electricity_use", "")) for row in rows))
+            if "estimated_annual_electricity_use" in columns
+            else {}
+        ),
         "fetch_method_counts_enriched": dict(Counter(row.get("fetch_method", "") for row in enriched_rows if row.get("fetch_method", ""))),
         "parse_status_counts_enriched": dict(Counter(row.get("parse_status", "") for row in enriched_rows if row.get("parse_status", ""))),
         "anomalies": [],

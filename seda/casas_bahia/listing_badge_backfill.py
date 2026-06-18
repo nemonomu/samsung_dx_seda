@@ -35,6 +35,8 @@ async def run(args):
     stats = Counter(rows=len(rows), listing_urls=len(listing_urls))
     badge_by_url = {}
     badge_by_item = {}
+    savings_by_url = {}
+    savings_by_item = {}
     sampled_urls = set()
     errors = []
 
@@ -52,21 +54,30 @@ async def run(args):
         merged = payload.get("merged") or []
         stats.update(sampled=1, sampled_cards=len(merged))
         page_badges = 0
+        page_savings = 0
         for card in merged:
             badge = _badge_value(card.get("badges") or [])
-            if not badge:
-                continue
-            page_badges += 1
+            savings = _badge_value(card.get("savings") or [])
             product_url = _normalize_url(card.get("product_url", ""))
             item = str(card.get("item") or _item_from_url(product_url)).strip()
-            if product_url:
+            if badge:
+                page_badges += 1
+            if savings:
+                page_savings += 1
+            if product_url and badge:
                 badge_by_url[product_url] = badge
-            if item:
+            if item and badge:
                 badge_by_item[item] = badge
+            if product_url and savings:
+                savings_by_url[product_url] = savings
+            if item and savings:
+                savings_by_item[item] = savings
         stats.update(sampled_badge_cards=page_badges)
+        stats.update(sampled_savings_cards=page_savings)
         print(
             "[casas_badge_backfill] "
-            f"{index}/{len(listing_urls)} cards={len(merged)} badge_cards={page_badges} url={listing_url}",
+            f"{index}/{len(listing_urls)} cards={len(merged)} badge_cards={page_badges} "
+            f"savings_cards={page_savings} url={listing_url}",
             flush=True,
         )
 
@@ -76,6 +87,8 @@ async def run(args):
         current = str(row.get("discount_type") or "").strip()
         invalid_current = _is_price_discount(current)
         badge = badge_by_url.get(product_url) or badge_by_item.get(item, "")
+        current_savings = str(row.get("savings") or "").strip()
+        savings = savings_by_url.get(product_url) or savings_by_item.get(item, "")
         source_url = _normalize_url(row.get("source_url", ""))
 
         if badge and (args.force or not current or invalid_current):
@@ -85,16 +98,26 @@ async def run(args):
             stats.update(updated=1)
             if invalid_current:
                 stats.update(replaced_invalid=1)
-            continue
 
-        if invalid_current:
+        if invalid_current and not badge:
             row["discount_type"] = ""
             row["parse_status"] = _append_token(row.get("parse_status", ""), "badge_cdp_cleared_price_discount")
             stats.update(cleared_invalid=1)
-            continue
 
         if source_url in sampled_urls and not badge:
             stats.update(sampled_no_badge=1)
+
+        if savings and (args.force or current_savings != savings):
+            row["savings"] = savings
+            row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_listing_savings_cdp")
+            row["parse_status"] = _append_token(row.get("parse_status", ""), "savings_cdp_ok")
+            stats.update(updated_savings=1)
+            continue
+
+        if source_url in sampled_urls and current_savings and not savings:
+            row["savings"] = ""
+            row["parse_status"] = _append_token(row.get("parse_status", ""), "savings_cdp_cleared_not_rendered")
+            stats.update(cleared_savings_not_rendered=1)
 
     _write_csv(Path(args.output), rows, fieldnames)
     manifest = {
