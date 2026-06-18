@@ -95,6 +95,10 @@ def _run_datetime():
 def _format_row(row, now):
     item = _item_from_url(row.get("product_url", ""))
     sku = _sku_for_output(row, item)
+    original_sku_price = _price_for_output(row.get("original_sku_price", ""))
+    final_sku_price = _price_for_output(row.get("final_sku_price", ""))
+    if original_sku_price and final_sku_price and _prices_equal(original_sku_price, final_sku_price):
+        original_sku_price = ""
     return {
         "country": "SEDA",
         "product": product_line(),
@@ -103,8 +107,8 @@ def _format_row(row, now):
         "page_type": _page_type(row),
         "retailer_sku_name": row.get("retailer_sku_name", ""),
         "product_url": row.get("product_url", ""),
-        "original_sku_price": _price_for_output(row.get("original_sku_price", "")),
-        "final_sku_price": _price_for_output(row.get("final_sku_price", "")),
+        "original_sku_price": original_sku_price,
+        "final_sku_price": final_sku_price,
         "savings": _savings_for_output(row),
         "sku_status": row.get("sku_status", ""),
         "discount_type": _discount_type_for_output(row.get("discount_type", "")),
@@ -145,6 +149,29 @@ def _price_for_output(value):
     if re.fullmatch(r"\d+(?:\.\d{1,2})?", text):
         return format_brl(text)
     return text
+
+
+def _prices_equal(left, right):
+    left_number = _price_number(left)
+    right_number = _price_number(right)
+    if left_number is None or right_number is None:
+        return str(left or "").strip() == str(right or "").strip()
+    return left_number == right_number
+
+
+def _price_number(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"[^\d,.\-]", "", text)
+    if not text:
+        return None
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        return round(float(text), 2)
+    except ValueError:
+        return None
 
 
 def _savings_for_output(row):
