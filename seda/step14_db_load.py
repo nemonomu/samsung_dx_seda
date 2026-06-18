@@ -17,7 +17,7 @@ def main():
     if rows:
         columns = list(rows[0].keys())
         columns_sql = ", ".join(f'"{column}"' for column in columns)
-        values = [[row.get(column, "") for column in columns] for row in rows]
+        values = [[_db_value(row.get(column, "")) for column in columns] for row in rows]
         sql = f"INSERT INTO {table} ({columns_sql}) VALUES %s"
         with db_connect() as conn:
             with conn.cursor() as cur:
@@ -28,6 +28,13 @@ def main():
     output = root / "db" / "manifest_db_load.json"
     write_json(output, {"success": True, "table": table, "csv_path": csv_path, "inserted": inserted})
     print(f"[seda] loaded table={table} rows={inserted}")
+
+
+def _db_value(value):
+    if value is None:
+        return None
+    text = str(value)
+    return None if text.strip() == "" else text
 
 
 if __name__ == "__main__":
