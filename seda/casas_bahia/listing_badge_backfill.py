@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
+from seda.common.chrome_cdp import close_chrome_cdp, ensure_chrome_cdp
 from seda.step00_config import run_root
 
 from .listing_badge_cdp import run as run_badge_sampler
@@ -40,48 +41,69 @@ async def run(args):
     sampled_savings_by_source = {}
     sampled_urls = set()
     errors = []
+    cdp_status = {"started": False}
 
-    for index, listing_url in enumerate(listing_urls, start=1):
-        raw_stem = _raw_stem(index, listing_url)
-        sample_args = _sample_args(args, listing_url, raw_stem)
-        try:
-            payload = await run_badge_sampler(sample_args)
-        except Exception as exc:  # noqa: BLE001 - keep the full run moving and report in manifest.
-            stats.update(sample_failed=1)
-            errors.append({"listing_url": listing_url, "error": str(exc)})
-            print(f"[casas_badge_backfill] {index}/{len(listing_urls)} failed url={listing_url} error={exc}", flush=True)
-            continue
-        sampled_urls.add(_normalize_url(listing_url))
-        merged = payload.get("merged") or []
-        stats.update(sampled=1, sampled_cards=len(merged))
-        page_badges = 0
-        page_savings = 0
-        for card in merged:
-            badge = _badge_value(card.get("badges") or [])
-            savings = _badge_value(card.get("savings") or [])
-            product_url = _normalize_url(card.get("product_url", ""))
-            item = str(card.get("item") or _item_from_url(product_url)).strip()
-            if badge:
-                page_badges += 1
-            if savings:
-                page_savings += 1
-            if product_url and badge:
-                badge_by_url[product_url] = badge
-            if item and badge:
-                badge_by_item[item] = badge
-            if product_url and savings:
-                savings_by_url[product_url] = savings
-            if item and savings:
-                savings_by_item[item] = savings
-        stats.update(sampled_badge_cards=page_badges)
-        stats.update(sampled_savings_cards=page_savings)
-        sampled_savings_by_source[_normalize_url(listing_url)] = page_savings
-        print(
-            "[casas_badge_backfill] "
-            f"{index}/{len(listing_urls)} cards={len(merged)} badge_cards={page_badges} "
-            f"savings_cards={page_savings} url={listing_url}",
-            flush=True,
-        )
+    try:
+        if listing_urls:
+            cdp_status = ensure_chrome_cdp(
+                args.cdp_url,
+                timeout_seconds=args.cdp_start_timeout,
+                auto_start=not args.no_auto_start_cdp,
+            )
+            if cdp_status.get("started"):
+                print(
+                    "[casas_badge_backfill] "
+                    f"started Chrome CDP url={args.cdp_url} user_data_dir={cdp_status.get('user_data_dir', '')}",
+                    flush=True,
+                )
+
+        for index, listing_url in enumerate(listing_urls, start=1):
+            raw_stem = _raw_stem(index, listing_url)
+            sample_args = _sample_args(args, listing_url, raw_stem, cdp_prepared=bool(listing_urls))
+            try:
+                payload = await run_badge_sampler(sample_args)
+            except Exception as exc:  # noqa: BLE001 - keep the full run moving and report in manifest.
+                stats.update(sample_failed=1)
+                errors.append({"listing_url": listing_url, "error": str(exc)})
+                print(f"[casas_badge_backfill] {index}/{len(listing_urls)} failed url={listing_url} error={exc}", flush=True)
+                continue
+            sampled_urls.add(_normalize_url(listing_url))
+            merged = payload.get("merged") or []
+            stats.update(sampled=1, sampled_cards=len(merged))
+            page_badges = 0
+            page_savings = 0
+            for card in merged:
+                badge = _badge_value(card.get("badges") or [])
+                savings = _badge_value(card.get("savings") or [])
+                product_url = _normalize_url(card.get("product_url", ""))
+                item = str(card.get("item") or _item_from_url(product_url)).strip()
+                if badge:
+                    page_badges += 1
+                if savings:
+                    page_savings += 1
+                if product_url and badge:
+                    badge_by_url[product_url] = badge
+                if item and badge:
+                    badge_by_item[item] = badge
+                if product_url and savings:
+                    savings_by_url[product_url] = savings
+                if item and savings:
+                    savings_by_item[item] = savings
+            stats.update(sampled_badge_cards=page_badges)
+            stats.update(sampled_savings_cards=page_savings)
+            sampled_savings_by_source[_normalize_url(listing_url)] = page_savings
+            print(
+                "[casas_badge_backfill] "
+                f"{index}/{len(listing_urls)} cards={len(merged)} badge_cards={page_badges} "
+                f"savings_cards={page_savings} url={listing_url}",
+                flush=True,
+            )
+    finally:
+        if not args.no_auto_start_cdp and not args.keep_browser:
+            try:
+                await close_chrome_cdp(args.cdp_url)
+            except Exception as exc:
+                print(f"[casas_badge_backfill] warning: Chrome CDP close failed: {exc}", flush=True)
 
     for row in rows:
         product_url = _normalize_url(row.get("product_url", ""))
@@ -137,12 +159,12 @@ async def run(args):
     return manifest
 
 
-def _sample_args(args, listing_url, raw_stem):
+def _sample_args(args, listing_url, raw_stem, cdp_prepared=False):
     raw_dir = Path(args.raw_dir)
     return SimpleNamespace(
         cdp_url=args.cdp_url,
         cdp_start_timeout=args.cdp_start_timeout,
-        no_auto_start_cdp=args.no_auto_start_cdp,
+        no_auto_start_cdp=bool(cdp_prepared) or args.no_auto_start_cdp,
         url=listing_url,
         output_json=str(raw_dir / f"{raw_stem}.json"),
         output_csv=str(raw_dir / f"{raw_stem}.csv"),
@@ -257,6 +279,7 @@ def main():
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=1200)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--keep-browser", action="store_true")
     args = parser.parse_args()
     result = asyncio.run(run(args))
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=False))

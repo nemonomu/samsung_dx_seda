@@ -62,6 +62,18 @@ def ensure_chrome_cdp(cdp_url, timeout_seconds=20, auto_start=True):
     raise RuntimeError(f"Chrome CDP did not become ready within {timeout_seconds}s: {cdp_url}")
 
 
+async def close_chrome_cdp(cdp_url):
+    if not _is_cdp_ready(cdp_url):
+        return False
+    ensure_playwright_temp_dir()
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        await browser.close()
+    return True
+
+
 def _is_cdp_ready(cdp_url):
     url = cdp_url.rstrip("/") + "/json/version"
     try:

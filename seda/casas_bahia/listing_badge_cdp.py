@@ -57,8 +57,11 @@ async def run(args):
                 )
         finally:
             await page.close()
-            if args.close_browser:
-                await browser.close()
+            if args.close_browser or (not args.no_auto_start_cdp and not args.keep_browser):
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    print(f"[casas_badge_cdp] warning: Chrome CDP close failed: {exc}", flush=True)
 
     merged = _merge_snapshots(args.url, snapshots)
     payload = {"url": args.url, "snapshots": snapshots, "merged": merged}
@@ -347,6 +350,7 @@ def main():
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=1200)
     parser.add_argument("--close-browser", action="store_true")
+    parser.add_argument("--keep-browser", action="store_true")
     args = parser.parse_args()
     result = asyncio.run(run(args))
     badge_rows = [row for row in result.get("merged", []) if row.get("badges")]

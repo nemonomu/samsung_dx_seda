@@ -85,8 +85,11 @@ async def run(args):
                     break
         finally:
             await page.close()
-            if args.close_browser:
-                await browser.close()
+            if args.close_browser or (not args.no_auto_start_cdp and not args.keep_browser):
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    print(f"[casas_freight_cdp] warning: Chrome CDP close failed: {exc}", flush=True)
 
     _write_csv(Path(args.output), rows, fieldnames)
     manifest = {
@@ -350,6 +353,7 @@ def main():
     parser.add_argument("--evaluate-retry-wait-ms", type=int, default=2000)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--close-browser", action="store_true")
+    parser.add_argument("--keep-browser", action="store_true")
     args = parser.parse_args()
     result = asyncio.run(run(args))
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=True))
