@@ -8,6 +8,8 @@ TRANSLATABLE_FIELDS = {
     "delivery_availability",
     "pick_up_availability",
     "recommendation_intent",
+    "ref_refrigerator_type",
+    "ldy_loading_type",
 }
 
 
@@ -73,6 +75,10 @@ def _translate_single(field, text):
         return _translate_pickup(text)
     if field == "recommendation_intent":
         return _translate_recommendation(text)
+    if field == "ref_refrigerator_type":
+        return _translate_ref_refrigerator_type(text)
+    if field == "ldy_loading_type":
+        return _translate_ldy_loading_type(text)
     return text
 
 
@@ -152,6 +158,28 @@ def _translate_recommendation(text):
     match = re.search(r"(\d+(?:[.,]\d+)?%)\s+dos\s+clientes\s+recomendam", _normalize(text), re.I)
     if match:
         return f"{match.group(1)} recommend this product"
+    return text
+
+
+def _translate_ref_refrigerator_type(text):
+    if "(" in str(text):
+        return text
+    normalized = _normalize(text)
+    if normalized == "duplex":
+        return "Duplex(Freezer-on-Top)"
+    if normalized == "inverse":
+        return "Inverse(Freezer-on-Bottom)"
+    return text
+
+
+def _translate_ldy_loading_type(text):
+    if "(" in str(text):
+        return text
+    normalized = _normalize(text)
+    if normalized == "superior":
+        return "Superior(Top load)"
+    if normalized == "frontal":
+        return "Frontal(Front load)"
     return text
 
 
