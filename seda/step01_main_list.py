@@ -130,6 +130,8 @@ def main():
     }
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[seda] wrote {parsed_dir / 'main_occurrences.csv'} rows={len(rows)}")
+    if not rows and os.getenv("SEDA_ALLOW_EMPTY_LISTING", "0").lower() not in {"1", "true", "yes", "y"}:
+        raise SystemExit(f"[seda] {run_id} listing produced 0 rows; stopping before downstream load")
 
 
 if __name__ == "__main__":

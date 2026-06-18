@@ -369,7 +369,7 @@ def _parse_casas_bahia_next_listing(html_text, base_url, source_url, run_id):
     for product in products:
         if not isinstance(product, dict):
             continue
-        if not _casas_bahia_is_tv_product(product):
+        if product_line() == "TV" and not _casas_bahia_is_tv_product(product):
             continue
         rows.append(_casas_bahia_product_row(product, base_url, source_url, run_id, len(rows) + 1))
     return rows
@@ -386,7 +386,7 @@ def _parse_casas_bahia_ssr_listing(html_text, base_url, source_url, run_id):
     if not isinstance(products, list):
         return []
     snapshots = _casas_bahia_card_snapshots(html_text, base_url)
-    tv_only = _casas_bahia_tv_listing(source_url, search)
+    tv_only = product_line() == "TV" and _casas_bahia_tv_listing(source_url, search)
     rows = []
     for product in products:
         if not isinstance(product, dict):
