@@ -61,7 +61,13 @@ FINAL_OUTPUT_COLUMNS = COMMON_FINAL_COLUMNS + PRODUCT_EXTRA_COLUMNS["TV"] + REVI
 def final_output_columns(product_line_value=None):
     line = (product_line_value or product_line()).strip().upper()
     extras = PRODUCT_EXTRA_COLUMNS.get(line, PRODUCT_EXTRA_COLUMNS["TV"])
+    if line == "REF" and _active_retailer() == "casas_bahia":
+        extras = [column for column in extras if column != "sku"]
     return COMMON_FINAL_COLUMNS + extras + REVIEW_FINAL_COLUMNS
+
+
+def _active_retailer():
+    return (os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS") or "").strip().lower()
 
 
 def main():
