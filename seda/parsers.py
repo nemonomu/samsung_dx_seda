@@ -369,7 +369,7 @@ def _parse_casas_bahia_next_listing(html_text, base_url, source_url, run_id):
     for product in products:
         if not isinstance(product, dict):
             continue
-        if product_line() == "TV" and not _casas_bahia_is_tv_product(product):
+        if not _casas_bahia_is_relevant_product(product):
             continue
         rows.append(_casas_bahia_product_row(product, base_url, source_url, run_id, len(rows) + 1))
     return rows
@@ -392,6 +392,8 @@ def _parse_casas_bahia_ssr_listing(html_text, base_url, source_url, run_id):
         if not isinstance(product, dict):
             continue
         if tv_only and not _casas_bahia_is_tv_product(product):
+            continue
+        if not tv_only and not _casas_bahia_is_relevant_product(product):
             continue
         row = _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, len(rows) + 1)
         snapshot = snapshots.get(normalized_product_url(row.get("product_url", ""))) or {}
@@ -512,6 +514,104 @@ def _casas_bahia_tv_listing(source_url, search):
     query = search.get("query") if isinstance(search.get("query"), dict) else {}
     term = clean_text(search.get("searchTerm") or query.get("strbusca"))
     return "/tv/" in str(source_url).lower() or term.lower() == "tv"
+
+
+def _casas_bahia_is_relevant_product(product):
+    line = product_line()
+    if line == "TV":
+        return _casas_bahia_is_tv_product(product)
+    if line == "REF":
+        return _casas_bahia_is_ref_product(product)
+    if line == "LDY":
+        return _casas_bahia_is_ldy_product(product)
+    return True
+
+
+def _casas_bahia_is_ref_product(product):
+    text = _casas_bahia_product_haystack(product)
+    if _matches_any(
+        text,
+        [
+            r"\bfiltro\b",
+            r"\brefil\b",
+            r"\bprateleira\b",
+            r"\bgaveta\b",
+            r"\bpuxador\b",
+            r"\bborracha\b",
+            r"\btermostato\b",
+            r"\borganizador\b",
+        ],
+    ):
+        return False
+    return _matches_any(
+        text,
+        [
+            r"\bgeladeira\b",
+            r"\brefrigerador(?:a)?\b",
+            r"\bfreezer\b",
+            r"\bfrigobar\b",
+            r"\bside\s+by\s+side\b",
+            r"\bfrost\s+free\b",
+            r"\bduplex\b",
+        ],
+    )
+
+
+def _casas_bahia_is_ldy_product(product):
+    text = _casas_bahia_product_haystack(product)
+    if _matches_any(
+        text,
+        [
+            r"\blava[\s-]+loucas\b",
+            r"\bmangueira\b",
+            r"\bfiltro\b",
+            r"\bsuporte\b",
+            r"\bcapa\b",
+            r"\bsabao\b",
+        ],
+    ):
+        return False
+    return _matches_any(
+        text,
+        [
+            r"\bmaquina\s+de\s+lavar\b",
+            r"\blavadora\b",
+            r"\blava\s+e\s+seca\b",
+            r"\bsecadora\b",
+            r"\btanquinho\b",
+        ],
+    )
+
+
+def _casas_bahia_product_haystack(product):
+    parts = [clean_text(product.get("title") or product.get("name"))]
+    stack = []
+    categories = product.get("categories") if isinstance(product.get("categories"), list) else []
+    stack.extend(categories)
+    for key in ("department", "category", "subcategory", "subCategory"):
+        value = product.get(key)
+        if isinstance(value, dict):
+            stack.append(value)
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            parts.append(value)
+    while stack:
+        item = stack.pop()
+        if not isinstance(item, dict):
+            continue
+        parts.append(clean_text(item.get("name") or item.get("title") or item.get("description")))
+        for key in ("category", "subcategory", "subCategory", "children"):
+            child = item.get(key)
+            if isinstance(child, dict):
+                stack.append(child)
+            elif isinstance(child, list):
+                stack.extend(child)
+    return _normalize_key(" ".join(part for part in parts if part))
+
+
+def _matches_any(text, patterns):
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
 def _casas_bahia_is_tv_product(product):
