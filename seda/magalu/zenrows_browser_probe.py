@@ -138,32 +138,95 @@ async def fetch_product_rating_in_page(page, pdp_url):
     variation_id = sku_from_url(pdp_url)
     payload = review_payload(variation_id)
     started = time.time()
-    result = await page.evaluate(
-        """
-        async ({ payload }) => {
-          const response = await fetch('https://federation.magazineluiza.com.br/graphql', {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-              'accept': 'application/json',
-              'content-type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-          });
-          const text = await response.text();
-          let json = null;
-          try { json = JSON.parse(text); } catch (error) {}
-          return {
-            status_code: response.status,
-            content_type: response.headers.get('content-type') || '',
-            text_length: text.length,
-            text_preview: text.slice(0, 500),
-            json
-          };
+    page_fetch_error = ""
+    try:
+        result = await page.evaluate(
+            """
+            async ({ payload }) => {
+              const response = await fetch('https://federation.magazineluiza.com.br/graphql', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                  'accept': 'application/json',
+                  'content-type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+              });
+              const text = await response.text();
+              let json = null;
+              try { json = JSON.parse(text); } catch (error) {}
+              return {
+                method: 'page_evaluate_fetch',
+                status_code: response.status,
+                content_type: response.headers.get('content-type') || '',
+                text_length: text.length,
+                text_preview: text.slice(0, 500),
+                json
+              };
+            }
+            """,
+            {"payload": payload},
+        )
+    except Exception as exc:
+        page_fetch_error = f"{type(exc).__name__}: {exc}"
+        result = {
+            "method": "page_evaluate_fetch",
+            "status_code": 0,
+            "content_type": "",
+            "text_length": 0,
+            "text_preview": "",
+            "json": None,
+            "error": page_fetch_error,
         }
-        """,
-        {"payload": payload},
-    )
+
+    result["elapsed_seconds"] = round(time.time() - started, 3)
+    result["variation_id"] = variation_id
+    result["summary"] = summarize_review_graphql(result.get("json"))
+    if not result["summary"].get("success"):
+        fallback = await fetch_product_rating_with_context_request(page, payload, pdp_url, variation_id)
+        fallback["page_fetch_error"] = page_fetch_error or result.get("error", "")
+        return fallback
+    return result
+
+
+async def fetch_product_rating_with_context_request(page, payload, pdp_url, variation_id):
+    started = time.time()
+    try:
+        response = await page.context.request.post(
+            "https://federation.magazineluiza.com.br/graphql",
+            data=json.dumps(payload),
+            headers={
+                "accept": "application/json",
+                "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                "content-type": "application/json",
+                "origin": "https://www.magazineluiza.com.br",
+                "referer": pdp_url,
+            },
+        )
+        text = await response.text()
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            pass
+        result = {
+            "method": "context_request_post",
+            "status_code": response.status,
+            "content_type": response.headers.get("content-type", ""),
+            "text_length": len(text),
+            "text_preview": text[:500],
+            "json": parsed,
+        }
+    except Exception as exc:
+        result = {
+            "method": "context_request_post",
+            "status_code": 0,
+            "content_type": "",
+            "text_length": 0,
+            "text_preview": "",
+            "json": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     result["elapsed_seconds"] = round(time.time() - started, 3)
     result["variation_id"] = variation_id
     result["summary"] = summarize_review_graphql(result.get("json"))
