@@ -162,13 +162,11 @@ def _translate_recommendation(text):
 
 
 def _translate_ref_refrigerator_type(text):
-    if "(" in str(text):
-        return text
     normalized = _normalize(text)
-    if normalized == "duplex":
-        return "Duplex(Freezer-on-Top)"
-    if normalized == "inverse":
-        return "Inverse(Freezer-on-Bottom)"
+    if normalized.startswith("duplex"):
+        return "Freezer-on-Top"
+    if normalized.startswith("inverse"):
+        return "Freezer-on-Bottom"
     return text
 
 
