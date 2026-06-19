@@ -231,6 +231,21 @@ def fetch_html(url, profile=None, timeout=None):
     return request_url(url, profile=profile or os.getenv("SEDA_ZENROWS_HTML_PROFILE", "auto_html"), timeout=timeout)
 
 
+def fetch_listing_next_data_html(url, profile=None, timeout=None):
+    current_profile = profile or os.getenv("SEDA_ZENROWS_LISTING_PROFILE", "listing_next_data_js_wait")
+    result = request_url(url, profile=current_profile, timeout=timeout)
+    html_text = _result_to_next_data_html(result.text)
+    if html_text:
+        result.text = html_text
+        result.success = True
+    return result
+
+
+def fetch_pdp_rendered_html(url, profile=None, timeout=None):
+    current_profile = profile or os.getenv("SEDA_ZENROWS_DETAIL_PROFILE", "js_premium_original_status")
+    return request_url(url, profile=current_profile, timeout=timeout)
+
+
 def fetch_next_data_html(url, profile=None, timeout=None):
     explicit_profile = profile is not None
     profiles = [profile] if explicit_profile else [os.getenv("SEDA_ZENROWS_PDP_PROFILE", "pdp_next_data")]
@@ -267,8 +282,4 @@ def _result_to_next_data_html(text):
     if not isinstance(next_data, str) or not next_data.strip():
         return ""
     return '<script id="__NEXT_DATA__" type="application/json">' + html.escape(next_data, quote=False) + "</script>"
-
-
-
-
 

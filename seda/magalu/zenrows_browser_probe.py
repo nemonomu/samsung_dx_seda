@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import asyncio
 import json
 import os
@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
-from ..parsers import parse_detail, parse_listing
+from ..parsers import parse_detail, parse_listing, sku_from_url
 from ..step00_config import DEFAULT_RUNS_BASE, run_date
+from .review_api import PRODUCT_RATING_QUERY
 
 
 BASE_URL = "https://www.magazineluiza.com.br"
@@ -117,6 +118,76 @@ def summarize_pdp(html, url):
     return summary
 
 
+def review_payload(variation_id, page=1, page_size=16):
+    return {
+        "operationName": "ProductRating",
+        "variables": {
+            "variationId": variation_id,
+            "filters": None,
+            "includeUserReviews": True,
+            "page": page,
+            "pageSize": page_size,
+            "sortType": "MORE_RELEVANT",
+            "hasTag": True,
+        },
+        "query": PRODUCT_RATING_QUERY,
+    }
+
+
+async def fetch_product_rating_in_page(page, pdp_url):
+    variation_id = sku_from_url(pdp_url)
+    payload = review_payload(variation_id)
+    started = time.time()
+    result = await page.evaluate(
+        """
+        async ({ payload }) => {
+          const response = await fetch('https://federation.magazineluiza.com.br/graphql', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'accept': 'application/json',
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+          const text = await response.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch (error) {}
+          return {
+            status_code: response.status,
+            content_type: response.headers.get('content-type') || '',
+            text_length: text.length,
+            text_preview: text.slice(0, 500),
+            json
+          };
+        }
+        """,
+        {"payload": payload},
+    )
+    result["elapsed_seconds"] = round(time.time() - started, 3)
+    result["variation_id"] = variation_id
+    result["summary"] = summarize_review_graphql(result.get("json"))
+    return result
+
+
+def summarize_review_graphql(parsed):
+    product_rating = (((parsed or {}).get("data") or {}).get("productRating") or {}) if isinstance(parsed, dict) else {}
+    general = product_rating.get("general") if isinstance(product_rating.get("general"), dict) else {}
+    user_reviews = product_rating.get("userReviews") if isinstance(product_rating.get("userReviews"), dict) else {}
+    items = user_reviews.get("items") if isinstance(user_reviews.get("items"), list) else []
+    descriptions = [str(item.get("description") or "").strip() for item in items if isinstance(item, dict) and str(item.get("description") or "").strip()]
+    return {
+        "has_product_rating": bool(product_rating),
+        "rating": general.get("rating", ""),
+        "reviewCount": general.get("reviewCount", ""),
+        "commentCount": general.get("commentCount", ""),
+        "review_items": len(items),
+        "review_descriptions": len(descriptions),
+        "sample_reviews": descriptions[:3],
+        "success": bool(product_rating and (general or descriptions)),
+    }
+
+
 async def execute_probe(probe, listing_url, pdp_url):
     if dry_run():
         return {
@@ -141,10 +212,14 @@ async def execute_probe(probe, listing_url, pdp_url):
                 page_result = await fetch_page(page, listing_url)
                 page_result["summary"] = summarize_listing(page_result.get("html", ""), listing_url)
                 results.append({"kind": "listing", **page_result})
-            if probe in {"pdp", "all"}:
+            if probe in {"pdp", "review", "all"}:
                 page_result = await fetch_page(page, pdp_url)
                 page_result["summary"] = summarize_pdp(page_result.get("html", ""), pdp_url)
-                results.append({"kind": "pdp", **page_result})
+                if probe in {"pdp", "all"}:
+                    results.append({"kind": "pdp", **page_result})
+            if probe in {"review", "all"}:
+                review_result = await fetch_product_rating_in_page(page, pdp_url)
+                results.append({"kind": "review", "url": pdp_url, **review_result})
         finally:
             await browser.close()
     return {
@@ -174,7 +249,7 @@ def write_probe(result):
 
 def main():
     parser = argparse.ArgumentParser(description="ZenRows Scraping Browser probe for Magalu")
-    parser.add_argument("probe", choices=["listing", "pdp", "all"])
+    parser.add_argument("probe", choices=["listing", "pdp", "review", "all"])
     parser.add_argument("--listing-url", default=DEFAULT_LISTING_URL)
     parser.add_argument("--pdp-url", default=DEFAULT_PDP_URL)
     parser.add_argument("--execute", action="store_true", help="Execute paid Scraping Browser session. Requires SEDA_ALLOW_ZENROWS=1 and API key.")

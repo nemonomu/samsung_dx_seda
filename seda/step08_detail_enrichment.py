@@ -211,6 +211,48 @@ def _magalu_graphql_detail(row, product_url):
     return result
 
 
+def _merge_magalu_zenrows_detail(row, product_url):
+    if row.get("retailer") != "Magalu":
+        return False
+    if os.getenv("SEDA_MAGALU_ZENROWS_DETAIL_FALLBACK", "1").lower() in {"0", "false", "no", "n"}:
+        return False
+    try:
+        from .magalu.zenrows_client import fetch_pdp_rendered_html
+
+        result = fetch_pdp_rendered_html(product_url)
+    except Exception as exc:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"zenrows_detail_error:{type(exc).__name__}")
+        return False
+    token = f"zenrows_detail:{result.profile}:{result.estimated_multiplier}"
+    if result.error:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:{result.error}")
+        return False
+    detail = parse_detail(result.text or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+    meaningful_keys = (
+        "retailer_sku_name",
+        "final_sku_price",
+        "screen_size",
+        "model_year",
+        "ref_refrigerator_type",
+        "ref_capacity",
+        "ldy_loading_type",
+        "ldy_capacity",
+        "delivery_availability",
+        "pick_up_availability",
+        "summarized_review_content",
+        "count_of_star_ratings",
+        "count_of_reviews",
+    )
+    if not any(detail.get(key) for key in meaningful_keys):
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:empty_detail")
+        return False
+    _merge_non_empty(row, detail)
+    row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
+    cost = (result.headers or {}).get("X-Request-Cost", "")
+    status = "zenrows_detail_html" if not cost else f"zenrows_detail_html_cost:{cost}"
+    row["parse_status"] = _append_token(row.get("parse_status", ""), status)
+    return True
+
 def _retry_magalu_shipping_blanks(row, product_url):
     if row.get("retailer") != "Magalu":
         return False
@@ -454,6 +496,8 @@ def main():
             else:
                 magalu_detail_blocked_streak = 0
         result = None
+        if not detail_done and row.get("retailer") == "Magalu":
+            detail_done = _merge_magalu_zenrows_detail(row, url)
         if not detail_done and _fallback_fetch_enabled_for_row(row, fallback_fetch):
             result = fetch_url(_detail_fetch_url(row, url))
             raw_dir = root / "detail" / "raw" / row.get("retailer", "unknown").lower().replace(" ", "_")

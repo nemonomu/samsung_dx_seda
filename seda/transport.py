@@ -176,12 +176,19 @@ def _fetch_graphql(url, timeout):
 
 def _fetch_zenrows(url, timeout):
     try:
-        from .magalu.zenrows_client import fetch_html
+        if "magazineluiza.com.br" in url and "/busca/" in url:
+            from .magalu.zenrows_client import fetch_listing_next_data_html
 
-        result = fetch_html(url, timeout=timeout)
+            result = fetch_listing_next_data_html(url, timeout=timeout)
+            method_prefix = "zenrows_listing_next_data"
+        else:
+            from .magalu.zenrows_client import fetch_html
+
+            result = fetch_html(url, timeout=timeout)
+            method_prefix = "zenrows"
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")
-    method = f"zenrows:{result.profile}:{result.estimated_multiplier}"
+    method = f"{method_prefix}:{result.profile}:{result.estimated_multiplier}"
     if result.success:
         return FetchResult(url=url, text=result.text, status_code=result.status_code, method=method)
     error = result.error or "zenrows_failed"
