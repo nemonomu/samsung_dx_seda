@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 
 from ..parsers import (
+    appliance_model_number_from_text,
     clean_text,
     ldy_color_from_text,
     ldy_sku_from_text,
@@ -214,7 +215,7 @@ def _product_source_detail(data):
                     )
                     or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total"])
                 ),
-                "sku_short_version": ref_sku_short_version_from_text(name),
+                "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
             }
         )
     if line == "LDY":
@@ -238,7 +239,7 @@ def _product_source_detail(data):
                     or _first_spec(spec_values, ["capacidade kg de roupas", "capacidade"])
                 ),
                 "sku_short_version": ldy_sku_short_version_from_text(name),
-                "sku": ldy_sku_from_text(name),
+                "sku": ldy_sku_from_text(name) or appliance_model_number_from_text(name),
             }
         )
     return detail

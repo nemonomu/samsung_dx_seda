@@ -141,6 +141,28 @@ def ldy_sku_from_text(text):
     return match.group(1) if match else ""
 
 
+def appliance_model_number_from_text(text):
+    text = clean_text(text).upper()
+    candidates = re.findall(
+        r"\b(?=[A-Z0-9/-]*[A-Z])(?=[A-Z0-9/-]*\d)[A-Z0-9]+(?:[-/][A-Z0-9]+)*\b",
+        text,
+    )
+    for candidate in candidates:
+        compact = re.sub(r"[\s._/-]+", "", candidate)
+        if len(compact) < 4:
+            continue
+        if re.fullmatch(r"\d+(?:[,.]\d+)?(?:KG|KGS|L|LITROS?|V|VOLTS?)", compact):
+            continue
+        if re.fullmatch(r"(?:110|127|220|240)V", compact):
+            continue
+        if re.fullmatch(r"\d+(?:K|HZ|HDMI|USB)", compact):
+            continue
+        if compact in {"BIVOLT", "INVERTER", "FROSTFREE", "FROSTFREEINVERTER"}:
+            continue
+        return candidate
+    return ""
+
+
 def ldy_color_from_text(text):
     match = re.search(
         r"\b(Inox|Black|Branca|Branco|Preta|Preto|Prata|Cinza|Grafite|Titanium|Tit[aâ]nio)\b",
@@ -484,9 +506,8 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
         "discount_type": _casas_bahia_ssr_discount_text(price, flags, seals),
         "delivery_availability": "",
         "pick_up_availability": _casas_bahia_availability_pickup_text(price) or _casas_bahia_pickup_text(flags),
-        "sku": model_number_from_text(title or "")
-        or clean_text(product.get("idSku") or product.get("sku"))
-        or sku_from_url(product_url),
+        "sku": _casas_bahia_listing_sku(title or "")
+        or ("" if product_line() in {"REF", "LDY"} else clean_text(product.get("idSku") or product.get("sku")) or sku_from_url(product_url)),
         "screen_size": screen_size_from_text(title or ""),
         "model_year": model_year_from_text(title or ""),
         "star_rating": _zero_preserving_metric(rating),
@@ -504,6 +525,13 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
 def _casas_bahia_availability_pickup_text(price):
     availability = price.get("availability") if isinstance(price.get("availability"), dict) else {}
     return "Retirada disponivel" if availability.get("Retira") else ""
+
+
+def _casas_bahia_listing_sku(title):
+    line = product_line()
+    if line in {"REF", "LDY"}:
+        return appliance_model_number_from_text(title or "")
+    return model_number_from_text(title or "")
 
 
 def _casas_bahia_sku_status(product):
@@ -538,7 +566,8 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
         "discount_type": _casas_bahia_discount_text(product, flags, stamp),
         "delivery_availability": "",
         "pick_up_availability": _casas_bahia_pickup_text(flags),
-        "sku": clean_text(product.get("sku")) or sku_from_url(product_url) or clean_text(product.get("id")),
+        "sku": _casas_bahia_listing_sku(product.get("title") or "")
+        or ("" if product_line() in {"REF", "LDY"} else clean_text(product.get("sku")) or sku_from_url(product_url) or clean_text(product.get("id"))),
         "screen_size": screen_size_from_text(product.get("title") or ""),
         "model_year": model_year_from_text(product.get("title") or ""),
         "star_rating": _zero_preserving_metric(rating),

@@ -61,8 +61,6 @@ FINAL_OUTPUT_COLUMNS = COMMON_FINAL_COLUMNS + PRODUCT_EXTRA_COLUMNS["TV"] + REVI
 def final_output_columns(product_line_value=None):
     line = (product_line_value or product_line()).strip().upper()
     extras = PRODUCT_EXTRA_COLUMNS.get(line, PRODUCT_EXTRA_COLUMNS["TV"])
-    if line in {"REF", "LDY"} and _active_retailer() == "casas_bahia":
-        extras = [column for column in extras if column != "sku"]
     return COMMON_FINAL_COLUMNS + extras + REVIEW_FINAL_COLUMNS
 
 
@@ -166,7 +164,10 @@ def _format_row(row, now):
 
 
 def _sku_for_output(row, item):
-    if product_line() == "LDY":
+    line = product_line()
+    if _active_retailer() == "casas_bahia" and line in {"TV", "REF"}:
+        return ""
+    if line == "LDY":
         full = ldy_sku_from_text(row.get("retailer_sku_name", ""))
         if full:
             return full
@@ -178,7 +179,9 @@ def _sku_for_output(row, item):
 
 def _sku_short_version_for_output(row):
     line = product_line()
-    if line in {"REF", "LDY"} and _active_retailer() == "casas_bahia":
+    if _active_retailer() == "magalu" and line in {"REF", "LDY"}:
+        return ""
+    if line == "REF" and _active_retailer() == "casas_bahia":
         sku = str(row.get("sku") or "").strip()
         if sku:
             return sku
