@@ -1,6 +1,8 @@
 ﻿import json
 import os
 import re
+
+import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .parsers import compact_json, parse_detail, sku_from_url
@@ -23,6 +25,118 @@ def _review_count(value):
     except ValueError:
         return 1
     return len(parsed) if isinstance(parsed, list) else 0
+
+
+def _review_values(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        text = str(value or "").strip()
+        return [text] if text else []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item or "").strip()]
+
+
+def _metric_int(value):
+    text = str(value or "").strip()
+    if not text:
+        return -1
+    text = text.replace(".", "").replace(",", ".")
+    try:
+        return int(float(text))
+    except ValueError:
+        return -1
+
+
+def _magalu_review_target(row):
+    try:
+        review_limit = int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20"))
+    except ValueError:
+        review_limit = 20
+    review_count = _metric_int(row.get("count_of_reviews"))
+    if review_count >= 0:
+        return min(review_limit, review_count)
+    return review_limit
+
+
+def _magalu_html_headers():
+    return {
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        ),
+    }
+
+
+def _fetch_magalu_next_html(url, label="html"):
+    timeout = int(os.getenv("SEDA_MAGALU_HTML_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
+    last = {"status_code": 0, "text": "", "error": "not_attempted", "method": "", "label": label}
+    if os.getenv("SEDA_MAGALU_HTML_REQUESTS_FETCH", "1").lower() not in {"0", "false", "no", "n"}:
+        try:
+            response = requests.get(url, headers=_magalu_html_headers(), timeout=timeout)
+            last = {
+                "status_code": response.status_code,
+                "text": response.text or "",
+                "error": "",
+                "method": "requests",
+                "label": label,
+            }
+            if response.status_code == 200 and "__NEXT_DATA__" in (response.text or ""):
+                return last
+            last["error"] = f"requests_missing_next_data:{response.status_code}:len={len(response.text or '')}"
+        except Exception as exc:
+            last = {"status_code": 0, "text": "", "error": f"requests_error:{type(exc).__name__}: {exc}", "method": "requests", "label": label}
+    if os.getenv("SEDA_MAGALU_HTML_BROWSER_FALLBACK", "1").lower() in {"0", "false", "no", "n"}:
+        return last
+    try:
+        from .magalu.browser_session import fetch_html
+
+        result = fetch_html(url)
+        text = result.get("text") or ""
+        return {
+            "status_code": result.get("status_code") or 0,
+            "text": text,
+            "error": result.get("error") or ("" if "__NEXT_DATA__" in text else "browser_missing_next_data"),
+            "method": "browser",
+            "label": label,
+        }
+    except Exception as exc:
+        if not last.get("error"):
+            last["error"] = f"browser_error:{type(exc).__name__}: {exc}"
+        else:
+            last["error"] = f"{last['error']}|browser_error:{type(exc).__name__}: {exc}"
+        return last
+
+
+def _magalu_review_url(product_url):
+    parsed = urlsplit(product_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    try:
+        p_index = parts.index("p")
+    except ValueError:
+        return ""
+    if p_index < 1 or len(parts) <= p_index + 3:
+        return ""
+    slug = parts[p_index - 1]
+    item_id = parts[p_index + 1]
+    category = parts[p_index + 2].upper()
+    subcategory = parts[p_index + 3].upper()
+    path = f"/review/{item_id}/{slug}/{category}/{subcategory}/"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _magalu_review_page_url(review_url, page):
+    if page <= 1:
+        return review_url
+    parsed = urlsplit(review_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
 def _merge_magalu_reviews(row, product_url):
@@ -344,13 +458,7 @@ def _merge_magalu_pdp_html(row, product_url):
         return
     if os.getenv("SEDA_MAGALU_PDP_HTML_FETCH", "1").lower() in {"0", "false", "no", "n"}:
         return
-    try:
-        from .magalu.browser_session import fetch_html
-
-        result = fetch_html(product_url)
-    except Exception as exc:
-        row["parse_status"] = _append_token(row.get("parse_status", ""), f"pdp_html_error:{type(exc).__name__}")
-        return
+    result = _fetch_magalu_next_html(product_url, label="pdp")
     if result.get("status_code") != 200 or "__NEXT_DATA__" not in (result.get("text") or ""):
         text = result.get("text") or ""
         row["parse_status"] = _append_token(
@@ -371,8 +479,74 @@ def _merge_magalu_pdp_html(row, product_url):
     ):
         if detail.get(key) and not row.get(key):
             row[key] = detail[key]
-    row["fetch_method"] = _append_token(row.get("fetch_method", ""), "browser_pdp_html")
+    row["fetch_method"] = _append_token(row.get("fetch_method", ""), f"{result.get('method') or 'unknown'}_pdp_html")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html")
+
+
+def _merge_magalu_review_pages(row, product_url):
+    if row.get("retailer") != "Magalu":
+        return None
+    if os.getenv("SEDA_MAGALU_REVIEW_HTML_PAGES", "1").lower() in {"0", "false", "no", "n"}:
+        return None
+    target = _magalu_review_target(row)
+    if target <= 0:
+        return {"success": True, "reviews": [], "trace": [], "method": "review_html_pages", "target": target}
+    reviews = _review_values(row.get("detailed_review_content"))
+    if len(reviews) >= target:
+        return {"success": True, "reviews": reviews[:target], "trace": [], "method": "review_html_pages", "target": target}
+    review_url = _magalu_review_url(product_url)
+    if not review_url:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), "review_html_missing_url")
+        return {"success": False, "reviews": reviews, "trace": [], "method": "review_html_pages", "target": target, "error": "missing_review_url"}
+
+    max_pages = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_MAX_PAGES", "6"))
+    start_page = 1 if not reviews else 2
+    seen = {review.casefold() for review in reviews}
+    trace = []
+    methods = []
+    for page in range(start_page, max_pages + 1):
+        page_url = _magalu_review_page_url(review_url, page)
+        result = _fetch_magalu_next_html(page_url, label=f"review_page_{page}")
+        methods.append(result.get("method") or "unknown")
+        trace_item = {
+            "page": page,
+            "method": result.get("method", ""),
+            "status_code": result.get("status_code", 0),
+            "length": len(result.get("text") or ""),
+            "has_next_data": "__NEXT_DATA__" in (result.get("text") or ""),
+            "error": result.get("error", ""),
+        }
+        if result.get("status_code") == 200 and "__NEXT_DATA__" in (result.get("text") or ""):
+            detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+            for key in ("star_rating", "count_of_star_ratings", "count_of_reviews"):
+                if detail.get(key) and not row.get(key):
+                    row[key] = detail[key]
+            page_reviews = _review_values(detail.get("detailed_review_content"))
+            trace_item["descriptions"] = len(page_reviews)
+            added = 0
+            for description in page_reviews:
+                key = description.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                reviews.append(description)
+                added += 1
+                if len(reviews) >= target:
+                    break
+            trace_item["new_descriptions"] = added
+        trace.append(trace_item)
+        if len(reviews) >= target:
+            break
+
+    if reviews:
+        row["detailed_review_content"] = compact_json(reviews[:target])
+        row["fetch_method"] = _append_token(row.get("fetch_method", ""), f"{'+'.join(dict.fromkeys(methods))}_review_pages")
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_html_pages_{len(reviews[:target])}/{target}")
+    elif trace:
+        last = trace[-1]
+        reason = last.get("error") or "missing_product_rating"
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"review_html_pages_failed:{reason}")
+    return {"success": len(reviews) >= target, "reviews": reviews[:target], "trace": trace, "method": "review_html_pages", "target": target}
 
 
 def _merge_magalu_zenrows_pdp_html(row, product_url):
@@ -538,6 +712,7 @@ def main():
         elif not detail_done:
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_fetch_skipped")
         _merge_magalu_pdp_html(row, url)
+        _merge_magalu_review_pages(row, url)
         review_result = _merge_magalu_reviews(row, url)
         if row.get("retailer") == "Magalu" and review_result is not None:
             if review_result.get("success"):
