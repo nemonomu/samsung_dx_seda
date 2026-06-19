@@ -177,10 +177,14 @@ def _sku_for_output(row, item):
 
 
 def _sku_short_version_for_output(row):
+    line = product_line()
+    if line == "REF" and _active_retailer() == "casas_bahia":
+        sku = str(row.get("sku") or "").strip()
+        if sku:
+            return sku
     value = str(row.get("sku_short_version") or "").strip()
     if value:
         return value
-    line = product_line()
     name = row.get("retailer_sku_name", "")
     if line == "REF":
         return ref_sku_short_version_from_text(name)
