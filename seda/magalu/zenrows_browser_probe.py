@@ -66,6 +66,16 @@ async def block_route(route):
         await route.continue_()
 
 
+async def install_native_fetch_capture(page):
+    await page.add_init_script("""
+        (() => {
+          if (!window.__sedaNativeFetch) {
+            window.__sedaNativeFetch = window.fetch.bind(window);
+          }
+        })();
+    """)
+
+
 async def fetch_page(page, url):
     wait_ms = int(os.getenv("SEDA_ZENROWS_BROWSER_WAIT_MS", "5000"))
     timeout = int(os.getenv("SEDA_ZENROWS_BROWSER_TIMEOUT_MS", "90000"))
@@ -143,7 +153,8 @@ async def fetch_product_rating_in_page(page, pdp_url):
         result = await page.evaluate(
             """
             async ({ payload }) => {
-              const response = await fetch('https://federation.magazineluiza.com.br/graphql', {
+              const nativeFetch = window.__sedaNativeFetch || window.fetch.bind(window);
+              const response = await nativeFetch('https://federation.magazineluiza.com.br/graphql', {
                 method: 'POST',
                 credentials: 'include',
                 headers: {
@@ -156,7 +167,7 @@ async def fetch_product_rating_in_page(page, pdp_url):
               let json = null;
               try { json = JSON.parse(text); } catch (error) {}
               return {
-                method: 'page_evaluate_fetch',
+                method: window.__sedaNativeFetch ? 'page_evaluate_native_fetch' : 'page_evaluate_fetch',
                 status_code: response.status,
                 content_type: response.headers.get('content-type') || '',
                 text_length: text.length,
@@ -276,6 +287,7 @@ async def execute_probe(probe, listing_url, pdp_url):
         try:
             context = browser.contexts[0] if browser.contexts else await browser.new_context(locale="pt-BR")
             page = await context.new_page()
+            await install_native_fetch_capture(page)
             await page.route("**/*", block_route)
             if probe in {"listing", "all"}:
                 page_result = await fetch_page(page, listing_url)
