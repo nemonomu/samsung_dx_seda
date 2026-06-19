@@ -27,15 +27,15 @@ def _review_count(value):
 
 def _merge_magalu_reviews(row, product_url):
     if row.get("retailer") != "Magalu":
-        return
+        return None
     if os.getenv("SEDA_MAGALU_REVIEW_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
-        return
+        return None
     if _review_count(row.get("detailed_review_content")) >= int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20")):
-        return
+        return None
     if os.getenv("SEDA_MAGALU_SKIP_REVIEW_WITHOUT_RATING", "1").lower() not in {"0", "false", "no", "n"}:
         if not row.get("star_rating") and not row.get("count_of_star_ratings"):
             row["parse_status"] = _append_token(row.get("parse_status", ""), "reviews_skipped_no_rating")
-            return
+            return None
 
     from .magalu.review_api import fetch_product_rating
 
@@ -47,7 +47,7 @@ def _merge_magalu_reviews(row, product_url):
     if review_count >= 0:
         limit = min(limit, review_count)
     if limit <= 0:
-        return
+        return None
     result = fetch_product_rating(sku_from_url(product_url) or row.get("sku"), limit=limit)
     reviews = result.get("reviews") or []
     if reviews:
@@ -63,6 +63,7 @@ def _merge_magalu_reviews(row, product_url):
             row["count_of_reviews"] = general.get("commentCount")
         else:
             row["count_of_reviews"] = general.get("reviewCount", "") or row.get("count_of_reviews", "")
+    return result
 
 
 def _merge_casas_bahia_apis(row):
@@ -351,9 +352,35 @@ def _detail_fetch_url(row, product_url):
 def _fallback_fetch_enabled_for_row(row, fallback_fetch):
     if not fallback_fetch:
         return False
+    if row.get("retailer") == "Magalu":
+        return os.getenv("SEDA_MAGALU_DETAIL_HTML_FALLBACK", "0").lower() in {"1", "true", "yes", "y"}
     if row.get("retailer") != "Casas Bahia":
         return True
     return os.getenv("SEDA_CASAS_BAHIA_PDP_HTML_FETCH", "0").lower() in {"1", "true", "yes", "y"}
+
+
+def _has_blocked_graphql_trace(result):
+    if not result:
+        return False
+    for trace_item in result.get("trace") or []:
+        try:
+            status_code = int(trace_item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        error = str(trace_item.get("error") or "").lower()
+        if status_code in {401, 403, 429}:
+            return True
+        if "blocked" in error or "invalid_json" in error or "non_json_or_blocked" in error:
+            return True
+    return False
+
+
+def _abort_on_magalu_blocked_streak(kind, streak, threshold, output, rows):
+    if threshold <= 0 or streak < threshold:
+        return
+    write_csv(output, rows, columns=OUTPUT_COLUMNS)
+    print(f"[seda] aborting Magalu {kind}: blocked_graphql_streak={streak} checkpoint={output}", flush=True)
+    raise RuntimeError(f"magalu_{kind}_blocked_graphql_streak:{streak}")
 
 
 def _append_token(value, token):
@@ -399,6 +426,10 @@ def main():
     total_rows = len(enriched) + len(rows)
     checkpoint_every = int(os.getenv("SEDA_DETAIL_CHECKPOINT_EVERY", "25"))
     fallback_fetch = os.getenv("SEDA_DETAIL_FALLBACK_FETCH", "1").lower() not in {"0", "false", "no", "n"}
+    magalu_detail_blocked_streak = 0
+    magalu_review_blocked_streak = 0
+    magalu_detail_abort_threshold = int(os.getenv("SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD", "5"))
+    magalu_review_abort_threshold = int(os.getenv("SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD", "5"))
     for index, row in enumerate(rows, start=len(enriched) + 1):
         url = row.get("product_url", "")
         if not url:
@@ -408,6 +439,20 @@ def main():
         _clear_magalu_listing_metrics(row)
         graph_result = _magalu_graphql_detail(row, url)
         detail_done = bool(graph_result and graph_result.get("success"))
+        if row.get("retailer") == "Magalu" and graph_result is not None:
+            if detail_done:
+                magalu_detail_blocked_streak = 0
+            elif _has_blocked_graphql_trace(graph_result):
+                magalu_detail_blocked_streak += 1
+                _abort_on_magalu_blocked_streak(
+                    "detail",
+                    magalu_detail_blocked_streak,
+                    magalu_detail_abort_threshold,
+                    output,
+                    enriched + [row],
+                )
+            else:
+                magalu_detail_blocked_streak = 0
         result = None
         if not detail_done and _fallback_fetch_enabled_for_row(row, fallback_fetch):
             result = fetch_url(_detail_fetch_url(row, url))
@@ -425,7 +470,21 @@ def main():
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_fetch_failed:{detail_error}")
         elif not detail_done:
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_fetch_skipped")
-        _merge_magalu_reviews(row, url)
+        review_result = _merge_magalu_reviews(row, url)
+        if row.get("retailer") == "Magalu" and review_result is not None:
+            if review_result.get("success"):
+                magalu_review_blocked_streak = 0
+            elif _has_blocked_graphql_trace(review_result):
+                magalu_review_blocked_streak += 1
+                _abort_on_magalu_blocked_streak(
+                    "review",
+                    magalu_review_blocked_streak,
+                    magalu_review_abort_threshold,
+                    output,
+                    enriched + [row],
+                )
+            else:
+                magalu_review_blocked_streak = 0
         _merge_magalu_pdp_html(row, url)
         _merge_casas_bahia_apis(row)
         enriched.append(row)
