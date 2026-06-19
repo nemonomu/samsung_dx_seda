@@ -10,15 +10,53 @@ ZENROWS_API_URL = "https://api.zenrows.com/v1/"
 
 
 PROFILE_PARAMS = {
+    # Plain API request. Cheapest baseline; expected to fail on protected Magalu pages but useful for comparison.
+    "basic_html": {},
     # Cheapest adaptive probe for listing/detail HTML. ZenRows decides whether JS/proxy is needed.
     "auto_html": {
         "mode": "auto",
         "proxy_country": "br",
     },
+    # Adaptive mode plus browser-like headers. Useful when the site expects referer/language context.
+    "auto_custom_headers": {
+        "mode": "auto",
+        "proxy_country": "br",
+        "custom_headers": "true",
+    },
+    # Browser rendering without residential proxy. Confirms whether JavaScript alone is enough.
+    "js_html": {
+        "js_render": "true",
+        "wait": "5000",
+        "block_resources": "image,media,font,stylesheet",
+    },
     # Brazil residential IP, no browser rendering. Good first attempt for SSR __NEXT_DATA__.
     "premium_html": {
         "premium_proxy": "true",
         "proxy_country": "br",
+    },
+    # Protected-page baseline: browser rendering plus Brazil residential proxy.
+    "js_premium_html": {
+        "js_render": "true",
+        "premium_proxy": "true",
+        "proxy_country": "br",
+        "wait": "5000",
+        "block_resources": "image,media,font,stylesheet",
+    },
+    # Same as protected baseline but asks ZenRows to expose original target status for diagnostics.
+    "js_premium_original_status": {
+        "js_render": "true",
+        "premium_proxy": "true",
+        "proxy_country": "br",
+        "wait": "5000",
+        "original_status": "true",
+        "block_resources": "image,media,font,stylesheet",
+    },
+    # JSON response without premium proxy. Lower-cost XHR check when IP reputation is not the issue.
+    "json_response_light": {
+        "js_render": "true",
+        "json_response": "true",
+        "wait": "3000",
+        "block_resources": "image,media,font,stylesheet",
     },
     # Browser-rendered full PDP HTML. Use for diagnosing AI summary / __NEXT_DATA__ availability.
     "pdp_js_full": {
@@ -110,6 +148,9 @@ def build_params(profile, extra=None):
     profile = profile or os.getenv("SEDA_ZENROWS_PROFILE", "auto_html")
     params = dict(PROFILE_PARAMS.get(profile, PROFILE_PARAMS["auto_html"]))
     params["proxy_country"] = os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", params.get("proxy_country", "br"))
+    session_id = os.getenv("SEDA_ZENROWS_SESSION_ID", "").strip()
+    if session_id:
+        params["session_id"] = session_id
     if os.getenv("SEDA_ZENROWS_CUSTOM_HEADERS", "0").lower() in {"1", "true", "yes", "y"}:
         params["custom_headers"] = "true"
     if extra:
