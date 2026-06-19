@@ -166,6 +166,8 @@ def fetch_search_listing(url, timeout=None):
     sleep_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_RETRY_SLEEP_SECONDS", "3.0"))
     page_sizes = _page_sizes()
     trace = []
+    direct_min_products = int(os.getenv("SEDA_MAGALU_SEARCH_DIRECT_MIN_PRODUCTS", "40"))
+    best_direct_result = None
 
     session = requests.Session()
     for page_size in page_sizes:
@@ -206,7 +208,7 @@ def fetch_search_listing(url, timeout=None):
             search = (parsed_response.get("data") or {}).get("search") or {}
             products = search.get("products") or []
             if products:
-                return {
+                direct_result = {
                     "success": True,
                     "text": _as_next_data_html(search, url),
                     "products": len(products),
@@ -214,6 +216,11 @@ def fetch_search_listing(url, timeout=None):
                     "trace": trace,
                     "method": "direct_graphql_search",
                 }
+                if len(products) >= direct_min_products:
+                    return direct_result
+                best_direct_result = direct_result
+                trace_item["error"] = f"insufficient_direct_products:{len(products)}<{direct_min_products}"
+                break
             trace_item["error"] = "empty_products"
 
     if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
@@ -223,6 +230,10 @@ def fetch_search_listing(url, timeout=None):
         if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_STRICT", "0").lower() in {"1", "true", "yes", "y"}:
             return result
 
+    if best_direct_result:
+        best_direct_result["trace"] = trace
+        best_direct_result["method"] = "direct_graphql_search_insufficient"
+        return best_direct_result
     return {"success": False, "error": "magalu_search_graphql_failed", "text": "", "trace": trace}
 
 
@@ -328,6 +339,8 @@ def _headers(url):
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
         ),
+        "x-channel-id": "45",
+        "x-channel-name": "mixer-desk.magazineluiza.com.br",
     }
 
 
