@@ -30,7 +30,12 @@ def _merge_magalu_reviews(row, product_url):
         return None
     if os.getenv("SEDA_MAGALU_REVIEW_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
         return None
-    if _review_count(row.get("detailed_review_content")) >= int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20")):
+    existing_review_count = _review_count(row.get("detailed_review_content"))
+    review_limit = int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20"))
+    if existing_review_count >= review_limit:
+        return None
+    if existing_review_count and os.getenv("SEDA_MAGALU_REVIEW_GRAPHQL_AFTER_HTML", "0").lower() not in {"1", "true", "yes", "y"}:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_html_{existing_review_count}")
         return None
     if os.getenv("SEDA_MAGALU_SKIP_REVIEW_WITHOUT_RATING", "1").lower() not in {"0", "false", "no", "n"}:
         if not row.get("star_rating") and not row.get("count_of_star_ratings"):
@@ -320,11 +325,22 @@ def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):
 def _merge_magalu_pdp_html(row, product_url):
     if row.get("retailer") != "Magalu":
         return
+    try:
+        review_limit = int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20"))
+    except ValueError:
+        review_limit = 20
+    try:
+        known_review_count = int(float(str(row.get("count_of_reviews") or "").replace(".", "").replace(",", ".")))
+    except ValueError:
+        known_review_count = -1
+    target_reviews = review_limit if known_review_count < 0 else min(review_limit, known_review_count)
+    needs_reviews = target_reviews > 0 and _review_count(row.get("detailed_review_content")) < target_reviews
+    needs_rating = not row.get("star_rating") or not row.get("count_of_star_ratings") or not row.get("count_of_reviews")
     needs_summary = not row.get("summarized_review_content") and any(
         row.get(key) for key in ("star_rating", "count_of_star_ratings", "count_of_reviews", "detailed_review_content")
     )
     needs_similar = not row.get("retailer_sku_name_similar")
-    if not needs_summary and not needs_similar:
+    if not needs_summary and not needs_similar and not needs_reviews and not needs_rating:
         return
     if os.getenv("SEDA_MAGALU_PDP_HTML_FETCH", "1").lower() in {"0", "false", "no", "n"}:
         return
@@ -345,7 +361,14 @@ def _merge_magalu_pdp_html(row, product_url):
             return
         return
     detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
-    for key in ("summarized_review_content", "retailer_sku_name_similar"):
+    for key in (
+        "summarized_review_content",
+        "retailer_sku_name_similar",
+        "star_rating",
+        "count_of_star_ratings",
+        "count_of_reviews",
+        "detailed_review_content",
+    ):
         if detail.get(key) and not row.get(key):
             row[key] = detail[key]
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), "browser_pdp_html")
@@ -514,6 +537,7 @@ def main():
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_fetch_failed:{detail_error}")
         elif not detail_done:
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_fetch_skipped")
+        _merge_magalu_pdp_html(row, url)
         review_result = _merge_magalu_reviews(row, url)
         if row.get("retailer") == "Magalu" and review_result is not None:
             if review_result.get("success"):
@@ -529,7 +553,6 @@ def main():
                 )
             else:
                 magalu_review_blocked_streak = 0
-        _merge_magalu_pdp_html(row, url)
         _merge_casas_bahia_apis(row)
         enriched.append(row)
         method = row.get("fetch_method") or (result.method if result else "")

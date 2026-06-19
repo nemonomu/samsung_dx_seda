@@ -167,13 +167,6 @@ def fetch_search_listing(url, timeout=None):
     page_sizes = _page_sizes()
     trace = []
 
-    if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
-        result = _fetch_search_listing_browser(url, page_sizes, timeout, trace)
-        if result.get("success"):
-            return result
-        if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_STRICT", "0").lower() in {"1", "true", "yes", "y"}:
-            return result
-
     session = requests.Session()
     for page_size in page_sizes:
         payload = _payload(url, page_size)
@@ -185,6 +178,7 @@ def fetch_search_listing(url, timeout=None):
             except Exception as exc:
                 trace.append(
                     {
+                        "method": "direct_graphql",
                         "page_size": page_size,
                         "attempt": attempt + 1,
                         "status_code": 0,
@@ -194,6 +188,7 @@ def fetch_search_listing(url, timeout=None):
                 continue
 
             trace_item = {
+                "method": "direct_graphql",
                 "page_size": page_size,
                 "attempt": attempt + 1,
                 "status_code": response.status_code,
@@ -217,8 +212,16 @@ def fetch_search_listing(url, timeout=None):
                     "products": len(products),
                     "page_size": page_size,
                     "trace": trace,
+                    "method": "direct_graphql_search",
                 }
             trace_item["error"] = "empty_products"
+
+    if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
+        result = _fetch_search_listing_browser(url, page_sizes, timeout, trace)
+        if result.get("success"):
+            return result
+        if os.getenv("SEDA_MAGALU_SEARCH_BROWSER_STRICT", "0").lower() in {"1", "true", "yes", "y"}:
+            return result
 
     return {"success": False, "error": "magalu_search_graphql_failed", "text": "", "trace": trace}
 
