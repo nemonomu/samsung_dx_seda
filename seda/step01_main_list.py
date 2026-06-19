@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .parsers import parse_listing
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, page_url, product_identity, run_root, selected_retailers, write_csv
-from .transport import fetch_url
+from .transport import fetch_url, is_blocked_html
 
 
 def page_numbers(run_id=None):
@@ -40,6 +40,28 @@ def max_pages(is_bsr):
     prefix = "SEDA_BSR" if is_bsr else "SEDA_MAIN"
     default = "40" if is_bsr else "120"
     return int(os.getenv(f"{prefix}_MAX_PAGES", os.getenv("SEDA_MAX_PAGES", default)))
+
+
+def _should_magalu_browser_fill(retailer_name, method, parsed):
+    if retailer_name != "Magalu":
+        return False
+    if os.getenv("SEDA_MAGALU_LISTING_BROWSER_FILL", "1").lower() in {"0", "false", "no", "n"}:
+        return False
+    if "direct_graphql_search" not in str(method or ""):
+        return False
+    minimum = int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "40"))
+    return len(parsed) < minimum
+
+
+def _append_method(current, extra):
+    current = str(current or "").strip()
+    extra = str(extra or "").strip()
+    if not extra:
+        return current
+    if not current:
+        return extra
+    parts = current.split("+")
+    return current if extra in parts else f"{current}+{extra}"
 
 
 def main():
@@ -87,6 +109,17 @@ def main():
                 )
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
+            if _should_magalu_browser_fill(config.name, method, parsed):
+                fill_result = fetch_url(url, mode="browser")
+                fill_blocked = is_blocked_html(fill_result.text, fill_result.status_code)
+                if fill_result.text and not fill_result.error and not fill_blocked:
+                    fill_parsed = parse_listing(fill_result.text, config.name, config.base_url, url, run_id=run_id)
+                    if len(fill_parsed) > len(parsed):
+                        text = fill_result.text
+                        method = _append_method(method, fill_result.method)
+                        attempts = attempts + fill_result.attempts
+                        parsed = fill_parsed
+                        raw_path.write_text(text, encoding="utf-8", errors="ignore")
             rank_field = "bsr_rank" if run_id == "bsr" else "main_rank"
             for local_index, item in enumerate(parsed, start=1):
                 item["fetch_method"] = method
