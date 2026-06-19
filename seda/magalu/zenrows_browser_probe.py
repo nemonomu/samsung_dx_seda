@@ -198,7 +198,13 @@ async def execute_probe(probe, listing_url, pdp_url):
             "results": [],
         }
 
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Missing dependency: playwright. Install project dependencies with: "
+            "python -m pip install -r requirements.txt"
+        ) from exc
 
     started_at = datetime.now().isoformat(timespec="seconds")
     results = []
