@@ -14,7 +14,7 @@ def configure_retailer(retailer_key):
     os.environ["SEDA_RETAILERS"] = retailer_key
     os.environ.setdefault("SEDA_ACTIVE_RETAILER", retailer_key)
     os.environ.setdefault("SEDA_PRODUCT_LINE", product_line())
-    default_fetch_mode = "magalu_browser_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
+    default_fetch_mode = "magalu_graphql_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
     os.environ.setdefault("SEDA_FETCH_MODE", default_fetch_mode)
     os.environ.setdefault("SEDA_RUN_ROOT", str(dated_run_root(retailer=retailer_key)))
 
@@ -37,7 +37,7 @@ def run_module(module_name, env=None, dry_run=False):
 
 
 def step_env(retailer_key, extra=None):
-    default_fetch_mode = "magalu_browser_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
+    default_fetch_mode = "magalu_graphql_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
     env = {
         "SEDA_RETAILERS": retailer_key,
         "SEDA_ACTIVE_RETAILER": retailer_key,

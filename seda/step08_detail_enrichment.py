@@ -499,7 +499,7 @@ def _merge_magalu_review_pages(row, product_url):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "review_html_missing_url")
         return {"success": False, "reviews": reviews, "trace": [], "method": "review_html_pages", "target": target, "error": "missing_review_url"}
 
-    max_pages = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_MAX_PAGES", "6"))
+    max_pages = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_MAX_PAGES", "10"))
     start_page = 1 if not reviews else 2
     seen = {review.casefold() for review in reviews}
     trace = []
