@@ -147,7 +147,9 @@ def api_key():
 def build_params(profile, extra=None):
     profile = profile or os.getenv("SEDA_ZENROWS_PROFILE", "auto_html")
     params = dict(PROFILE_PARAMS.get(profile, PROFILE_PARAMS["auto_html"]))
-    params["proxy_country"] = os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", params.get("proxy_country", "br"))
+    proxy_country = os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", params.get("proxy_country", "br"))
+    if _supports_proxy_country(params):
+        params["proxy_country"] = proxy_country
     session_id = os.getenv("SEDA_ZENROWS_SESSION_ID", "").strip()
     if session_id:
         params["session_id"] = session_id
@@ -156,6 +158,12 @@ def build_params(profile, extra=None):
     if extra:
         params.update({key: value for key, value in extra.items() if value not in (None, "")})
     return params
+
+
+def _supports_proxy_country(params):
+    if str(params.get("mode", "")).lower() == "auto":
+        return True
+    return str(params.get("premium_proxy", "")).lower() == "true"
 
 
 def estimated_multiplier(params):
