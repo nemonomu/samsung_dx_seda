@@ -14,8 +14,19 @@ def get_page():
     from DrissionPage import ChromiumOptions, ChromiumPage
 
     options = ChromiumOptions()
-    profile = os.getenv("SEDA_MAGALU_BROWSER_PROFILE", "C:/tmp/seda_magalu_drission_profile")
-    options.set_user_data_path(profile)
+    address = os.getenv("SEDA_MAGALU_BROWSER_ADDRESS", "").strip()
+    local_port = os.getenv("SEDA_MAGALU_BROWSER_LOCAL_PORT", "").strip()
+    if address:
+        options.set_address(address)
+    elif local_port:
+        options.set_local_port(int(local_port))
+
+    if os.getenv("SEDA_MAGALU_BROWSER_USE_SYSTEM_PROFILE", "0").lower() in {"1", "true", "yes", "y"}:
+        options.use_system_user_path()
+    elif not address:
+        profile = os.getenv("SEDA_MAGALU_BROWSER_PROFILE", "C:/tmp/seda_magalu_drission_profile")
+        options.set_user_data_path(profile)
+
     options.set_load_mode(os.getenv("SEDA_MAGALU_BROWSER_LOAD_MODE", "eager"))
     options.set_timeouts(
         base=float(os.getenv("SEDA_MAGALU_BROWSER_BASE_TIMEOUT", "30")),
