@@ -170,18 +170,35 @@ def _translate_recommendation(text):
 
 def _translate_ref_refrigerator_type(text):
     normalized = _normalize(text)
-    if normalized in {"sim", "nao", "não", "1", "2", "3"}:
+    if not normalized:
         return ""
-    if re.search(r"\b1\s*porta\b|porta unica|porta única", normalized, re.I):
+    if normalized in {"sim", "nao", "1", "2", "02", "3", "4"}:
+        return ""
+    if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
+        return ""
+    if re.search(r"\b1\s*porta\b|uma\s+porta|porta unica", normalized, re.I):
         return "Single Door"
-    if re.search(r"\b2\s*portas\b", normalized, re.I):
+    if re.search(r"\b2\s*portas\b|duas\s+portas", normalized, re.I):
         return "Two Door"
-    if normalized.startswith("duplex"):
+    if re.search(r"\b3\s*portas\b|tres\s+portas", normalized, re.I):
+        return "Three Door"
+    if re.search(r"\b4\s*portas\b|quatro\s+portas", normalized, re.I):
+        return "Four Door"
+    if "porta francesa" in normalized or normalized.startswith("french"):
+        return "French Door"
+    if "side by side" in normalized:
+        return "Side by Side"
+    if "multidoor" in normalized or "multi door" in normalized:
+        return "Multidoor"
+    if "top freezer" in normalized or normalized.startswith("duplex"):
         return "Freezer-on-Top"
-    if normalized.startswith("inverse"):
+    if normalized.startswith("inverse") or normalized.startswith("inverso"):
         return "Freezer-on-Bottom"
+    if normalized in {"inverter", "aco", "inox look", "flat", "reversivel"}:
+        return ""
+    if re.search(r"\b(chapa|metalica|pintada|black inox)\b", normalized, re.I):
+        return ""
     return text
-
 
 def _translate_ldy_loading_type(text):
     normalized = _normalize(text)

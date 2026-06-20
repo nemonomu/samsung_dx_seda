@@ -257,10 +257,9 @@ def _savings_for_output(row):
 
 
 def _pickup_for_output(row):
-    if _is_magalu_row(row):
+    if _is_magalu_row(row) and product_line() != "TV":
         return ""
     return row.get("pick_up_availability", "")
-
 
 def _discount_type_for_output(value):
     text = str(value or "").strip()

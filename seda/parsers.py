@@ -1410,7 +1410,7 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
     if line == "REF":
         detail.update(
             {
-                "ref_refrigerator_type": _magalu_factsheet_value(item, ["porta"]),
+                "ref_refrigerator_type": _magalu_ref_refrigerator_type(item),
                 "ref_capacity": _magalu_factsheet_value(
                     item,
                     ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
@@ -1433,6 +1433,33 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
             }
         )
     return detail
+
+
+def _magalu_ref_refrigerator_type(item):
+    for fact in _iter_magalu_facts(item.get("factsheet") or []):
+        key = _normalize_key(fact.get("keyName") or fact.get("slug"))
+        if key != "porta":
+            continue
+        return _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
+    return ""
+
+
+def _clean_magalu_ref_refrigerator_type(value):
+    text = clean_text(value)
+    normalized = _normalize_key(text)
+    if not normalized:
+        return ""
+    if normalized in {"sim", "nao", "1", "2", "3", "4"}:
+        return ""
+    if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
+        return ""
+    valid = re.search(
+        r"duplex|inverse|inverso|side\s*by\s*side|french|multidoor|multi\s*door|top\s*freezer|"
+        r"porta\s+francesa|\b(?:1|2|3|4)\s*portas?\b|uma\s+porta|duas\s+portas|tres\s+portas|quatro\s+portas",
+        normalized,
+        re.I,
+    )
+    return text if valid else ""
 
 
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 
 import requests
@@ -431,7 +432,7 @@ def _detail_from_item(item, seller_id=None):
     if line == "REF":
         detail.update(
             {
-                "ref_refrigerator_type": _factsheet_value(item, ["porta"]),
+                "ref_refrigerator_type": _ref_refrigerator_type(item),
                 "ref_capacity": _factsheet_value(
                     item,
                     ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
@@ -455,6 +456,32 @@ def _detail_from_item(item, seller_id=None):
         )
     return detail
 
+
+def _ref_refrigerator_type(item):
+    for fact in _iter_facts(item.get("factsheet") or []):
+        key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
+        if key != "porta":
+            continue
+        return _clean_ref_refrigerator_type(_fact_value(fact))
+    return ""
+
+
+def _clean_ref_refrigerator_type(value):
+    text = clean_text(value)
+    normalized = _ascii_lower(text)
+    if not normalized:
+        return ""
+    if normalized in {"sim", "nao", "1", "2", "02", "3", "4"}:
+        return ""
+    if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
+        return ""
+    valid = re.search(
+        r"duplex|inverse|inverso|side\s*by\s*side|french|multidoor|multi\s*door|top\s*freezer|"
+        r"porta\s+francesa|\b(?:1|2|3|4)\s*portas?\b|uma\s+porta|duas\s+portas|tres\s+portas|quatro\s+portas",
+        normalized,
+        re.I,
+    )
+    return text if valid else ""
 
 def _sku_for_product_line(line, reference, model, item):
     fallback = clean_text(item.get("offerId") or item.get("id"))
