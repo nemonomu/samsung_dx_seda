@@ -19,3 +19,4 @@ seda/**/test/
 venv/
 *.sqlite
 *.db
+docs/*_handoff.html
