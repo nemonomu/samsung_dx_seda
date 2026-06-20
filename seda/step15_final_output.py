@@ -135,7 +135,7 @@ def _format_row(row, now):
         "sku_status": row.get("sku_status", ""),
         "discount_type": _discount_type_for_output(row.get("discount_type", "")),
         "delivery_availability": row.get("delivery_availability", ""),
-        "pick_up_availability": row.get("pick_up_availability", ""),
+        "pick_up_availability": _pickup_for_output(row),
         "sku": sku,
         "screen_size": row.get("screen_size", ""),
         "estimated_annual_electricity_use": row.get("estimated_annual_electricity_use", ""),
@@ -254,6 +254,12 @@ def _savings_for_output(row):
     if percent and _is_casas_bahia_row(row):
         return f"Baixou {percent.group(1).replace(',', '.')}%"
     return text
+
+
+def _pickup_for_output(row):
+    if _is_magalu_row(row):
+        return ""
+    return row.get("pick_up_availability", "")
 
 
 def _discount_type_for_output(value):
