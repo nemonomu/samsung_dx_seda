@@ -148,9 +148,9 @@ def _format_row(row, now):
         "sku_short_version": _sku_short_version_for_output(row),
         "summarized_review_content": _summary_for_output(row.get("summarized_review_content", "")),
         "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
-        "star_rating": row.get("star_rating", ""),
-        "count_of_star_ratings": row.get("count_of_star_ratings", ""),
-        "count_of_reviews": row.get("count_of_reviews", ""),
+        "star_rating": _star_rating_for_output(row.get("star_rating", "")),
+        "count_of_star_ratings": _count_metric_for_output(row.get("count_of_star_ratings", "")),
+        "count_of_reviews": _count_metric_for_output(row.get("count_of_reviews", "")),
         "recommendation_intent": row.get("recommendation_intent", ""),
         "detailed_review_content": _join_reviews(row.get("detailed_review_content", "")),
         "bsr_rank": row.get("bsr_rank", ""),
@@ -289,6 +289,43 @@ def _page_type(row):
     if row.get("bsr_rank"):
         return "bsr"
     return row.get("page_type", "")
+
+
+def _star_rating_for_output(value):
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "null", "nan"}:
+        return "0"
+    try:
+        number = float(text.replace(",", "."))
+    except ValueError:
+        return text
+    if number == 0:
+        return "0"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _count_metric_for_output(value):
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "null", "nan"}:
+        return "0"
+    normalized = re.sub(r"[^\d,.-]", "", text)
+    if not normalized:
+        return "0"
+    if "," in normalized:
+        normalized = normalized.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", normalized):
+        normalized = normalized.replace(".", "")
+    try:
+        number = float(normalized)
+    except ValueError:
+        return text
+    if number == 0:
+        return "0"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
 
 
 def _summary_for_output(value):
