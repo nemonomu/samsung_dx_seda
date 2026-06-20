@@ -4,7 +4,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
 
@@ -382,7 +382,7 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
     shipping = product.get("shippingTag") if isinstance(product.get("shippingTag"), dict) else {}
     tags = seller.get("tags") if isinstance(seller.get("tags"), list) else []
     path = product.get("path") or ""
-    seller_id = seller.get("id") or ""
+    seller_id = seller.get("id") or _seller_id_from_url(path) or _seller_id_from_url(product.get("url") or "")
     product_url = absolute_url(base_url, path)
     if seller_id and "seller_id=" not in product_url:
         joiner = "&" if "?" in product_url else "?"
@@ -416,7 +416,16 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
         "crawl_datetime": now,
         "fetch_method": "next_data",
         "parse_status": "listing_next_data",
+        "seller_id": clean_text(seller_id),
     }
+
+
+def _seller_id_from_url(url):
+    if not url:
+        return ""
+    parsed = urlparse(str(url))
+    values = parse_qs(parsed.query).get("seller_id") or []
+    return clean_text(values[0]) if values else ""
 
 
 def _parse_casas_bahia_next_listing(html_text, base_url, source_url, run_id):

@@ -320,7 +320,7 @@ def _magalu_graphql_detail(row, product_url):
     from .magalu.detail_api import fetch_detail
 
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
-    result = fetch_detail(item_id)
+    result = fetch_detail(item_id, seller_id=_magalu_seller_id(row, product_url))
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
@@ -385,7 +385,7 @@ def _retry_magalu_shipping_blanks(row, product_url):
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
     attempts = int(os.getenv("SEDA_MAGALU_SHIPPING_BLANK_RETRY_ATTEMPTS", "1"))
     for attempt in range(1, attempts + 1):
-        result = fetch_shipping_for_item_id(item_id)
+        result = fetch_shipping_for_item_id(item_id, seller_id=_magalu_seller_id(row, product_url))
         if result.get("delivery") and not row.get("delivery_availability"):
             row["delivery_availability"] = result["delivery"]
         if result.get("pickup") and not row.get("pick_up_availability"):
@@ -404,6 +404,15 @@ def _retry_magalu_shipping_blanks(row, product_url):
 
 def _needs_magalu_shipping_retry(row):
     return row.get("retailer") == "Magalu" and (not row.get("delivery_availability") or not row.get("pick_up_availability"))
+
+
+def _magalu_seller_id(row, product_url=""):
+    seller_id = (row.get("seller_id") or "").strip()
+    if seller_id:
+        return seller_id
+    parsed = urlsplit(product_url or row.get("product_url", ""))
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    return (query.get("seller_id") or "").strip()
 
 
 def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):

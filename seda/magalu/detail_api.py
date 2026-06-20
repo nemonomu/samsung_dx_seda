@@ -258,7 +258,7 @@ query showcaseQuery(
 """
 
 
-def fetch_detail(item_id, timeout=None):
+def fetch_detail(item_id, timeout=None, seller_id=None):
     item_id = clean_text(item_id)
     if not item_id:
         return {"success": False, "error": "missing_item_id", "detail": {}, "trace": []}
@@ -267,9 +267,9 @@ def fetch_detail(item_id, timeout=None):
     item = _request_item(item_id, timeout, trace)
     if not item:
         return {"success": False, "error": "item_query_failed", "detail": {}, "trace": trace}
-    detail = _detail_from_item(item)
+    detail = _detail_from_item(item, seller_id=seller_id)
     if os.getenv("SEDA_MAGALU_SHIPPING_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
-        shipping = fetch_shipping(item, timeout=timeout)
+        shipping = fetch_shipping(item, timeout=timeout, seller_id=seller_id)
         if shipping.get("delivery"):
             detail["delivery_availability"] = shipping["delivery"]
         if shipping.get("pickup"):
@@ -283,12 +283,12 @@ def fetch_detail(item_id, timeout=None):
     return {"success": True, "detail": detail, "trace": trace}
 
 
-def fetch_shipping(item, timeout=None):
+def fetch_shipping(item, timeout=None, seller_id=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
     payload = {
         "operationName": "shippingQuery",
-        "variables": {"shippingRequest": _shipping_request(item)},
+        "variables": {"shippingRequest": _shipping_request(item, seller_id=seller_id)},
         "query": SHIPPING_QUERY,
     }
     data = _post(payload, timeout, trace, label="shipping")
@@ -297,7 +297,7 @@ def fetch_shipping(item, timeout=None):
     return {"success": bool(delivery or pickup), "delivery": delivery, "pickup": pickup, "trace": trace}
 
 
-def fetch_shipping_for_item_id(item_id, timeout=None):
+def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None):
     item_id = clean_text(item_id)
     if not item_id:
         return {"success": False, "error": "missing_item_id", "delivery": "", "pickup": "", "trace": []}
@@ -306,7 +306,7 @@ def fetch_shipping_for_item_id(item_id, timeout=None):
     item = _request_item(item_id, timeout, trace)
     if not item:
         return {"success": False, "error": "item_query_failed", "delivery": "", "pickup": "", "trace": trace}
-    result = fetch_shipping(item, timeout=timeout)
+    result = fetch_shipping(item, timeout=timeout, seller_id=seller_id)
     trace.extend(result.get("trace") or [])
     result["trace"] = trace
     return result
@@ -408,8 +408,8 @@ def _post(payload, timeout, trace, label):
     return {}
 
 
-def _detail_from_item(item):
-    offer = _first_offer(item)
+def _detail_from_item(item, seller_id=None):
+    offer = _select_offer(item, seller_id=seller_id)
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
     rating = item.get("rating") if isinstance(item.get("rating"), dict) else {}
     line = product_line()
@@ -468,8 +468,21 @@ def _first_offer(item):
     return offers[0] if offers and isinstance(offers[0], dict) else {}
 
 
-def _shipping_request(item):
-    offer = _first_offer(item)
+def _select_offer(item, seller_id=None):
+    offers = item.get("offers") if isinstance(item.get("offers"), list) else []
+    wanted = clean_text(seller_id).lower()
+    if wanted:
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            seller = offer.get("seller") if isinstance(offer.get("seller"), dict) else {}
+            if clean_text(seller.get("id")).lower() == wanted:
+                return offer
+    return _first_offer(item)
+
+
+def _shipping_request(item, seller_id=None):
+    offer = _select_offer(item, seller_id=seller_id)
     seller = offer.get("seller") if isinstance(offer.get("seller"), dict) else {}
     category = item.get("category") if isinstance(item.get("category"), dict) else {}
     subcategory = item.get("subcategory") if isinstance(item.get("subcategory"), dict) else {}
