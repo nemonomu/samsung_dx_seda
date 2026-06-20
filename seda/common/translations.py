@@ -113,8 +113,14 @@ def _translate_delivery(text):
     normalized = _normalize(text)
     if normalized == "receba em casa":
         return "Receive at home"
+    if re.search(r"\breceba\s+hoje\b", normalized, re.I):
+        return "Receive today"
     if re.search(r"\breceba\s+amanh", normalized, re.I):
         return "Receive tomorrow"
+    if normalized == "entrega rapida":
+        return "Fast delivery"
+    if normalized == "frete gratis":
+        return "Free shipping"
     scheduled = re.search(r"agendada\s+a\s+partir\s+de\s+(.+)", normalized, re.I)
     if scheduled:
         return f"Scheduled from {_translate_date_text(scheduled.group(1).strip())}"
@@ -131,9 +137,10 @@ def _translate_delivery(text):
     normal = re.search(r"normal\s+ate\s+(.+)", normalized, re.I)
     if normal:
         return f"Normal by {_translate_date_text(normal.group(1).strip())}"
-    days = re.search(r"receba\s+em\s+ate\s+(\d+)\s+dias\s+uteis", normalized, re.I)
+    days = re.search(r"receba\s+em\s+ate\s+(\d+)\s+dias?\s+ut(?:il|eis)", normalized, re.I)
     if days:
-        return f"Receive within {days.group(1)} business days"
+        unit = "business day" if days.group(1) == "1" else "business days"
+        return f"Receive within {days.group(1)} {unit}"
     receive_by = re.search(r"receba\s+ate\s+(.+)", normalized, re.I)
     if receive_by:
         return f"Receive by {_translate_date_text(receive_by.group(1).strip())}"
@@ -163,6 +170,12 @@ def _translate_recommendation(text):
 
 def _translate_ref_refrigerator_type(text):
     normalized = _normalize(text)
+    if normalized in {"sim", "nao", "não", "1", "2", "3"}:
+        return ""
+    if re.search(r"\b1\s*porta\b|porta unica|porta única", normalized, re.I):
+        return "Single Door"
+    if re.search(r"\b2\s*portas\b", normalized, re.I):
+        return "Two Door"
     if normalized.startswith("duplex"):
         return "Freezer-on-Top"
     if normalized.startswith("inverse"):
@@ -172,9 +185,9 @@ def _translate_ref_refrigerator_type(text):
 
 def _translate_ldy_loading_type(text):
     normalized = _normalize(text)
-    if normalized.startswith("superior"):
+    if re.search(r"superior|top\s*load|carga\s+superior", normalized, re.I):
         return "Top load"
-    if normalized.startswith("frontal"):
+    if re.search(r"frontal|front\s*load", normalized, re.I):
         return "Front load"
     return text
 

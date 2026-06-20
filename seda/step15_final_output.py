@@ -7,9 +7,7 @@ from pathlib import Path
 
 from .parsers import (
     format_brl,
-    ldy_sku_from_text,
     ldy_sku_short_version_from_text,
-    model_number_from_text,
     ref_sku_short_version_from_text,
 )
 from .step00_config import product_line, read_csv, run_root, write_csv
@@ -148,7 +146,7 @@ def _format_row(row, now):
         "ldy_color": row.get("ldy_color", ""),
         "ldy_capacity": row.get("ldy_capacity", ""),
         "sku_short_version": _sku_short_version_for_output(row),
-        "summarized_review_content": _join_values(row.get("summarized_review_content", "")),
+        "summarized_review_content": _summary_for_output(row.get("summarized_review_content", "")),
         "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
         "star_rating": row.get("star_rating", ""),
         "count_of_star_ratings": row.get("count_of_star_ratings", ""),
@@ -167,14 +165,27 @@ def _sku_for_output(row, item):
     line = product_line()
     if _active_retailer() == "casas_bahia" and line in {"TV", "REF"}:
         return ""
-    if line == "LDY":
-        full = ldy_sku_from_text(row.get("retailer_sku_name", ""))
-        if full:
-            return full
     sku = str(row.get("sku") or "").strip()
-    if sku and item and sku == item:
-        return model_number_from_text(row.get("retailer_sku_name", ""))
+    if not sku:
+        return ""
+    if item and sku == item:
+        return ""
+    if _is_synthetic_sku(row, sku):
+        return ""
     return sku
+
+
+def _is_synthetic_sku(row, sku):
+    if not _is_magalu_row(row):
+        return False
+    text = str(sku or "").strip()
+    if re.fullmatch(r"(?:110|127|220|240)\s*v(?:olts?)?|bivolt", text, re.I):
+        return True
+    if len(text) > 40:
+        return True
+    if re.search(r"\b(?:smart\s*tv|televisor|geladeira|refrigerador|maquina\s+de\s+lavar|máquina\s+de\s+lavar|lavadora)\b", text, re.I):
+        return True
+    return False
 
 
 def _sku_short_version_for_output(row):
@@ -278,6 +289,17 @@ def _page_type(row):
     if row.get("bsr_rank"):
         return "bsr"
     return row.get("page_type", "")
+
+
+def _summary_for_output(value):
+    text = _join_values(value)
+    if _is_synthetic_review_summary(text):
+        return ""
+    return text
+
+
+def _is_synthetic_review_summary(text):
+    return bool(re.search(r"(?:^|\s\|\|\|\s)(?:Average rating|Star ratings|Comments):", str(text or ""), re.I))
 
 
 def _join_reviews(value):
