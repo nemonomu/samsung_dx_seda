@@ -1399,9 +1399,7 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         ),
         "model_year": _magalu_factsheet_value(item, ["ano de lancamento", "ano"])
         or model_year_from_text(f"{item.get('title', '')} {item.get('description', '')}"),
-        "summarized_review_content": html_summary
-        or clean_text(review_summary.get("summary"))
-        or compact_json(_magalu_review_summary(product_rating)),
+        "summarized_review_content": html_summary or clean_text(review_summary.get("summary")),
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "star_rating": clean_text(general.get("rating")),
         "count_of_star_ratings": clean_text(general.get("reviewCount")),
@@ -1491,24 +1489,6 @@ def _magalu_fact_value(fact):
             return "; ".join(values)
     return clean_text(fact.get("value"))
 
-
-def _magalu_review_summary(product_rating):
-    summary = []
-    general = product_rating.get("general") if isinstance(product_rating.get("general"), dict) else {}
-    if general.get("rating") not in ("", None):
-        summary.append(f"Average rating: {general.get('rating')}")
-    if general.get("reviewCount") not in ("", None):
-        summary.append(f"Star ratings: {general.get('reviewCount')}")
-    if general.get("commentCount") not in ("", None):
-        summary.append(f"Comments: {general.get('commentCount')}")
-    for dimension in product_rating.get("dimensions") or []:
-        if not isinstance(dimension, dict):
-            continue
-        label = clean_text(dimension.get("label"))
-        rating = clean_text(dimension.get("rating"))
-        if label:
-            summary.append(f"{label}: {rating}" if rating else label)
-    return summary
 
 
 def _magalu_review_descriptions(product_rating, limit=20):
