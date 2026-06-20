@@ -680,6 +680,8 @@ def main():
     magalu_review_abort_threshold = int(os.getenv("SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD", "5"))
     for index, row in enumerate(rows, start=len(enriched) + 1):
         url = row.get("product_url", "")
+        if row.get("retailer") == "Magalu" and not row.get("seller_id"):
+            row["seller_id"] = _magalu_seller_id(row, url)
         if not url:
             row["parse_status"] = "missing_product_url"
             enriched.append(row)
