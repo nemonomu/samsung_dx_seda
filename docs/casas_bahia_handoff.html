@@ -1,0 +1,63 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Casas Bahia SEDA crawler handoff</title><style>
+:root{--bg:#f5f7fb;--panel:#fff;--ink:#172033;--muted:#667085;--line:#d8e0ec;--blue:#0f4c81;--blue2:#1f78d1;--soft:#edf6ff;--warn:#fff7e6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Segoe UI,Arial,'Malgun Gothic',sans-serif;line-height:1.5}.wrap{max-width:1180px;margin:0 auto;padding:34px 28px 56px}header{background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;padding:28px 32px;border-radius:14px;margin-bottom:20px}h1{margin:0 0 7px;font-size:30px}.meta{color:#dcecff}section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0;box-shadow:0 1px 2px rgba(15,35,60,.05)}h2{margin:0 0 14px;color:var(--blue);font-size:22px}h3{margin:18px 0 8px;font-size:16px;color:#21324a}table{width:100%;border-collapse:collapse;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:10px 0 18px}th,td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:top;font-size:13px}th{background:#eef4fb;color:#12395d}tr:last-child td{border-bottom:0}code{font-family:Consolas,monospace;background:#f1f4f8;padding:1px 5px;border-radius:4px}.pill{display:inline-block;background:var(--soft);color:#0f4c81;border:1px solid #c8ddf6;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;margin:3px}.note{background:var(--warn);border:1px solid #f2d79b;border-radius:10px;padding:12px 14px;color:#5d4400}.small{font-size:12px;color:var(--muted)}ol,ul{margin:8px 0 12px 22px}@media(max-width:900px){.wrap{padding:20px 14px}header{padding:22px 20px}}
+</style></head><body><div class="wrap"><header><h1>Casas Bahia SEDA Crawler Handoff</h1><div class="meta">TV / REF / LDY 수집 인수인계 문서 · DB insert 포함 full run 기준</div></header><section><h2>1. 수집대상별 DB 컬럼 명칭 및 format</h2><p>기준 파일: <code>seda/step15_final_output.py</code>. 제품군별 output 컬럼은 <code>SEDA_PRODUCT_LINE</code>에 따라 달라진다.</p><h3>공통 컬럼</h3><table><thead><tr><th>DB 컬럼</th><th>DB format</th><th>설명</th></tr></thead><tbody>
+<tr><td><code>country</code></td><td>text</td><td>고정값 <code>SEDA</code>.</td></tr>
+<tr><td><code>product</code></td><td>text</td><td>제품군 코드: <code>TV</code>, <code>REF</code>, <code>LDY</code>.</td></tr>
+<tr><td><code>item</code></td><td>text</td><td>PDP URL의 <code>/p/{item}/</code> 식별자 또는 SKU fallback.</td></tr>
+<tr><td><code>account_name</code></td><td>text</td><td><code>Magalu</code> 또는 <code>Casas Bahia</code>.</td></tr>
+<tr><td><code>page_type</code></td><td>text</td><td><code>main</code> 또는 <code>bsr</code>. 둘 다 있으면 main 기준.</td></tr>
+<tr><td><code>retailer_sku_name</code></td><td>text</td><td>리테일러 노출 상품명.</td></tr>
+<tr><td><code>product_url</code></td><td>text</td><td>정규화된 PDP URL.</td></tr>
+<tr><td><code>original_sku_price</code></td><td>text</td><td>정가/원가. 예: <code>R$ 4.499,00</code>. final과 같으면 blank.</td></tr>
+<tr><td><code>final_sku_price</code></td><td>text</td><td>최종 판매가. 예: <code>R$ 2.899,00</code>.</td></tr>
+<tr><td><code>savings</code></td><td>text</td><td>Casas Bahia 수집. Magalu는 수집 대상 아님.</td></tr>
+<tr><td><code>sku_status</code></td><td>text</td><td>스폰서/광고 상태. 번역 대상.</td></tr>
+<tr><td><code>discount_type</code></td><td>text</td><td>쿠폰/할인 문구. 번역 대상.</td></tr>
+<tr><td><code>delivery_availability</code></td><td>text</td><td>배송 일정/비용/가능 여부. 번역 대상.</td></tr>
+<tr><td><code>pick_up_availability</code></td><td>text</td><td>픽업 가능 여부. 번역 대상.</td></tr>
+</tbody></table>
+<h3>제품군별 고유 output 컬럼</h3><table><thead><tr><th>제품군</th><th>DB 컬럼</th><th>format/정책</th></tr></thead><tbody>
+<tr><td>TV</td><td><code>sku</code>, <code>screen_size</code>, <code>estimated_annual_electricity_use</code>, <code>model_year</code></td><td>모두 text. spec/factsheet exact key 값은 원문 그대로 저장. <code>180</code>, <code>20226</code> 같은 값도 page exact key에 있으면 blank 처리하지 않음.</td></tr>
+<tr><td>REF</td><td><code>ref_refrigerator_type</code>, <code>ref_capacity</code>, <code>sku_short_version</code>, <code>sku</code></td><td>모두 text. type/loading 계열은 번역 대상.</td></tr>
+<tr><td>LDY</td><td><code>ldy_loading_type</code>, <code>ldy_color</code>, <code>ldy_capacity</code>, <code>sku_short_version</code>, <code>sku</code></td><td>모두 text. loading type은 번역 대상.</td></tr>
+</tbody></table>
+<h3>리뷰/랭킹/배치 컬럼</h3><table><thead><tr><th>DB 컬럼</th><th>DB format</th><th>설명</th></tr></thead><tbody>
+<tr><td><code>summarized_review_content</code></td><td>text</td><td>리뷰 요약. 합성 통계문은 제거 대상.</td></tr>
+<tr><td><code>retailer_sku_name_similar</code></td><td>text</td><td>유사 상품명 목록. 최종 output은 <code> ||| </code> 구분자.</td></tr>
+<tr><td><code>star_rating</code></td><td>text</td><td>평균 별점. 없으면 <code>0</code>.</td></tr>
+<tr><td><code>count_of_star_ratings</code></td><td>text</td><td>별점 평가수. 없으면 <code>0</code>.</td></tr>
+<tr><td><code>count_of_reviews</code></td><td>text</td><td>리뷰/댓글 수. 없으면 <code>0</code>.</td></tr>
+<tr><td><code>recommendation_intent</code></td><td>text</td><td>추천 의향. Casas Bahia 중심.</td></tr>
+<tr><td><code>detailed_review_content</code></td><td>text</td><td>최대 20개 리뷰. <code>review1 - ... ||| review2 - ...</code> 형식.</td></tr>
+<tr><td><code>bsr_rank</code></td><td>text</td><td>BSR rank. 목표 1~100.</td></tr>
+<tr><td><code>main_rank</code></td><td>text</td><td>Main rank. 최초 등장 순위 유지.</td></tr>
+<tr><td><code>calendar_week</code></td><td>text</td><td><code>w23</code> 형식.</td></tr>
+<tr><td><code>crawl_strdatetime</code></td><td>text</td><td><code>YYYY-MM-DD HH:MM:SS</code>.</td></tr>
+<tr><td><code>batch_id</code></td><td>text</td><td><code>c_YYYYMMDD_HHMMSS</code>.</td></tr>
+</tbody></table></section><section><h2>2. 제품군별 DB 저장 table 명칭</h2><table><thead><tr><th>제품군</th><th>기본 DB table</th><th>override 환경변수</th></tr></thead><tbody>
+<tr><td>TV</td><td><code>tv_retail_com_seda</code></td><td><code>SEDA_DB_FINAL_TABLE_TV</code> 또는 <code>SEDA_OUTPUT_TABLE_TV</code></td></tr>
+<tr><td>REF</td><td><code>ref_retail_com_seda</code></td><td><code>SEDA_DB_FINAL_TABLE_REF</code> 또는 <code>SEDA_OUTPUT_TABLE_REF</code></td></tr>
+<tr><td>LDY</td><td><code>ldy_retail_com_seda</code></td><td><code>SEDA_DB_FINAL_TABLE_LDY</code> 또는 <code>SEDA_OUTPUT_TABLE_LDY</code></td></tr>
+</tbody></table><p class="small">DB 컬럼은 <code>step13_db_prepare</code>에서 모두 <code>text</code>로 생성된다. CSV blank 값은 <code>step14_db_load</code>에서 DB NULL로 insert된다.</p></section><section><h2>3. 수집 단계별 흐름</h2><ol>
+<li><code>step00_erd_schema</code>: ERD/schema artifact 생성 또는 갱신.</li>
+<li><code>step01_main_list</code>: main listing 수집 및 listing 필드 저장.</li>
+<li><code>step02_main_targets</code>: main 후보 dedupe, 최초 등장 기준 <code>main_rank</code> 부여.</li>
+<li><code>step03_bsr_list</code>: BSR listing 수집.</li>
+<li><code>step04_bsr_rank</code>: BSR 후보 dedupe, <code>bsr_rank</code> 1~100 생성.</li>
+<li><code>step07_final_targets</code>: main/bsr merge. 중복 SKU/URL은 기존 rank를 덮어쓰지 않음.</li>
+<li><code>step08_detail_enrichment</code>: PDP/detail/spec/shipping/similar/rating 보강.</li>
+<li><code>step09_review20</code>: 상세 리뷰 본문 최대 20개 보강.</li>
+<li><code>freight_cdp_backfill</code>: Casas 전용 배송 blank 보강.</li><li><code>listing_badge_backfill</code>: Casas 전용 listing badge/status/discount 보강.</li>
+<li><code>step15_final_output</code>: DB용 최종 컬럼 순서와 format 변환.</li>
+<li><code>step16_field_audit</code>: 필드 blank/형식/의심값 audit.</li>
+<li><code>step11_s3_sync</code>: full run 기준 S3 sync.</li>
+<li><code>step13_db_prepare</code>: 제품군별 DB table 생성.</li>
+<li><code>step14_db_load</code>: <code>final_output.csv</code> DB insert.</li>
+<li><code>step10_status_check</code>: 상태 점검.</li>
+<li><code>step12_local_cleanup</code>: cleanup.</li>
+</ol></section><section><h2>4. 제품군별 고유 수집 컬럼</h2><table><thead><tr><th>제품군</th><th>고유 컬럼</th><th>수집 위치 / exact key</th></tr></thead><tbody>
+<tr><td>TV</td><td><code>sku</code>, <code>screen_size</code>, <code>estimated_annual_electricity_use</code>, <code>model_year</code></td><td>PDP product source/spec. SKU는 <code>Modelo</code>, screen은 <code>Tamanho da Tela</code>, energy는 <code>Consumo de energia</code>, year는 <code>Ano de lancamento</code>. exact key 값은 원문 그대로 저장.</td></tr>
+<tr><td>REF</td><td><code>ref_refrigerator_type</code>, <code>ref_capacity</code>, <code>sku_short_version</code>, <code>sku</code></td><td>PDP product source/spec. refrigerator type은 product source exact group/key 기준. capacity는 <code>Capacidade de armazenagem total (L)</code> 또는 <code>Capacidade de armazenagem total</code>.</td></tr>
+<tr><td>LDY</td><td><code>ldy_loading_type</code>, <code>ldy_color</code>, <code>ldy_capacity</code>, <code>sku_short_version</code>, <code>sku</code></td><td>PDP product source/spec. loading은 <code>Acesso ao cesto</code>, color는 <code>Cor</code>, capacity는 <code>Capacidade Kg de Roupas</code> 또는 <code>Capacidade</code>.</td></tr>
+</tbody></table></section><section><h2>5. 수집방식</h2><ul><li>Listing: Casas Bahia partner API <code>api/v3/web/busca</code>. 가격은 <code>price_api.attach_listing_prices</code>로 보강.</li><li>Detail/spec: PDP product source API <code>api/v2/sku/source/CB</code>, direct first. 설정에 따라 ZenRows fallback 가능.</li><li>Freight/pickup: freight API + pickup API 후 Casas 전용 browser/CDP blank-only 보강.</li><li>Listing badge: Casas 전용 <code>listing_badge_backfill</code>로 badge/status/discount 보강.</li><li>Review: PDP reviews API <code>api/v3/reviews/product/{product_id}/source/CB</code>, MOST_USEFUL 기준 최대 20개 수집.</li><li>ZenRows: product source fallback/probe 용도. 광범위 사용 전 비용 판단 필요.</li></ul></section><section><h2>6. 번역 대상 필드</h2><p>번역은 <code>seda/common/translations.py</code> 기준이며 <code>SEDA_TRANSLATE_OUTPUT=0</code>이면 비활성화된다.</p>
+<div><span class="pill">sku_status</span><span class="pill">discount_type</span><span class="pill">delivery_availability</span><span class="pill">pick_up_availability</span><span class="pill">recommendation_intent</span><span class="pill">ref_refrigerator_type</span><span class="pill">ldy_loading_type</span></div><p class="note">Casas Bahia는 <code>savings</code>와 <code>recommendation_intent</code>를 수집한다. 배송/픽업 문구는 날짜/비용이 포함되어 번역 품질 영향이 크다.</p></section><section><h2>7. 실행 및 브라우저 안정화</h2><h3>실행 BAT</h3><table><thead><tr><th>파일</th><th>용도</th><th>순서/특징</th></tr></thead><tbody><tr><td><code>run_casas_bahia_tv_ref_ldy_full.bat</code></td><td>Casas Bahia 단독 full run</td><td>TV → REF → LDY 순차 실행.</td></tr><tr><td><code>run_magalu_casas_interleaved_tv_ref_ldy_full.bat</code></td><td>Magalu/Casas Bahia 교차 full run</td><td>Magalu TV → Casas TV → Magalu REF → Casas REF → Magalu LDY → Casas LDY. 기본 대기시간은 <code>0</code>초.</td></tr></tbody></table><h3>Chrome/CDP 대응</h3><ul><li>Casas Bahia CDP 단계는 full-run BAT에서 <code>SEDA_CDP_CLOSE_EXISTING_TABS=1</code>을 기본으로 사용해 이전 실행에서 남은 CDP 탭을 정리한다.</li><li>CDP profile 기본 경로는 <code>C:\tmp\seda_casas_bahia_cdp_profile</code>이며, 일반 사용자 Chrome profile과 분리한다.</li><li>공통 CDP Chrome은 auto-start 시 background/extension/sync 관련 기능을 비활성화해 RDP 장시간 실행 중 메모리 누적을 줄인다.</li><li>교차 BAT는 Magalu와 Casas를 제품군 단위로 번갈아 실행해 한 retailer에 연속 부하가 몰리는 것을 줄인다.</li></ul></section><section><h2>운영 메모</h2><ul><li>환경값은 repo root <code>.env</code> 또는 <code>seda/.env</code>에서 로드한다. <code>.env</code>는 git 관리 대상이 아니다.</li><li>기본 ZIP/postal code는 <code>01001-001</code>.</li><li>exact key 정책: spec/factsheet는 부분 문자열 매칭으로 확대하지 않는다. exact key를 모르면 추가 전에 확인한다.</li><li>exact key value 정책: exact key에서 나온 값은 원문 그대로 저장한다. <code>180</code>, <code>20226</code> 같은 값도 exact key에 있으면 blank 처리하지 않는다.</li><li>실행 BAT: <code>run_casas_bahia_tv_ref_ldy_full.bat</code>.</li></ul></section></div></body></html>

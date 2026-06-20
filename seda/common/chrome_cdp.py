@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +35,8 @@ def ensure_playwright_temp_dir():
 
 def ensure_chrome_cdp(cdp_url, timeout_seconds=20, auto_start=True):
     if _is_cdp_ready(cdp_url):
+        if _close_existing_tabs_enabled():
+            _close_existing_tabs(cdp_url)
         return {"ready": True, "started": False, "url": cdp_url}
     if not auto_start:
         raise RuntimeError(f"Chrome CDP is not reachable: {cdp_url}")
@@ -83,6 +86,34 @@ def _is_cdp_ready(cdp_url):
         return False
 
 
+def _close_existing_tabs_enabled():
+    value = os.getenv("SEDA_CDP_CLOSE_EXISTING_TABS", "0").strip().lower()
+    return value not in {"0", "false", "no", "n"}
+
+
+def _close_existing_tabs(cdp_url):
+    list_url = cdp_url.rstrip("/") + "/json/list"
+    try:
+        with urlopen(list_url, timeout=2) as response:
+            targets = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return 0
+
+    closed = 0
+    for target in targets if isinstance(targets, list) else []:
+        if target.get("type") != "page":
+            continue
+        target_id = str(target.get("id") or "").strip()
+        if not target_id:
+            continue
+        try:
+            with urlopen(cdp_url.rstrip("/") + "/json/close/" + target_id, timeout=2):
+                closed += 1
+        except Exception:
+            continue
+    return closed
+
+
 def _chrome_path():
     override = os.getenv("SEDA_CHROME_PATH", "").strip()
     candidates = [
@@ -107,6 +138,17 @@ def _start_chrome(chrome, port, user_data_dir):
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-renderer-backgrounding",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--mute-audio",
         "about:blank",
     ]
     creationflags = 0
