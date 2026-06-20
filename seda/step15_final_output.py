@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .parsers import (
+    _clean_magalu_energy_value,
     format_brl,
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
@@ -138,7 +139,7 @@ def _format_row(row, now):
         "pick_up_availability": _pickup_for_output(row),
         "sku": sku,
         "screen_size": row.get("screen_size", ""),
-        "estimated_annual_electricity_use": row.get("estimated_annual_electricity_use", ""),
+        "estimated_annual_electricity_use": _energy_use_for_output(row),
         "model_year": row.get("model_year", ""),
         "ref_refrigerator_type": row.get("ref_refrigerator_type", ""),
         "ref_capacity": row.get("ref_capacity", ""),
@@ -160,6 +161,12 @@ def _format_row(row, now):
         "batch_id": f"c_{now.strftime('%Y%m%d_%H%M%S')}",
     }
 
+
+def _energy_use_for_output(row):
+    text = str(row.get("estimated_annual_electricity_use") or "").strip()
+    if _is_magalu_row(row) and product_line() == "TV":
+        return _clean_magalu_energy_value(text)
+    return text
 
 def _sku_for_output(row, item):
     line = product_line()

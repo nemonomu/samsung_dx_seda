@@ -423,7 +423,7 @@ def _detail_from_item(item, seller_id=None):
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
         "screen_size": _attribute_value(item, ["polegadas", "tamanho da tela"]) or _factsheet_value(item, ["polegadas"]) or screen_size_from_text(item.get("title") or ""),
-        "estimated_annual_electricity_use": _factsheet_value(item, ["consumo aproximado de energia", "consumo", "energia"]),
+        "estimated_annual_electricity_use": _energy_use(item),
         "model_year": _factsheet_value(item, ["ano de lancamento", "ano"]) or model_year_from_text(f"{item.get('title','')} {item.get('description','')}"),
         "star_rating": clean_text(rating.get("score")),
         "count_of_star_ratings": clean_text(rating.get("count")),
@@ -456,6 +456,56 @@ def _detail_from_item(item, seller_id=None):
         )
     return detail
 
+
+def _energy_use(item):
+    allowed_keys = {
+        "consumo",
+        "consumo aproximado de energia",
+        "consumo de energia",
+        "consumo mensal de energia",
+        "consumo energetico",
+    }
+    for fact in _iter_facts(item.get("factsheet") or []):
+        key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
+        if key not in allowed_keys:
+            continue
+        value = _clean_energy_value(_fact_value(fact))
+        if value:
+            return value
+    return ""
+
+
+def _clean_energy_value(value):
+    text = clean_text(value)
+    normalized = _ascii_lower(text)
+    if not normalized:
+        return ""
+    if any(token in normalized for token in ("stand by", "standby", "modo espera", "em espera")):
+        return ""
+    if any(token in normalized for token in ("bivolt", "voltagem", "tensao", "fonte de energia", "alimentacao")):
+        return ""
+    if any(token in normalized for token in ("energia eletrica", "eficiencia energetica", "classe a", "sensor ecologico")):
+        return ""
+    if re.search(r"\bhz\b", normalized, re.I) and re.search(r"\bv\b", normalized, re.I):
+        return ""
+    if re.fullmatch(r"(?:ac\s*)?\d{2,3}(?:\s*-\s*\d{2,3})?\s*v(?:olts?)?(?:\s*[~/;]\s*\d{2}/?\d{2}\s*hz)?", normalized, re.I):
+        return ""
+    low_power = re.search(r"(?:abaixo|<=|≤|menor(?:\s+que)?).*?(\d+(?:[,.]\d+)?)\s*w\b", normalized, re.I)
+    if low_power:
+        try:
+            if float(low_power.group(1).replace(",", ".")) <= 5:
+                return ""
+        except ValueError:
+            return ""
+    if re.fullmatch(r"[<≤]?\s*(\d+(?:[,.]\d+)?)\s*w", normalized, re.I):
+        try:
+            if float(re.sub(r"[^\d,.]", "", normalized).replace(",", ".")) <= 5:
+                return ""
+        except ValueError:
+            return ""
+    if not ((re.search(r"\d", normalized) and re.search(r"(?:kwh|kw/h)", normalized, re.I)) or re.search(r"\d+(?:[,.]\d+)?\s*w\b|\bwatts?\b", normalized, re.I) or re.fullmatch(r"\d+(?:[,.]\d+)?", normalized)):
+        return ""
+    return text
 
 def _ref_refrigerator_type(item):
     for fact in _iter_facts(item.get("factsheet") or []):
