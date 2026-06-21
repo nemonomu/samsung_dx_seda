@@ -8,8 +8,6 @@ from ..parsers import (
     clean_text,
     compact_json,
     format_brl,
-    model_year_from_text,
-    screen_size_from_text,
 )
 from ..step00_config import product_line
 
@@ -258,7 +256,6 @@ query showcaseQuery(
 }
 """
 
-
 def fetch_detail(item_id, timeout=None, seller_id=None):
     item_id = clean_text(item_id)
     if not item_id:
@@ -283,7 +280,6 @@ def fetch_detail(item_id, timeout=None, seller_id=None):
         trace.extend(similar.get("trace") or [])
     return {"success": True, "detail": detail, "trace": trace}
 
-
 def fetch_shipping(item, timeout=None, seller_id=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
@@ -296,7 +292,6 @@ def fetch_shipping(item, timeout=None, seller_id=None):
     shipping = (data.get("data") or {}).get("shipping") or {}
     delivery, pickup = _shipping_texts(shipping)
     return {"success": bool(delivery or pickup), "delivery": delivery, "pickup": pickup, "trace": trace}
-
 
 def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None):
     item_id = clean_text(item_id)
@@ -311,7 +306,6 @@ def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None):
     trace.extend(result.get("trace") or [])
     result["trace"] = trace
     return result
-
 
 def fetch_similar_names(item_id, timeout=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
@@ -344,7 +338,6 @@ def fetch_similar_names(item_id, timeout=None):
                 return {"success": True, "names": names[:20], "trace": trace}
     return {"success": False, "names": [], "trace": trace}
 
-
 def _request_item(item_id, timeout, trace):
     payload = {
         "operationName": "itemQuery",
@@ -353,7 +346,6 @@ def _request_item(item_id, timeout, trace):
     }
     data = _post(payload, timeout, trace, label="item")
     return (data.get("data") or {}).get("item") or {}
-
 
 def _post(payload, timeout, trace, label):
     if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
@@ -408,7 +400,6 @@ def _post(payload, timeout, trace, label):
         return data
     return {}
 
-
 def _detail_from_item(item, seller_id=None):
     offer = _select_offer(item, seller_id=seller_id)
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
@@ -422,9 +413,9 @@ def _detail_from_item(item, seller_id=None):
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
-        "screen_size": _attribute_value(item, ["polegadas", "tamanho da tela"]) or _factsheet_value(item, ["polegadas"]) or screen_size_from_text(item.get("title") or ""),
+        "screen_size": _attribute_value(item, ["polegadas", "tamanho da tela"]) or _factsheet_value(item, ["polegadas", "tamanho da tela"]),
         "estimated_annual_electricity_use": _energy_use(item),
-        "model_year": _factsheet_value(item, ["ano de lancamento", "ano"]) or model_year_from_text(f"{item.get('title','')} {item.get('description','')}"),
+        "model_year": _factsheet_value(item, ["ano de lancamento", "ano de lançamento"]),
         "star_rating": clean_text(rating.get("score")),
         "count_of_star_ratings": clean_text(rating.get("count")),
         "parse_status": "detail_item_graphql",
@@ -456,10 +447,8 @@ def _detail_from_item(item, seller_id=None):
         )
     return detail
 
-
 def _energy_use(item):
     allowed_keys = {
-        "consumo",
         "consumo aproximado de energia",
         "consumo de energia",
         "consumo mensal de energia",
@@ -469,43 +458,10 @@ def _energy_use(item):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
         if key not in allowed_keys:
             continue
-        value = _clean_energy_value(_fact_value(fact))
+        value = clean_text(_fact_value(fact))
         if value:
             return value
     return ""
-
-
-def _clean_energy_value(value):
-    text = clean_text(value)
-    normalized = _ascii_lower(text)
-    if not normalized:
-        return ""
-    if any(token in normalized for token in ("stand by", "standby", "modo espera", "em espera")):
-        return ""
-    if any(token in normalized for token in ("bivolt", "voltagem", "tensao", "fonte de energia", "alimentacao")):
-        return ""
-    if any(token in normalized for token in ("energia eletrica", "eficiencia energetica", "classe a", "sensor ecologico")):
-        return ""
-    if re.search(r"\bhz\b", normalized, re.I) and re.search(r"\bv\b", normalized, re.I):
-        return ""
-    if re.fullmatch(r"(?:ac\s*)?\d{2,3}(?:\s*-\s*\d{2,3})?\s*v(?:olts?)?(?:\s*[~/;]\s*\d{2}/?\d{2}\s*hz)?", normalized, re.I):
-        return ""
-    low_power = re.search(r"(?:abaixo|<=|≤|menor(?:\s+que)?).*?(\d+(?:[,.]\d+)?)\s*w\b", normalized, re.I)
-    if low_power:
-        try:
-            if float(low_power.group(1).replace(",", ".")) <= 5:
-                return ""
-        except ValueError:
-            return ""
-    if re.fullmatch(r"[<≤]?\s*(\d+(?:[,.]\d+)?)\s*w", normalized, re.I):
-        try:
-            if float(re.sub(r"[^\d,.]", "", normalized).replace(",", ".")) <= 5:
-                return ""
-        except ValueError:
-            return ""
-    if not ((re.search(r"\d", normalized) and re.search(r"(?:kwh|kw/h)", normalized, re.I)) or re.search(r"\d+(?:[,.]\d+)?\s*w\b|\bwatts?\b", normalized, re.I) or re.fullmatch(r"\d+(?:[,.]\d+)?", normalized)):
-        return ""
-    return text
 
 def _ref_refrigerator_type(item):
     for fact in _iter_facts(item.get("factsheet") or []):
@@ -514,7 +470,6 @@ def _ref_refrigerator_type(item):
             continue
         return _clean_ref_refrigerator_type(_fact_value(fact))
     return ""
-
 
 def _clean_ref_refrigerator_type(value):
     text = clean_text(value)
@@ -536,14 +491,12 @@ def _clean_ref_refrigerator_type(value):
 def _sku_for_product_line(line, reference, model, item):
     fallback = clean_text(item.get("offerId") or item.get("id"))
     if line in {"REF", "LDY"}:
-        return reference or model or fallback
-    return model or fallback
-
+        return reference or model
+    return model
 
 def _first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
     return offers[0] if offers and isinstance(offers[0], dict) else {}
-
 
 def _select_offer(item, seller_id=None):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
@@ -556,7 +509,6 @@ def _select_offer(item, seller_id=None):
             if clean_text(seller.get("id")).lower() == wanted:
                 return offer
     return _first_offer(item)
-
 
 def _shipping_request(item, seller_id=None):
     offer = _select_offer(item, seller_id=seller_id)
@@ -591,18 +543,15 @@ def _shipping_request(item, seller_id=None):
         "zipcode": os.getenv("SEDA_MAGALU_SHIPPING_ZIP_CODE", os.getenv("SEDA_POSTAL_CODE", "01001-001")),
     }
 
-
 def _price_number(offer):
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
     return best_price.get("totalAmount") or offer.get("price") or offer.get("listPrice") or 0
-
 
 def _float_or_zero(value):
     try:
         return float(str(value).replace(",", "."))
     except (TypeError, ValueError):
         return 0
-
 
 def _shipping_texts(shipping):
     delivery = ""
@@ -628,7 +577,6 @@ def _shipping_texts(shipping):
                         delivery = delivery or description
     return delivery, pickup
 
-
 def _attribute_value(item, labels):
     wanted = {_ascii_lower(label) for label in labels}
     for attribute in item.get("attributes") or []:
@@ -637,15 +585,13 @@ def _attribute_value(item, labels):
             return clean_text(attribute.get("current") or attribute.get("value"))
     return ""
 
-
 def _factsheet_value(item, labels):
     wanted = [_ascii_lower(label) for label in labels]
     for fact in _iter_facts(item.get("factsheet") or []):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
-        if key in wanted or any(label and label in key for label in wanted):
+        if key in wanted:
             return _fact_value(fact)
     return ""
-
 
 def _iter_facts(facts):
     if not isinstance(facts, list):
@@ -657,24 +603,20 @@ def _iter_facts(facts):
             yield fact
         yield from _iter_facts(fact.get("elements") or [])
 
-
 def _fact_value(fact):
     values = [clean_text(element.get("value")) for element in fact.get("elements") or [] if isinstance(element, dict)]
     values = [value for value in values if value]
     return "; ".join(values) if values else clean_text(fact.get("value"))
 
-
 def _similar_place_ids():
     raw = os.getenv("SEDA_MAGALU_SIMILAR_PLACE_IDS", "RYmKwYF0uh,RiGQ7RdPP0,qugQi55lh4,dnhhGeeru9,jupMXmS6EV")
     return [item.strip() for item in raw.split(",") if item.strip()]
-
 
 def _ascii_lower(value):
     import unicodedata
 
     normalized = unicodedata.normalize("NFKD", clean_text(value))
     return normalized.encode("ascii", "ignore").decode("ascii").lower()
-
 
 def _headers():
     return {

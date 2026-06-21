@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 from .parsers import (
-    _clean_magalu_energy_value,
     format_brl,
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
@@ -56,12 +55,10 @@ REVIEW_FINAL_COLUMNS = [
 
 FINAL_OUTPUT_COLUMNS = COMMON_FINAL_COLUMNS + PRODUCT_EXTRA_COLUMNS["TV"] + REVIEW_FINAL_COLUMNS
 
-
 def final_output_columns(product_line_value=None):
     line = (product_line_value or product_line()).strip().upper()
     extras = PRODUCT_EXTRA_COLUMNS.get(line, PRODUCT_EXTRA_COLUMNS["TV"])
     return COMMON_FINAL_COLUMNS + extras + REVIEW_FINAL_COLUMNS
-
 
 def _active_retailer():
     return (os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS") or "").strip().lower()
@@ -69,7 +66,6 @@ def _active_retailer():
 def _batch_id(now):
     prefix = "m" if _active_retailer() == "magalu" else "c"
     return f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}"
-
 
 def main():
     root = run_root()
@@ -83,7 +79,6 @@ def main():
     _write_manifest(root, source, output, output_rows, now)
     print(f"[seda] wrote {output} rows={len(output_rows)}")
 
-
 def _source_path(root):
     override = os.getenv("SEDA_FINAL_SOURCE_CSV", "").strip()
     if override:
@@ -91,9 +86,6 @@ def _source_path(root):
     badged = root / "output" / "final_output_badged.csv"
     if badged.exists():
         return badged
-    delivery_backfilled = root / "output" / "final_output_delivery_backfilled.csv"
-    if delivery_backfilled.exists():
-        return delivery_backfilled
     enriched = root / "output" / "final_output_enriched.csv"
     if enriched.exists():
         return enriched
@@ -101,7 +93,6 @@ def _source_path(root):
     if current_final.exists() and _has_internal_columns(current_final):
         return current_final
     return root / "output" / "seda_final_targets.csv"
-
 
 def _has_internal_columns(path):
     try:
@@ -111,13 +102,11 @@ def _has_internal_columns(path):
         return False
     return "product_line" in fieldnames or "retailer" in fieldnames
 
-
 def _run_datetime():
     raw = os.getenv("SEDA_CRAWL_STRDATETIME", "").strip()
     if raw:
         return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
     return datetime.now().replace(microsecond=0)
-
 
 def _format_row(row, now):
     item = _item_from_url(row.get("product_url", ""))
@@ -139,7 +128,7 @@ def _format_row(row, now):
         "savings": _savings_for_output(row),
         "sku_status": row.get("sku_status", ""),
         "discount_type": _discount_type_for_output(row.get("discount_type", "")),
-        "delivery_availability": row.get("delivery_availability", ""),
+        "delivery_availability": _delivery_for_output(row),
         "pick_up_availability": _pickup_for_output(row),
         "sku": sku,
         "screen_size": row.get("screen_size", ""),
@@ -166,11 +155,14 @@ def _format_row(row, now):
     }
 
 
-def _energy_use_for_output(row):
-    text = str(row.get("estimated_annual_electricity_use") or "").strip()
-    if _is_magalu_row(row) and product_line() == "TV":
-        return _clean_magalu_energy_value(text)
+def _delivery_for_output(row):
+    text = str(row.get("delivery_availability") or "").strip()
+    if _is_casas_bahia_row(row) and "calculo de frete apresentou problemas" in _ascii_key(text):
+        return ""
     return text
+
+def _energy_use_for_output(row):
+    return str(row.get("estimated_annual_electricity_use") or "").strip()
 
 def _sku_for_output(row, item):
     line = product_line()
@@ -185,7 +177,6 @@ def _sku_for_output(row, item):
         return ""
     return sku
 
-
 def _is_synthetic_sku(row, sku):
     if not _is_magalu_row(row):
         return False
@@ -197,7 +188,6 @@ def _is_synthetic_sku(row, sku):
     if re.search(r"\b(?:smart\s*tv|televisor|geladeira|refrigerador|maquina\s+de\s+lavar|máquina\s+de\s+lavar|lavadora)\b", text, re.I):
         return True
     return False
-
 
 def _sku_short_version_for_output(row):
     line = product_line()
@@ -217,7 +207,6 @@ def _sku_short_version_for_output(row):
         return ldy_sku_short_version_from_text(name)
     return ""
 
-
 def _price_for_output(value):
     text = str(value or "").strip()
     if not text:
@@ -228,14 +217,12 @@ def _price_for_output(value):
         return format_brl(text)
     return text
 
-
 def _prices_equal(left, right):
     left_number = _price_number(left)
     right_number = _price_number(right)
     if left_number is None or right_number is None:
         return str(left or "").strip() == str(right or "").strip()
     return left_number == right_number
-
 
 def _price_number(value):
     text = str(value or "").strip()
@@ -251,7 +238,6 @@ def _price_number(value):
     except ValueError:
         return None
 
-
 def _savings_for_output(row):
     if _is_magalu_row(row):
         return ""
@@ -266,7 +252,6 @@ def _savings_for_output(row):
         return f"Baixou {percent.group(1).replace(',', '.')}%"
     return text
 
-
 def _pickup_for_output(row):
     if _is_magalu_row(row) and product_line() != "TV":
         return ""
@@ -276,28 +261,28 @@ def _discount_type_for_output(value):
     text = str(value or "").strip()
     if not text:
         return ""
-    if re.fullmatch(r"\d+(?:[.,]\d+)?%\s*(?:OFF|discount)", text, re.I):
-        return ""
+    percent_discount = re.fullmatch(r"(\d+(?:[.,]\d+)?)%\s*(?:OFF|discount(?:\s+off)?)", text, re.I)
+    if percent_discount:
+        return f"{percent_discount.group(1).replace(',', '.')}% discount off"
+    percent_desconto = re.fullmatch(r"(\d+(?:[.,]\d+)?)%\s*(?:de\s+)?desconto", text, re.I)
+    if percent_desconto:
+        return f"{percent_desconto.group(1).replace(',', '.')}% discount off"
     return text
-
 
 def _is_casas_bahia_row(row):
     retailer = str(row.get("retailer") or row.get("account_name") or "").lower()
     url = str(row.get("product_url") or "").lower()
     return "casas" in retailer or "casasbahia.com.br" in url
 
-
 def _is_magalu_row(row):
     retailer = str(row.get("retailer") or row.get("account_name") or "").lower()
     url = str(row.get("product_url") or "").lower()
     return "magalu" in retailer or "magazineluiza.com.br" in url
 
-
 def _account_name_for_output(row):
     if _is_magalu_row(row):
         return "Magalu"
     return row.get("retailer") or row.get("account_name", "")
-
 
 def _page_type(row):
     if row.get("main_rank"):
@@ -305,7 +290,6 @@ def _page_type(row):
     if row.get("bsr_rank"):
         return "bsr"
     return row.get("page_type", "")
-
 
 def _star_rating_for_output(value):
     text = str(value or "").strip()
@@ -320,7 +304,6 @@ def _star_rating_for_output(value):
     if number.is_integer():
         return str(int(number))
     return f"{number:g}"
-
 
 def _count_metric_for_output(value):
     text = str(value or "").strip()
@@ -343,17 +326,14 @@ def _count_metric_for_output(value):
         return str(int(number))
     return f"{number:g}"
 
-
 def _summary_for_output(value):
     text = _join_values(value)
     if _is_synthetic_review_summary(text):
         return ""
     return text
 
-
 def _is_synthetic_review_summary(text):
     return bool(re.search(r"(?:^|\s\|\|\|\s)(?:Average rating|Star ratings|Comments):", str(text or ""), re.I))
-
 
 def _join_reviews(value):
     values = _as_review_list(value)
@@ -363,13 +343,11 @@ def _join_reviews(value):
         return str(values[0]).strip()
     return DELIMITER.join(f"review{index} - {text}" for index, text in enumerate(values, start=1))
 
-
 def _join_values(value, filter_noise=False):
     values = _as_list(value)
     if filter_noise:
         values = [value for value in values if not _value_noise(value)]
     return DELIMITER.join(values)
-
 
 def _value_noise(value):
     normalized = str(value or "").strip().lower()
@@ -381,7 +359,6 @@ def _value_noise(value):
         "atendimento",
     )
     return any(marker in normalized for marker in noise_markers)
-
 
 def _as_list(value):
     if value in (None, ""):
@@ -401,7 +378,6 @@ def _as_list(value):
         return [_stringify(parsed)]
     return [_stringify(parsed)]
 
-
 def _as_review_list(value):
     if value in (None, ""):
         return []
@@ -420,7 +396,6 @@ def _as_review_list(value):
         return [_stringify(parsed)]
     return [_stringify_review(parsed)]
 
-
 def _stringify(value):
     if value in (None, ""):
         return ""
@@ -431,14 +406,12 @@ def _stringify(value):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value).strip()
 
-
 def _stringify_review(value):
     if value is None:
         return ""
     if isinstance(value, dict):
         return _stringify(value)
     return str(value).strip()
-
 
 def _item_from_url(url):
     parts = [part for part in str(url or "").split("/") if part]
@@ -447,7 +420,6 @@ def _item_from_url(url):
     except ValueError:
         return ""
     return parts[index + 1] if len(parts) > index + 1 else ""
-
 
 def _write_manifest(root, source, output, rows, now):
     main_count = sum(1 for row in rows if row.get("main_rank"))

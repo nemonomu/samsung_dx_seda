@@ -98,10 +98,13 @@ def _translate_discount_type(text):
         return f"Use coupon {coupon_code.group(1).strip()}"
     percent = re.search(r"(\d+(?:[.,]\d+)?)%\s+(?:de\s+)?desconto", normalized, re.I)
     if percent:
-        return f"{percent.group(1).replace(',', '.')}% discount"
+        return f"{percent.group(1).replace(',', '.')}% discount off"
     percent_off = re.search(r"(\d+(?:[.,]\d+)?)%\s*off", normalized, re.I)
     if percent_off:
-        return f"{percent_off.group(1).replace(',', '.')}% discount"
+        return f"{percent_off.group(1).replace(',', '.')}% discount off"
+    percent_discount = re.search(r"(\d+(?:[.,]\d+)?)%\s*discount(?:\s+off)?", normalized, re.I)
+    if percent_discount:
+        return f"{percent_discount.group(1).replace(',', '.')}% discount off"
     if re.search(r"desconto.*carne|carne.*desconto", normalized, re.I):
         return "Discount with digital payment booklet"
     if "desconto" in normalized:

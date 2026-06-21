@@ -35,11 +35,10 @@ def steps_for(package_name):
     if package_name.endswith(".casas_bahia"):
         steps.extend(
             [
-                Step(next_number, "freight_cdp_backfill", "seda.casas_bahia.freight_cdp_backfill"),
-                Step(next_number + 1, "listing_badge_backfill", "seda.casas_bahia.listing_badge_backfill"),
+                Step(next_number, "listing_discount_backfill", "seda.casas_bahia.listing_discount_backfill"),
             ]
         )
-        next_number += 2
+        next_number += 1
     steps.extend(
         [
             Step(next_number, "final_output", f"{package_name}.step15_final_output"),
@@ -64,16 +63,6 @@ def step_by_key(steps, value):
 def step_complete(step):
     root = run_root()
     project_root = Path(__file__).resolve().parents[2]
-    if step.name == "freight_cdp_backfill":
-        manifest = _read_json(root / "output" / "final_output_delivery_backfilled.manifest.json")
-        stats = manifest.get("stats") if isinstance(manifest, dict) else {}
-        if manifest.get("aborted"):
-            return False, manifest.get("aborted_reason", "delivery manifest aborted")
-        if int((stats or {}).get("updated") or 0) > 0:
-            return True, f"delivery updated rows={stats.get('updated')}"
-        if int((stats or {}).get("targets") or 0) == 0 and csv_count(root / "output" / "final_output_delivery_backfilled.csv") > 0:
-            return True, "no delivery targets"
-        return False, "delivery manifest missing or no updated rows"
     checks = {
         "erd_schema": (project_root / "seda" / "config" / "seda_erd_schema.json", "ERD schema"),
         "main_list": (root / "main" / "parsed" / "main_occurrences.csv", "main rows"),
@@ -83,7 +72,7 @@ def step_complete(step):
         "final_targets": (root / "output" / "seda_final_targets.csv", "final targets"),
         "detail_enrichment": (root / "output" / "final_output_enriched.csv", "enriched output"),
         "review20": (root / "detail" / "manifest_review20.json", "review manifest"),
-        "listing_badge_backfill": (root / "output" / "final_output_badged.csv", "listing badge backfilled output"),
+        "listing_discount_backfill": (root / "output" / "final_output_badged.csv", "listing discount backfilled output"),
         "final_output": (root / "output" / "final_output.csv", "final output"),
         "field_audit": (root / "output" / "field_audit_v2.json", "field audit"),
     }

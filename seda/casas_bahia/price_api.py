@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import requests
 
@@ -104,18 +105,33 @@ def _int_value(value):
 
 
 def _discount_rate(price, discount):
+    explicit = _decimal_value(price.get("PercentualDesconto"))
+    if explicit is not None:
+        explicit = abs(explicit)
+        return _rounded_percent(explicit) if explicit >= Decimal("1") else ""
     old_price = price.get("PrecoDe")
     final_price = price.get("Preco")
-    try:
-        old_number = float(old_price)
-        final_number = float(final_price)
-    except (TypeError, ValueError):
+    old_number = _decimal_value(old_price)
+    final_number = _decimal_value(final_price)
+    if old_number is None or final_number is None:
         return ""
     if old_number <= 0 or final_number >= old_number:
-        if price.get("PercentualDesconto") not in (None, ""):
-            return abs(price.get("PercentualDesconto"))
         return ""
-    return round((old_number - final_number) / old_number * 100)
+    percent = (old_number - final_number) / old_number * Decimal("100")
+    return _rounded_percent(percent) if percent >= Decimal("1") else ""
+
+
+def _decimal_value(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _rounded_percent(value):
+    return int(Decimal(value).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _savings_text(price):

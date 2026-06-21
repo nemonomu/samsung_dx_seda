@@ -11,11 +11,8 @@ import requests
 from ..parsers import (
     appliance_model_number_from_text,
     clean_text,
-    ldy_color_from_text,
     ldy_sku_from_text,
     ldy_sku_short_version_from_text,
-    model_number_from_text,
-    model_year_from_text,
     ref_sku_short_version_from_text,
     screen_size_from_text,
 )
@@ -26,7 +23,6 @@ PDP_API = "https://pdp-api.casasbahia.com.br"
 RECS_API = "https://recs.casasbahia.com.br/v1/recommendations"
 PICKUP_API = "https://vv-retira-ponto-retirada-api-retira.viavarejo.com.br/api/v2/PontosRetirada/melhorLoja/cep"
 PRODUCT_SOURCE_URL = f"{PDP_API}/api/v2/sku/source/CB"
-
 
 def fetch_product_source(sku_id, timeout=None):
     if not sku_id:
@@ -64,7 +60,6 @@ def fetch_product_source(sku_id, timeout=None):
             last_error = result.get("error", "unknown")
     return {"success": False, "error": last_error}
 
-
 def _product_source_cache_path(sku_id):
     if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_CACHE", "1").lower() in {"0", "false", "no", "n"}:
         return None
@@ -72,7 +67,6 @@ def _product_source_cache_path(sku_id):
     directory = Path(override) if override else run_root() / "detail" / "product_source"
     safe_sku = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(sku_id or "").strip())[:80] or "sku"
     return directory / f"{safe_sku}.json"
-
 
 def _read_product_source_cache(sku_id):
     path = _product_source_cache_path(sku_id)
@@ -84,7 +78,6 @@ def _read_product_source_cache(sku_id):
         return None
     return data if isinstance(data, dict) else None
 
-
 def _write_product_source_cache(sku_id, data):
     path = _product_source_cache_path(sku_id)
     if not path or not isinstance(data, dict):
@@ -94,7 +87,6 @@ def _write_product_source_cache(sku_id, data):
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         return
-
 
 def _product_source_attempts():
     mode = os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_MODE", "direct_first").lower().strip()
@@ -107,7 +99,6 @@ def _product_source_attempts():
     if mode == "zenrows":
         return ["zenrows"]
     return ["zenrows", "direct"]
-
 
 def _fetch_product_source_direct(url, timeout=None):
     try:
@@ -126,7 +117,6 @@ def _fetch_product_source_direct(url, timeout=None):
     except ValueError:
         return {"success": False, "error": "direct_invalid_json", "method": "casas_bahia_product_source_direct"}
     return {"success": True, "data": data, "method": "casas_bahia_product_source_direct"}
-
 
 def _fetch_product_source_zenrows(url, timeout=None):
     if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS", "1").lower() in {"0", "false", "no", "n"}:
@@ -173,7 +163,6 @@ def _fetch_product_source_zenrows(url, timeout=None):
         "headers": result.headers,
     }
 
-
 def _product_source_detail(data):
     product = data.get("product") if isinstance(data.get("product"), dict) else {}
     sku = data.get("sku") if isinstance(data.get("sku"), dict) else {}
@@ -183,14 +172,10 @@ def _product_source_detail(data):
     name = _known_text(product.get("name") or product.get("rawName"))
     sku_name = _known_text(sku.get("name"))
     line = product_line()
-    model = _first_spec(spec_values, ["modelo"]) or model_number_from_text(" ".join(part for part in [name, sku_name] if part))
+    model = _first_spec(spec_values, ["modelo"])
     screen_size = _screen_size_from_specs(spec_values, name)
-    energy_use = _known_text(_first_spec(spec_values, ["consumo de energia", "consumo aproximado de energia"]))
-    if not energy_use:
-        energy_use = _energy_use_from_specs(spec_values)
-    model_year = _known_text(_first_spec(spec_values, ["ano de lancamento", "ano de lançamento", "ano"]))
-    if not model_year:
-        model_year = model_year_from_text(" ".join(part for part in [name, sku_name] if part))
+    energy_use = _known_text(_first_spec(spec_values, ["consumo de energia"]))
+    model_year = _known_text(_first_spec(spec_values, ["ano de lancamento"]))
     detail = {
         "retailer_sku_name": name,
         "screen_size": screen_size,
@@ -228,7 +213,6 @@ def _product_source_detail(data):
                 "ldy_color": _known_text(
                     _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
                     or _first_spec(spec_values, ["cor"])
-                    or ldy_color_from_text(name)
                 ),
                 "ldy_capacity": _known_text(
                     _first_group_spec(
@@ -239,11 +223,10 @@ def _product_source_detail(data):
                     or _first_spec(spec_values, ["capacidade kg de roupas", "capacidade"])
                 ),
                 "sku_short_version": ldy_sku_short_version_from_text(name),
-                "sku": ldy_sku_from_text(name) or appliance_model_number_from_text(name),
+                "sku": ldy_sku_from_text(name),
             }
         )
     return detail
-
 
 def _spec_values(groups):
     specs = {}
@@ -260,7 +243,6 @@ def _spec_values(groups):
             if key and value:
                 specs.setdefault(key, []).append(value)
     return specs
-
 
 def _grouped_spec_values(groups):
     grouped = {}
@@ -282,26 +264,24 @@ def _grouped_spec_values(groups):
                 group_specs.setdefault(key, []).append(value)
     return grouped
 
-
 def _first_spec(specs, labels):
     for label in labels:
         wanted = _normalize_key(label)
         for key, values in specs.items():
-            if wanted == key or wanted in key:
+            if wanted == key:
                 for value in values:
                     if _known_text(value):
                         return _known_text(value)
     return ""
 
-
 def _first_group_spec(grouped_specs, group_labels, spec_labels):
     wanted_groups = [_normalize_key(label) for label in group_labels]
     wanted_specs = [_normalize_key(label) for label in spec_labels]
     for group_key, specs in grouped_specs.items():
-        if not any(wanted == group_key or wanted in group_key for wanted in wanted_groups):
+        if group_key not in wanted_groups:
             continue
         for spec_key, values in specs.items():
-            if not any(wanted == spec_key or wanted in spec_key for wanted in wanted_specs):
+            if spec_key not in wanted_specs:
                 continue
             for value in values:
                 text = _known_text(value)
@@ -309,19 +289,17 @@ def _first_group_spec(grouped_specs, group_labels, spec_labels):
                     return text
     return ""
 
-
 def _screen_size_from_specs(specs, title):
     values = []
     wanted = _normalize_key("tamanho da tela")
     for key, items in specs.items():
-        if wanted == key or wanted in key:
+        if wanted == key:
             values.extend(items)
     for value in values:
         extracted = _screen_size_from_tamanho_tela(value)
         if extracted:
             return extracted
-    return screen_size_from_text(title)
-
+    return ""
 
 def _screen_size_from_tamanho_tela(value):
     text = _known_text(value)
@@ -340,33 +318,6 @@ def _screen_size_from_tamanho_tela(value):
         return ""
     return screen_size_from_text(text)
 
-
-def _energy_use_from_specs(specs):
-    for values in specs.values():
-        for value in values:
-            text = _known_text(value)
-            if not text:
-                continue
-            extracted = _energy_use_from_text(text)
-            if extracted:
-                return extracted
-    return ""
-
-
-def _energy_use_from_text(text):
-    patterns = [
-        r"\bConsumo\s*/\s*m[eê]s\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*kWh(?:\s*/\s*m[eê]s)?)",
-        r"\bConsumo\s+mensal\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*kWh(?:\s*/\s*m[eê]s)?)",
-        r"\bConsumo\s+de\s+energia\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*(?:kWh(?:\s*/\s*m[eê]s)?|W))",
-        r"\bConsumo\s*:?\s*([0-9]+(?:[,.][0-9]+)?\s*(?:kWh(?:\s*/\s*m[eê]s)?|W))",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return clean_text(match.group(1))
-    return ""
-
-
 def _known_text(value):
     text = clean_text(value)
     normalized = _normalize_key(text)
@@ -375,7 +326,6 @@ def _known_text(value):
     if text in {".", "-", "--"}:
         return ""
     return text
-
 
 def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None):
     if not sku_id or not seller_id:
@@ -403,7 +353,6 @@ def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None):
         return {"success": True, "detail": _freight_detail(data), "method": f"{transport}_freight_api"}
     return {"success": False, "error": last_error}
 
-
 def _freight_params():
     params = {
         "channel": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_CHANNEL", "DESKTOP"),
@@ -420,12 +369,10 @@ def _freight_params():
         )
     return params
 
-
 def _freight_transports():
     raw = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_TRANSPORTS", "requests,curl_cffi")
     transports = [item.strip().lower() for item in raw.split(",") if item.strip()]
     return transports or ["requests"]
-
 
 def _freight_get(transport, url, params, headers, timeout):
     if transport == "requests":
@@ -441,7 +388,6 @@ def _freight_get(transport, url, params, headers, timeout):
             impersonate=os.getenv("SEDA_CASAS_BAHIA_CURL_IMPERSONATE", "chrome"),
         )
     raise ValueError(f"unknown_freight_transport:{transport}")
-
 
 def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=None):
     if not product_id:
@@ -482,7 +428,6 @@ def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=N
     ]
     return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
 
-
 def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
     if not sku_id or not seller_id:
         return {"success": False, "error": "missing_sku_or_seller"}
@@ -506,7 +451,6 @@ def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
     text = _pickup_text(data)
     return {"success": bool(text), "detail": {"pick_up_availability": text}, "error": "" if text else "empty_pickup"}
 
-
 def _is_relevant_title(title):
     line = product_line()
     text = str(title or "").lower()
@@ -515,7 +459,6 @@ def _is_relevant_title(title):
     if line == "LDY":
         return bool(re.search(r"\b(?:lavadora|lava\s+e\s+seca|secadora|m[aá]quina\s+de\s+lavar)\b", text, re.I))
     return "smart tv" in text or " tv " in f" {text} " or "televisor" in text
-
 
 def _pickup_text(data):
     if not isinstance(data, dict):
@@ -532,7 +475,6 @@ def _pickup_text(data):
     if not formatted:
         return ""
     return f"Retira Rapido Retirar em {formatted}"
-
 
 def _freight_detail(data):
     delivery = []
@@ -560,7 +502,7 @@ def _freight_detail(data):
     if not delivery and isinstance(data, dict):
         error = data.get("error") if isinstance(data.get("error"), dict) else {}
         message = _known_text(error.get("message"))
-        if message:
+        if message and not _is_freight_calculation_error(message):
             delivery.append(message)
         elif pickup and not skipped_delivery:
             delivery.append(os.getenv("SEDA_CASAS_BAHIA_NO_DELIVERY_TEXT", "Entrega indisponivel para este CEP"))
@@ -569,11 +511,13 @@ def _freight_detail(data):
         "pick_up_availability": "; ".join(dict.fromkeys(pickup)),
     }
 
+def _is_freight_calculation_error(message):
+    normalized = _normalize_ascii(message)
+    return "calculo de frete apresentou problemas" in normalized
 
 def _is_normal_delivery_option(normalized_name):
     text = str(normalized_name or "").strip().lower()
     return bool(re.search(r"\bnormal\b", text))
-
 
 def _iter_freight_options(value):
     if isinstance(value, list):
@@ -593,7 +537,6 @@ def _iter_freight_options(value):
         child = value.get(key)
         if child:
             yield from _iter_freight_options(child)
-
 
 def _normalize_ascii(value):
     text = str(value or "").lower()
@@ -616,18 +559,15 @@ def _normalize_ascii(value):
         text = text.replace(old, new)
     return text
 
-
 def _normalize_key(value):
     text = unicodedata.normalize("NFKD", clean_text(value)).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
 
 def _blocked_response(text, status_code=0):
     haystack = str(text or "").lower()
     if status_code in {401, 403, 429}:
         return True
     return any(marker in haystack for marker in ("akamai", "access denied", "ops! algo deu errado", "captcha", "customdeny"))
-
 
 def _headers(zipcode=None, include_cvip=False):
     headers = {
@@ -663,7 +603,6 @@ def _headers(zipcode=None, include_cvip=False):
         headers["x-cvip"] = cvip
     return headers
 
-
 def _cvip_header(zipcode=None):
     raw = os.getenv("SEDA_CASAS_BAHIA_X_CVIP", "").strip()
     zip_digits = re.sub(r"\D+", "", str(zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")))
@@ -679,7 +618,6 @@ def _cvip_header(zipcode=None):
     if not zip_digits:
         return f"IPI-CasasBahia=UsuarioGUID={user_guid}"
     return f"IPI-CasasBahia=UsuarioGUID={user_guid}&cepClienteProvavel={zip_digits}"
-
 
 def _pickup_headers():
     headers = _headers()

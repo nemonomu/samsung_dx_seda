@@ -17,25 +17,21 @@ except Exception:
 
 BRL_RE = re.compile(r"R\$\s*[\d\.]+,\d{2}")
 
-
 def clean_text(value):
     text = html.unescape(str(value or "")).replace("\xa0", " ")
     text = text.replace("Ąą", '"')
     text = text.replace("“", '"').replace("”", '"')
     return " ".join(text.split())
 
-
 def compact_json(value):
     if value in ("", None, [], {}):
         return ""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
-
 def absolute_url(base_url, href):
     if not href:
         return ""
     return urljoin(base_url, href)
-
 
 def sku_from_url(url):
     parsed = urlparse(url)
@@ -44,7 +40,6 @@ def sku_from_url(url):
         return match.group(1)
     match = re.search(r"(?:skuId|produto|productId)=([^&]+)", parsed.query)
     return match.group(1) if match else ""
-
 
 def screen_size_from_text(text):
     text = clean_text(text)
@@ -62,7 +57,6 @@ def screen_size_from_text(text):
             re.I,
         )
     return f'{match.group(1)}"' if match else ""
-
 
 def model_number_from_text(text):
     text = clean_text(text).upper()
@@ -120,26 +114,21 @@ def model_number_from_text(text):
         return candidate
     return ""
 
-
 def model_year_from_text(text):
     years = [int(item) for item in re.findall(r"\b(20[1-3]\d)\b", text)]
     return str(max(years)) if years else ""
-
 
 def ref_sku_short_version_from_text(text):
     match = re.search(r"\b((?:RS|RF|RT|RB|RL|RR)\d{2}[A-Z]?)", str(text or "").upper())
     return match.group(1) if match else ""
 
-
 def ldy_sku_short_version_from_text(text):
     match = re.search(r"\b((?:WW|WD|WF|WA)\d{2}[A-Z]{1,2})", str(text or "").upper())
     return match.group(1) if match else ""
 
-
 def ldy_sku_from_text(text):
     match = re.search(r"\b((?:WW|WD|WF|WA)\d{2}[A-Z0-9]{4,12})\b", str(text or "").upper())
     return match.group(1) if match else ""
-
 
 def appliance_model_number_from_text(text):
     text = clean_text(text).upper()
@@ -162,7 +151,6 @@ def appliance_model_number_from_text(text):
         return candidate
     return ""
 
-
 def ldy_color_from_text(text):
     match = re.search(
         r"\b(Inox|Black|Branca|Branco|Preta|Preto|Prata|Cinza|Grafite|Titanium|Tit[aâ]nio)\b",
@@ -170,7 +158,6 @@ def ldy_color_from_text(text):
         re.I,
     )
     return clean_text(match.group(1)) if match else ""
-
 
 def extract_jsonld(html_text):
     blocks = []
@@ -192,7 +179,6 @@ def extract_jsonld(html_text):
             blocks.append(parsed)
     return blocks
 
-
 def extract_next_data(html_text):
     match = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html_text, re.S | re.I)
     if not match:
@@ -201,7 +187,6 @@ def extract_next_data(html_text):
         return json.loads(html.unescape(match.group(1)))
     except ValueError:
         return {}
-
 
 def _price_fields(text):
     prices = BRL_RE.findall(text)
@@ -212,13 +197,11 @@ def _price_fields(text):
         final = pix.group(1)
     return original, final
 
-
 def _rating_fields(text):
     match = re.search(r"\b([1-5][,.]\d)\s*\(([\d\.]+)\)", text)
     if match:
         return match.group(1).replace(",", "."), match.group(2)
     return "", ""
-
 
 def _discount_text(text):
     phrases = []
@@ -230,7 +213,6 @@ def _discount_text(text):
     ]:
         phrases.extend(re.findall(pattern, text, re.I))
     return "; ".join(dict.fromkeys(clean_text(item) for item in phrases))
-
 
 def parse_listing(html_text, retailer, base_url, source_url, run_id="main"):
     if retailer == "Magalu":
@@ -275,7 +257,6 @@ def parse_listing(html_text, retailer, base_url, source_url, run_id="main"):
     if not rows:
         rows.extend(_parse_listing_from_jsonld(html_text, retailer, base_url, source_url, run_id))
     return rows
-
 
 def _parse_magalu_next_listing(html_text, base_url, source_url, run_id):
     data = extract_next_data(html_text)
@@ -328,7 +309,6 @@ MAGALU_LDY_TITLE_RE = re.compile(
     re.I,
 )
 
-
 def _magalu_is_relevant_product(product):
     line = product_line()
     if line == "REF":
@@ -336,7 +316,6 @@ def _magalu_is_relevant_product(product):
     if line == "LDY":
         return _magalu_is_ldy_product(product)
     return _magalu_is_tv_product(product)
-
 
 def _magalu_is_tv_product(product):
     title = clean_text(product.get("title") or product.get("name"))
@@ -355,7 +334,6 @@ def _magalu_is_tv_product(product):
         return False
     return strong_tv_title
 
-
 def _magalu_is_ref_product(product):
     title = clean_text(product.get("title") or product.get("name"))
     path = clean_text(product.get("path"))
@@ -364,7 +342,6 @@ def _magalu_is_ref_product(product):
         return False
     return bool(MAGALU_REF_TITLE_RE.search(haystack))
 
-
 def _magalu_is_ldy_product(product):
     title = clean_text(product.get("title") or product.get("name"))
     path = clean_text(product.get("path"))
@@ -372,7 +349,6 @@ def _magalu_is_ldy_product(product):
     if MAGALU_LDY_EXCLUDE_RE.search(haystack):
         return False
     return bool(MAGALU_LDY_TITLE_RE.search(haystack))
-
 
 def _magalu_product_row(product, base_url, source_url, run_id, rank):
     now = datetime.now().isoformat(timespec="seconds")
@@ -419,14 +395,12 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
         "seller_id": clean_text(seller_id),
     }
 
-
 def _seller_id_from_url(url):
     if not url:
         return ""
     parsed = urlparse(str(url))
     values = parse_qs(parsed.query).get("seller_id") or []
     return clean_text(values[0]) if values else ""
-
 
 def _parse_casas_bahia_next_listing(html_text, base_url, source_url, run_id):
     data = extract_next_data(html_text)
@@ -448,10 +422,8 @@ def _parse_casas_bahia_next_listing(html_text, base_url, source_url, run_id):
         rows.append(_casas_bahia_product_row(product, base_url, source_url, run_id, len(rows) + 1))
     return rows
 
-
 def _casas_bahia_allow_showcase_fallback():
     return os.getenv("SEDA_CASAS_BAHIA_SHOWCASE_FALLBACK", "0").lower() in {"1", "true", "yes", "y"}
-
 
 def _parse_casas_bahia_ssr_listing(html_text, base_url, source_url, run_id):
     data = extract_next_data(html_text)
@@ -476,7 +448,6 @@ def _parse_casas_bahia_ssr_listing(html_text, base_url, source_url, run_id):
                 row[key] = value
         rows.append(row)
     return rows
-
 
 def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
     now = datetime.now().isoformat(timespec="seconds")
@@ -530,11 +501,9 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
         "seller_id": clean_text(product.get("lojista") or product.get("sellerId")),
     }
 
-
 def _casas_bahia_availability_pickup_text(price):
     availability = price.get("availability") if isinstance(price.get("availability"), dict) else {}
     return "Retirada disponivel" if availability.get("Retira") else ""
-
 
 def _casas_bahia_listing_sku(title):
     line = product_line()
@@ -542,13 +511,11 @@ def _casas_bahia_listing_sku(title):
         return appliance_model_number_from_text(title or "")
     return model_number_from_text(title or "")
 
-
 def _casas_bahia_sku_status(product):
     if product.get("isSponsored") or product.get("advertasingEvents") or product.get("advertisingEvents"):
         return "Sponsored"
     tag = clean_text(product.get("tagName"))
     return "Sponsored" if re.search(r"patrocinado|sponsored", tag, re.I) else ""
-
 
 def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
     now = datetime.now().isoformat(timespec="seconds")
@@ -590,12 +557,10 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
         "seller_id": clean_text(product.get("sellerId")),
     }
 
-
 def _casas_bahia_tv_listing(source_url, search):
     query = search.get("query") if isinstance(search.get("query"), dict) else {}
     term = clean_text(search.get("searchTerm") or query.get("strbusca"))
     return "/tv/" in str(source_url).lower() or term.lower() == "tv"
-
 
 def _casas_bahia_is_relevant_product(product):
     line = product_line()
@@ -606,7 +571,6 @@ def _casas_bahia_is_relevant_product(product):
     if line == "LDY":
         return _casas_bahia_is_ldy_product(product)
     return True
-
 
 def _casas_bahia_is_ref_product(product):
     text = _casas_bahia_product_haystack(product)
@@ -637,7 +601,6 @@ def _casas_bahia_is_ref_product(product):
         ],
     )
 
-
 def _casas_bahia_is_ldy_product(product):
     text = _casas_bahia_product_haystack(product)
     if _matches_any(
@@ -662,7 +625,6 @@ def _casas_bahia_is_ldy_product(product):
             r"\btanquinho\b",
         ],
     )
-
 
 def _casas_bahia_product_haystack(product):
     parts = [clean_text(product.get("title") or product.get("name"))]
@@ -690,10 +652,8 @@ def _casas_bahia_product_haystack(product):
                 stack.extend(child)
     return _normalize_key(" ".join(part for part in parts if part))
 
-
 def _matches_any(text, patterns):
     return any(re.search(pattern, text, re.I) for pattern in patterns)
-
 
 def _casas_bahia_is_tv_product(product):
     title = clean_text(product.get("title") or product.get("name"))
@@ -724,7 +684,6 @@ def _casas_bahia_is_tv_product(product):
                 stack.extend(child)
     return False
 
-
 def _casas_bahia_excluded_non_tv_title(title):
     text = _normalize_key(title)
     if re.search(r"\bpainel\b", text, re.I) and not re.search(r"\bsmart\s+tv\b|televisor", text, re.I):
@@ -742,7 +701,6 @@ def _casas_bahia_excluded_non_tv_title(title):
         r"\bestante\b",
     ]
     return any(re.search(pattern, text, re.I) for pattern in patterns)
-
 
 def _casas_bahia_card_snapshots(html_text, base_url):
     if not BeautifulSoup:
@@ -769,7 +727,6 @@ def _casas_bahia_card_snapshots(html_text, base_url):
         }
     return snapshots
 
-
 def _casas_bahia_dom_prices(node, text):
     history = _node_text(node.select_one('[data-testid="history-price"]')) if hasattr(node, "select_one") else ""
     original = BRL_RE.search(history).group(0) if BRL_RE.search(history) else ""
@@ -787,10 +744,8 @@ def _casas_bahia_dom_prices(node, text):
         original = prices[0]
     return original, final
 
-
 def _node_text(node):
     return clean_text(node.get_text(" ")) if node else ""
-
 
 def _casas_bahia_dom_discount(text):
     values = []
@@ -800,7 +755,6 @@ def _casas_bahia_dom_discount(text):
         values.append("Carne Digital")
     return "; ".join(values)
 
-
 def _first_value(value, keys):
     if not isinstance(value, dict):
         return ""
@@ -808,7 +762,6 @@ def _first_value(value, keys):
         if value.get(key) not in (None, ""):
             return value.get(key)
     return ""
-
 
 def _casas_bahia_ssr_discount_text(price, flags, seals):
     values = []
@@ -824,7 +777,6 @@ def _casas_bahia_ssr_discount_text(price, flags, seals):
                 values.append(text)
     return "; ".join(dict.fromkeys(values))
 
-
 def _percent_text(value):
     if value in (None, "", "0", 0):
         return ""
@@ -834,11 +786,9 @@ def _percent_text(value):
         return clean_text(value)
     return f"{number:g}%"
 
-
 def _baixou_text(value):
     percent = _percent_text(value)
     return f"Baixou {percent}" if percent else ""
-
 
 def _zero_preserving_metric(value):
     text = clean_text(value)
@@ -852,7 +802,6 @@ def _zero_preserving_metric(value):
         return "0"
     return f"{number:g}"
 
-
 def _casas_bahia_savings_text(price, fallback_rate=""):
     explicit = clean_text(price.get("savings") if isinstance(price, dict) else "")
     if explicit:
@@ -865,7 +814,6 @@ def _casas_bahia_savings_text(price, fallback_rate=""):
             return _baixou_text(computed)
     return _baixou_text(fallback_rate)
 
-
 def _discount_percent_from_prices(old_price, final_price):
     try:
         old_number = float(str(old_price).replace(",", "."))
@@ -875,7 +823,6 @@ def _discount_percent_from_prices(old_price, final_price):
     if old_number <= 0 or final_number <= 0 or final_number >= old_number:
         return ""
     return round((old_number - final_number) / old_number * 100)
-
 
 def _casas_bahia_discount_text(product, flags, stamp):
     values = []
@@ -893,7 +840,6 @@ def _casas_bahia_discount_text(product, flags, stamp):
         values.append(stamp_description)
     return "; ".join(dict.fromkeys(values))
 
-
 def _casas_bahia_pickup_text(flags):
     for flag in flags:
         if not isinstance(flag, dict):
@@ -902,7 +848,6 @@ def _casas_bahia_pickup_text(flags):
         if re.search(r"retira", description, re.I):
             return "Retira Rapido"
     return ""
-
 
 def format_brl(value):
     if value in (None, ""):
@@ -918,7 +863,6 @@ def format_brl(value):
         whole = whole[:-3]
     return f"R${'.'.join(reversed(groups))},{cents}"
 
-
 def _magalu_savings(price):
     discount = price.get("discount") if isinstance(price, dict) else ""
     if discount in (None, ""):
@@ -928,7 +872,6 @@ def _magalu_savings(price):
     except ValueError:
         return str(discount)
     return f"{number:g}%"
-
 
 def magalu_sku_status(product):
     ads = product.get("ads") if isinstance(product, dict) else {}
@@ -941,7 +884,6 @@ def magalu_sku_status(product):
     if product.get("adsSellerId"):
         return "Patrocinado"
     return ""
-
 
 def magalu_discount_text(tags, price=None):
     values = []
@@ -985,7 +927,6 @@ def magalu_discount_text(tags, price=None):
             values.append(f"{amount_text}% OFF")
     return "; ".join(dict.fromkeys(values))
 
-
 def magalu_coupon_text(tags):
     if not isinstance(tags, list):
         return ""
@@ -1007,14 +948,12 @@ def magalu_coupon_text(tags):
             values.append(message)
     return "; ".join(dict.fromkeys(values))
 
-
 def _looks_like_product_url(url, retailer):
     if retailer == "Magalu":
         return "/p/" in url and "magazineluiza.com.br" in url
     if retailer == "Casas Bahia":
         return ("produto" in url.lower() or "/p/" in url.lower()) and "casasbahia.com.br" in url
     return False
-
 
 def _listing_row(retailer, text, url, source_url, run_id, rank):
     original, final = _price_fields(text)
@@ -1044,7 +983,6 @@ def _listing_row(retailer, text, url, source_url, run_id, rank):
         "parse_status": "listing",
     }
 
-
 def _name_from_listing_text(text):
     text = re.sub(r"\bFull\b\s*", "", clean_text(text), flags=re.I)
     price_pos = text.find("R$")
@@ -1052,7 +990,6 @@ def _name_from_listing_text(text):
         text = text[:price_pos]
     text = re.sub(r"\b[1-5][,.]\d\s*\([\d.]+\)\s*$", "", text).strip()
     return text
-
 
 def _savings_from_text(text):
     baixou = re.search(r"Baixou\s+(-?\d+(?:[.,]\d+)?)%", text, re.I)
@@ -1064,11 +1001,9 @@ def _savings_from_text(text):
     value = next(group for group in match.groups() if group)
     return f"{value.replace(',', '.')}%"
 
-
 def _coupon_text_from_text(text):
     values = re.findall(r"Cupom\s+R\$\s*[\d\.]+(?:,\d{2})?\s*OFF", clean_text(text), re.I)
     return "; ".join(dict.fromkeys(clean_text(value) for value in values))
-
 
 def _parse_listing_from_jsonld(html_text, retailer, base_url, source_url, run_id):
     rows = []
@@ -1094,7 +1029,6 @@ def _parse_listing_from_jsonld(html_text, retailer, base_url, source_url, run_id
             rows.append(row)
     return rows
 
-
 def parse_detail(html_text, retailer, base_url, product_url):
     text = _visible_text(html_text)
     row = {
@@ -1112,12 +1046,19 @@ def parse_detail(html_text, retailer, base_url, product_url):
         "parse_status": "detail",
     }
     if retailer == "Magalu":
+        row["sku"] = ""
+        row["screen_size"] = ""
+        row["estimated_annual_electricity_use"] = ""
+        row["model_year"] = ""
         magalu_detail = _parse_magalu_next_detail(html_text, base_url, product_url)
         row.update({key: value for key, value in magalu_detail.items() if value not in ("", None, [], {})})
     if retailer == "Casas Bahia":
         row["delivery_availability"] = ""
         row["pick_up_availability"] = ""
+        row["sku"] = ""
+        row["screen_size"] = ""
         row["estimated_annual_electricity_use"] = ""
+        row["model_year"] = ""
         casas_detail = _parse_casas_bahia_html_detail(html_text, base_url, product_url)
         row.update({key: value for key, value in casas_detail.items() if value not in ("", None, [], {})})
     _merge_jsonld_detail(row, html_text)
@@ -1125,7 +1066,6 @@ def parse_detail(html_text, retailer, base_url, product_url):
         comments = re.search(r"([\d\.]+)\s+comentários", text, re.I)
         row["count_of_reviews"] = comments.group(1) if comments else ""
     return row
-
 
 def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
     description = _meta_content(html_text, "og:description") or _meta_content(html_text, "description")
@@ -1139,16 +1079,11 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
     screen_size = (
         specs.get("tamanho da tela", "")
         or _casas_bahia_detail_label_value(html_text, ["Tamanho da tela"])
-        or screen_size_from_text(description_text)
     )
     screen_size = _screen_size_value(screen_size)
     if screen_size and screen_size.isdigit():
         screen_size = f'{screen_size}"'
-    energy_use = _first_spec_value(
-        specs,
-        ["consumo aproximado de energia", "consumo de energia"],
-    ) or _casas_bahia_detail_label_value(html_text, ["Consumo de energia"])
-    energy_use = _energy_use_value(energy_use)
+    energy_use = _first_spec_value(specs, ["consumo de energia"])
     original, final = _casas_bahia_detail_prices(html_text)
     return {
         "retailer": "Casas Bahia",
@@ -1159,13 +1094,11 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
         "sku": model,
         "screen_size": screen_size,
         "estimated_annual_electricity_use": energy_use,
-        "model_year": _first_spec_value(specs, ["ano", "ano de lancamento"])
-        or model_year_from_text(f"{title} {description_text}"),
+        "model_year": _first_spec_value(specs, ["ano de lancamento"]),
         "summarized_review_content": "",
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "parse_status": "detail_casas_bahia_html",
     }
-
 
 def _casas_bahia_detail_label_value(html_text, labels):
     if not BeautifulSoup:
@@ -1175,14 +1108,13 @@ def _casas_bahia_detail_label_value(html_text, labels):
     for node in soup.find_all(string=True):
         label_text = clean_text(node)
         normalized = _normalize_key(label_text)
-        if not label_text or not any(label == normalized or label in normalized for label in wanted):
+        if not label_text or normalized not in wanted:
             continue
         for candidate in _nearby_text_candidates(node):
             value = _value_after_label(candidate, label_text)
             if value and _normalize_key(value) != normalized:
                 return value
     return ""
-
 
 def _nearby_text_candidates(node):
     parent = getattr(node, "parent", None)
@@ -1198,7 +1130,6 @@ def _nearby_text_candidates(node):
             candidates.append(clean_text(sibling.get_text(" ")))
     return [candidate for candidate in candidates if candidate]
 
-
 def _value_after_label(text, label):
     text = clean_text(text)
     label = clean_text(label)
@@ -1212,7 +1143,6 @@ def _value_after_label(text, label):
         if tail:
             return _trim_spec_tail(tail)
     return _trim_spec_tail(text)
-
 
 def _trim_spec_tail(text):
     text = clean_text(text)
@@ -1240,13 +1170,11 @@ def _trim_spec_tail(text):
             break
     return clean_text(text)
 
-
 def _jsonld_product_value(html_text, key):
     for block in extract_jsonld(html_text):
         if isinstance(block, dict) and block.get("@type") == "Product":
             return clean_text(block.get(key))
     return ""
-
 
 def _casas_bahia_detail_prices(html_text):
     if not BeautifulSoup:
@@ -1262,7 +1190,6 @@ def _casas_bahia_detail_prices(html_text):
     final = prices[0] if prices else ""
     return original, final
 
-
 def _meta_content(html_text, name):
     patterns = [
         rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']',
@@ -1276,14 +1203,12 @@ def _meta_content(html_text, name):
             return html.unescape(match.group(1))
     return ""
 
-
 def _html_break_text(value):
     text = html.unescape(str(value or ""))
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     lines = [clean_text(line) for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
-
 
 def _casas_bahia_specs(text):
     specs = {}
@@ -1296,7 +1221,6 @@ def _casas_bahia_specs(text):
         if key and value:
             specs[key] = value
     return specs
-
 
 def _casas_bahia_next_specs(html_text):
     specs = {}
@@ -1314,7 +1238,6 @@ def _casas_bahia_next_specs(html_text):
                 specs.setdefault(key, value)
     return specs
 
-
 def _iter_casas_bahia_spec_groups(value):
     if isinstance(value, dict):
         groups = value.get("specGroups")
@@ -1328,7 +1251,6 @@ def _iter_casas_bahia_spec_groups(value):
         for item in value:
             yield from _iter_casas_bahia_spec_groups(item)
 
-
 def _screen_size_value(value):
     text = clean_text(value)
     if not text:
@@ -1339,23 +1261,13 @@ def _screen_size_value(value):
     match = re.search(r"\b(\d{2,3})\b", text)
     return f'{match.group(1)}"' if match else text
 
-
-def _energy_use_value(value):
-    text = clean_text(value)
-    if not text:
-        return ""
-    match = re.search(r"\b(\d+(?:[,.]\d+)?\s*(?:kwh\s*/?\s*m\S+|kwh|w))\b", text, re.I)
-    return clean_text(match.group(1)) if match else _trim_spec_tail(text)
-
-
 def _first_spec_value(specs, labels):
     for label in labels:
         wanted = _normalize_key(label)
         for key, value in specs.items():
-            if wanted == key or wanted in key:
+            if wanted == key:
                 return value
     return ""
-
 
 def _summary_review_content(html_text):
     if not BeautifulSoup:
@@ -1365,7 +1277,6 @@ def _summary_review_content(html_text):
     if not node:
         return ""
     return clean_text(node.get_text(" "))
-
 
 def _parse_magalu_next_detail(html_text, base_url, product_url):
     data = extract_next_data(html_text)
@@ -1393,14 +1304,9 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
         "screen_size": _magalu_attribute_value(item, ["polegadas", "tamanho da tela"])
-        or _magalu_factsheet_value(item, ["polegadas", "tamanho da tela"])
-        or screen_size_from_text(item.get("title") or ""),
-        "estimated_annual_electricity_use": _magalu_factsheet_value(
-            item,
-            ["consumo aproximado de energia", "consumo", "energia"],
-        ),
-        "model_year": _magalu_factsheet_value(item, ["ano de lancamento", "ano"])
-        or model_year_from_text(f"{item.get('title', '')} {item.get('description', '')}"),
+        or _magalu_factsheet_value(item, ["polegadas", "tamanho da tela"]),
+        "estimated_annual_electricity_use": _magalu_energy_use(item),
+        "model_year": _magalu_factsheet_value(item, ["ano de lancamento"]),
         "summarized_review_content": html_summary or clean_text(review_summary.get("summary")),
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "star_rating": clean_text(general.get("rating")),
@@ -1436,10 +1342,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         )
     return detail
 
-
 def _magalu_energy_use(item):
     allowed_keys = {
-        "consumo",
         "consumo aproximado de energia",
         "consumo de energia",
         "consumo mensal de energia",
@@ -1449,43 +1353,10 @@ def _magalu_energy_use(item):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
         if key not in allowed_keys:
             continue
-        value = _clean_magalu_energy_value(_magalu_fact_value(fact))
+        value = clean_text(_magalu_fact_value(fact))
         if value:
             return value
     return ""
-
-
-def _clean_magalu_energy_value(value):
-    text = clean_text(value)
-    normalized = _normalize_key(text)
-    if not normalized:
-        return ""
-    if any(token in normalized for token in ("stand by", "standby", "modo espera", "em espera")):
-        return ""
-    if any(token in normalized for token in ("bivolt", "voltagem", "tensao", "fonte de energia", "alimentacao")):
-        return ""
-    if any(token in normalized for token in ("energia eletrica", "eficiencia energetica", "classe a", "sensor ecologico")):
-        return ""
-    if re.search(r"\bhz\b", normalized, re.I) and re.search(r"\bv\b", normalized, re.I):
-        return ""
-    if re.fullmatch(r"(?:ac\s*)?\d{2,3}(?:\s*-\s*\d{2,3})?\s*v(?:olts?)?(?:\s*[~/;]\s*\d{2}/?\d{2}\s*hz)?", normalized, re.I):
-        return ""
-    low_power = re.search(r"(?:abaixo|<=|≤|menor(?:\s+que)?).*?(\d+(?:[,.]\d+)?)\s*w\b", normalized, re.I)
-    if low_power:
-        try:
-            if float(low_power.group(1).replace(",", ".")) <= 5:
-                return ""
-        except ValueError:
-            return ""
-    if re.fullmatch(r"[<≤]?\s*(\d+(?:[,.]\d+)?)\s*w", normalized, re.I):
-        try:
-            if float(re.sub(r"[^\d,.]", "", normalized).replace(",", ".")) <= 5:
-                return ""
-        except ValueError:
-            return ""
-    if not ((re.search(r"\d", normalized) and re.search(r"(?:kwh|kw/h)", normalized, re.I)) or re.search(r"\d+(?:[,.]\d+)?\s*w\b|\bwatts?\b", normalized, re.I) or re.fullmatch(r"\d+(?:[,.]\d+)?", normalized)):
-        return ""
-    return text
 
 def _magalu_ref_refrigerator_type(item):
     for fact in _iter_magalu_facts(item.get("factsheet") or []):
@@ -1494,7 +1365,6 @@ def _magalu_ref_refrigerator_type(item):
             continue
         return _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
     return ""
-
 
 def _clean_magalu_ref_refrigerator_type(value):
     text = clean_text(value)
@@ -1513,18 +1383,15 @@ def _clean_magalu_ref_refrigerator_type(value):
     )
     return text if valid else ""
 
-
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):
     fallback = clean_text(item.get("offerId") or item.get("id")) or sku_from_url(product_url)
     if line in {"REF", "LDY"}:
-        return reference or model or fallback
-    return model or fallback
-
+        return reference or model
+    return model
 
 def _magalu_first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
     return offers[0] if offers and isinstance(offers[0], dict) else {}
-
 
 def _magalu_attribute_value(item, labels):
     wanted = {_normalize_key(label) for label in labels}
@@ -1536,15 +1403,13 @@ def _magalu_attribute_value(item, labels):
             return clean_text(attribute.get("current"))
     return ""
 
-
 def _magalu_factsheet_value(item, labels):
     wanted = {_normalize_key(label) for label in labels}
     for fact in _iter_magalu_facts(item.get("factsheet") or []):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
-        if key in wanted or any(label and label in key for label in wanted):
+        if key in wanted:
             return _magalu_fact_value(fact)
     return ""
-
 
 def _iter_magalu_facts(facts):
     if not isinstance(facts, list):
@@ -1558,7 +1423,6 @@ def _iter_magalu_facts(facts):
         if isinstance(children, list):
             yield from _iter_magalu_facts(children)
 
-
 def _magalu_fact_value(fact):
     elements = fact.get("elements")
     if isinstance(elements, list):
@@ -1567,7 +1431,6 @@ def _magalu_fact_value(fact):
         if values:
             return "; ".join(values)
     return clean_text(fact.get("value"))
-
 
 
 def _magalu_review_descriptions(product_rating, limit=20):
@@ -1583,11 +1446,9 @@ def _magalu_review_descriptions(product_rating, limit=20):
             break
     return reviews
 
-
 def _normalize_key(value):
     normalized = unicodedata.normalize("NFKD", clean_text(value))
     return normalized.encode("ascii", "ignore").decode("ascii").lower()
-
 
 def _visible_text(html_text):
     if BeautifulSoup:
@@ -1597,7 +1458,6 @@ def _visible_text(html_text):
         return clean_text(soup.get_text(" "))
     return clean_text(re.sub(r"<[^>]+>", " ", html_text))
 
-
 def _first_phrase(text, starts):
     for start in starts:
         match = re.search(rf"({re.escape(start)}[^.。|]{{0,120}})", text, re.I)
@@ -1605,11 +1465,9 @@ def _first_phrase(text, starts):
             return clean_text(match.group(1))
     return ""
 
-
 def _match_after(text, label):
     match = re.search(rf"{re.escape(label)}\s*[:#]?\s*([A-Za-z0-9._-]+)", text, re.I)
     return match.group(1) if match else ""
-
 
 def _spec_value(text, labels):
     for label in labels:
@@ -1618,11 +1476,9 @@ def _spec_value(text, labels):
             return clean_text(match.group(1))
     return ""
 
-
 def _recommendation(text):
     match = re.search(r"(\d+%)\s+dos\s+clientes\s+recomendam", text, re.I)
     return match.group(1) if match else ""
-
 
 def _reviews(text, limit=20):
     marker = re.search(r"Avaliações dos clientes|Comentários|Reviews", text, re.I)
@@ -1638,7 +1494,6 @@ def _reviews(text, limit=20):
             break
     return candidates
 
-
 def _similar_names(html_text, base_url):
     if not BeautifulSoup:
         return []
@@ -1651,7 +1506,6 @@ def _similar_names(html_text, base_url):
             names.append(text)
     return list(dict.fromkeys(names))[:20]
 
-
 def _similar_name_noise(text):
     normalized = remove_accents(str(text or "").lower())
     noise_markers = (
@@ -1662,7 +1516,6 @@ def _similar_name_noise(text):
         "atendimento",
     )
     return any(marker in normalized for marker in noise_markers)
-
 
 def _merge_jsonld_detail(row, html_text):
     for block in extract_jsonld(html_text):
