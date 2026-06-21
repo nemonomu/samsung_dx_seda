@@ -336,12 +336,18 @@ def _is_synthetic_review_summary(text):
     return bool(re.search(r"(?:^|\s\|\|\|\s)(?:Average rating|Star ratings|Comments):", str(text or ""), re.I))
 
 def _join_reviews(value):
-    values = _as_review_list(value)
+    values = [item for item in _as_review_list(value) if _review_body_present(item)]
     if not values:
         return ""
     if len(values) == 1 and str(values[0]).strip().lower().startswith("review1 -"):
         return str(values[0]).strip()
     return DELIMITER.join(f"review{index} - {text}" for index, text in enumerate(values, start=1))
+
+def _review_body_present(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return not re.fullmatch(r"review\d+\s*-\s*", text, re.I)
 
 def _join_values(value, filter_noise=False):
     values = _as_list(value)

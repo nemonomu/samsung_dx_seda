@@ -47,7 +47,10 @@ def fetch_reviews(product_id, limit=None, timeout=None):
         items = review.get("userReviews") or []
         seen += len(items)
         for item in items:
-            collected.append(_review_text(item))
+            text = _review_text(item)
+            if not text:
+                continue
+            collected.append(text)
             if len(collected) >= limit:
                 break
         if len(items) < page_size:
