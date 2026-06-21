@@ -3,6 +3,9 @@ import os
 from .step00_config import db_connect, output_table, read_csv, run_root, write_json
 
 
+INTEGER_COLUMNS = {"main_rank", "bsr_rank"}
+
+
 def main():
     try:
         from psycopg2.extras import execute_values
@@ -17,7 +20,7 @@ def main():
     if rows:
         columns = list(rows[0].keys())
         columns_sql = ", ".join(f'"{column}"' for column in columns)
-        values = [[_db_value(row.get(column, "")) for column in columns] for row in rows]
+        values = [[_db_value(column, row.get(column, "")) for column in columns] for row in rows]
         sql = f"INSERT INTO {table} ({columns_sql}) VALUES %s"
         with db_connect() as conn:
             with conn.cursor() as cur:
@@ -30,11 +33,18 @@ def main():
     print(f"[seda] loaded table={table} rows={inserted}")
 
 
-def _db_value(value):
+def _db_value(column, value):
     if value is None:
         return None
-    text = str(value)
-    return None if text.strip() == "" else text
+    text = str(value).strip()
+    if text == "":
+        return None
+    if column in INTEGER_COLUMNS:
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    return text
 
 
 if __name__ == "__main__":
