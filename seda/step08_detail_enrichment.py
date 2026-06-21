@@ -5,7 +5,7 @@ import re
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .parsers import compact_json, parse_detail, sku_from_url
+from .parsers import BeautifulSoup, clean_text, compact_json, parse_detail, sku_from_url
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, read_csv, run_root, write_csv
 from .transport import fetch_url, is_blocked_html
 
@@ -463,7 +463,8 @@ def _merge_magalu_pdp_html(row, product_url):
         row.get(key) for key in ("star_rating", "count_of_star_ratings", "count_of_reviews", "detailed_review_content")
     )
     needs_similar = not row.get("retailer_sku_name_similar")
-    if not needs_summary and not needs_similar and not needs_reviews and not needs_rating:
+    needs_specs = not row.get("screen_size") or not row.get("estimated_annual_electricity_use")
+    if not needs_summary and not needs_similar and not needs_reviews and not needs_rating and not needs_specs:
         return
     if os.getenv("SEDA_MAGALU_PDP_HTML_FETCH", "1").lower() in {"0", "false", "no", "n"}:
         return
@@ -488,8 +489,76 @@ def _merge_magalu_pdp_html(row, product_url):
     ):
         if detail.get(key) and not row.get(key):
             row[key] = detail[key]
+    if _merge_magalu_exact_html_specs(row, result.get("text") or ""):
+        row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_specs")
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), f"{result.get('method') or 'unknown'}_pdp_html")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html")
+
+
+def _merge_magalu_exact_html_specs(row, html_text):
+    if row.get("retailer") != "Magalu":
+        return False
+    specs = _magalu_exact_html_specs(html_text)
+    updated = False
+    if not row.get("screen_size") and specs.get("screen_size"):
+        row["screen_size"] = specs["screen_size"]
+        updated = True
+    if not row.get("estimated_annual_electricity_use") and specs.get("estimated_annual_electricity_use"):
+        row["estimated_annual_electricity_use"] = specs["estimated_annual_electricity_use"]
+        updated = True
+    return updated
+
+
+def _magalu_exact_html_specs(html_text):
+    return {
+        "screen_size": _magalu_exact_html_spec_value(html_text, "Tamanho Da Tela"),
+        "estimated_annual_electricity_use": _magalu_exact_html_spec_value(
+            html_text,
+            "Consumo Aproximado de Energia",
+        ),
+    }
+
+
+def _magalu_exact_html_spec_value(html_text, label):
+    if not html_text or not BeautifulSoup:
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    wanted = _norm_spec_label(label)
+    for node in soup.find_all(string=True):
+        label_text = clean_text(node)
+        if _norm_spec_label(label_text) != wanted:
+            continue
+        value = _magalu_value_from_nearby_spec_node(node, label_text)
+        if value:
+            return value
+    return ""
+
+
+def _magalu_value_from_nearby_spec_node(node, label_text):
+    label_norm = _norm_spec_label(label_text)
+    parent = getattr(node, "parent", None)
+    if parent is not None:
+        for sibling in parent.find_next_siblings(limit=3):
+            value = clean_text(sibling.get_text(" ", strip=True))
+            if value and _norm_spec_label(value) != label_norm:
+                return value
+    for _ in range(5):
+        if parent is None:
+            return ""
+        parts = [clean_text(text) for text in parent.stripped_strings]
+        parts = [part for part in parts if part]
+        value_parts = [part for part in parts if _norm_spec_label(part) != label_norm]
+        if 0 < len(value_parts) <= 3:
+            return clean_text(" ".join(value_parts))
+        parent = getattr(parent, "parent", None)
+    return ""
+
+
+def _norm_spec_label(value):
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKD", clean_text(value))
+    return normalized.encode("ascii", "ignore").decode("ascii").casefold()
 
 
 def _merge_magalu_review_pages(row, product_url):
@@ -583,6 +652,9 @@ def _merge_magalu_zenrows_pdp_html(row, product_url):
         if detail.get(key) and not row.get(key):
             row[key] = detail[key]
             merged = True
+    if _merge_magalu_exact_html_specs(row, result.text or ""):
+        row["parse_status"] = _append_token(row.get("parse_status", ""), "zenrows_pdp_html_specs")
+        merged = True
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
     row["parse_status"] = _append_token(row.get("parse_status", ""), "zenrows_pdp_html")
     return merged
