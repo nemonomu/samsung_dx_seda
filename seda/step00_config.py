@@ -230,8 +230,13 @@ def page_url(config, page, run_id="main"):
     base = retailer_listing_url(config, run_id=run_id)
     if "{page}" in base:
         return base.format(page=page)
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}{urlencode({'page': page})}" if page > 1 else base
+    if page <= 1:
+        return base
+
+    parsed = urlsplit(base)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "page"]
+    query.append(("page", str(page)))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
 def retailer_listing_url(config, run_id="main", product_line_value=None):
