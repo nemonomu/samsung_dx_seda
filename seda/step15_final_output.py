@@ -66,6 +66,10 @@ def final_output_columns(product_line_value=None):
 def _active_retailer():
     return (os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS") or "").strip().lower()
 
+def _batch_id(now):
+    prefix = "m" if _active_retailer() == "magalu" else "c"
+    return f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}"
+
 
 def main():
     root = run_root()
@@ -158,7 +162,7 @@ def _format_row(row, now):
         "main_rank": row.get("main_rank", ""),
         "calendar_week": f"w{now.isocalendar().week}",
         "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "batch_id": f"c_{now.strftime('%Y%m%d_%H%M%S')}",
+        "batch_id": _batch_id(now),
     }
 
 
@@ -456,7 +460,7 @@ def _write_manifest(root, source, output, rows, now):
         "bsr_rank_rows": bsr_count,
         "calendar_week": f"w{now.isocalendar().week}",
         "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "batch_id": f"c_{now.strftime('%Y%m%d_%H%M%S')}",
+        "batch_id": _batch_id(now),
     }
     manifest_override = os.getenv("SEDA_FINAL_MANIFEST_JSON", "").strip()
     if manifest_override:
