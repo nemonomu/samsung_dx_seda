@@ -1377,6 +1377,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
     product_rating = page_data.get("productRating") if isinstance(page_data.get("productRating"), dict) else {}
     review_summary = page_data.get("reviewSummaryQuery") if isinstance(page_data.get("reviewSummaryQuery"), dict) else {}
     general = product_rating.get("general") if isinstance(product_rating.get("general"), dict) else {}
+    user_reviews = product_rating.get("userReviews") if isinstance(product_rating.get("userReviews"), dict) else {}
+    review_page = user_reviews.get("page") if isinstance(user_reviews.get("page"), dict) else {}
     offer = _magalu_first_offer(item)
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
 
@@ -1403,7 +1405,7 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "star_rating": clean_text(general.get("rating")),
         "count_of_star_ratings": clean_text(general.get("reviewCount")),
-        "count_of_reviews": clean_text(general.get("commentCount") or general.get("reviewCount")),
+        "count_of_reviews": clean_text(general.get("commentCount") if general.get("commentCount") is not None else review_page.get("totalItems")),
         "detailed_review_content": compact_json(_magalu_review_descriptions(product_rating, limit=20)),
         "parse_status": "detail_next_data",
     }
@@ -1674,5 +1676,6 @@ def _merge_jsonld_detail(row, html_text):
         rating = block.get("aggregateRating") if isinstance(block.get("aggregateRating"), dict) else {}
         row["star_rating"] = row.get("star_rating") or clean_text(rating.get("ratingValue"))
         row["count_of_star_ratings"] = row.get("count_of_star_ratings") or clean_text(rating.get("ratingCount"))
-        row["count_of_reviews"] = row.get("count_of_reviews") or clean_text(rating.get("reviewCount"))
+        if row.get("retailer") != "Magalu":
+            row["count_of_reviews"] = row.get("count_of_reviews") or clean_text(rating.get("reviewCount"))
         break

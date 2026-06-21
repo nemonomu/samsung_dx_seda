@@ -180,8 +180,8 @@ def _merge_magalu_reviews(row, product_url):
         row["count_of_star_ratings"] = general.get("reviewCount", "") or row.get("count_of_star_ratings", "")
         if general.get("commentCount") is not None:
             row["count_of_reviews"] = general.get("commentCount")
-        else:
-            row["count_of_reviews"] = general.get("reviewCount", "") or row.get("count_of_reviews", "")
+        elif (result.get("page") or {}).get("totalItems") is not None:
+            row["count_of_reviews"] = (result.get("page") or {}).get("totalItems")
     return result
 
 
