@@ -180,7 +180,7 @@ def estimated_multiplier(params):
     return "1x"
 
 
-def request_url(url, profile=None, timeout=None, extra=None):
+def request_url(url, profile=None, timeout=None, extra=None, extra_headers=None):
     profile = profile or os.getenv("SEDA_ZENROWS_PROFILE", "auto_html")
     params = build_params(profile, extra=extra)
     params["url"] = url
@@ -204,6 +204,8 @@ def request_url(url, profile=None, timeout=None, extra=None):
             "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             "referer": "https://www.magazineluiza.com.br/",
         }
+    if extra_headers:
+        headers.update({key: value for key, value in extra_headers.items() if value not in (None, "")})
     try:
         response = requests.get(ZENROWS_API_URL, params=params, headers=headers, timeout=timeout)
     except Exception as exc:
