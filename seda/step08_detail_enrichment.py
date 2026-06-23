@@ -216,7 +216,7 @@ def _merge_casas_bahia_apis(row):
         product_id = row.get("retailer_product_id", "") or product_id
 
         if os.getenv("SEDA_CASAS_BAHIA_FREIGHT_API", "1").lower() not in {"0", "false", "no", "n"}:
-            freight = fetch_freight(sku_id, seller_id)
+            freight = fetch_freight(sku_id, seller_id, referer_url=row.get("product_url", ""))
             if freight.get("success"):
                 _merge_non_empty(row, freight.get("detail") or {})
                 row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_freight_api")

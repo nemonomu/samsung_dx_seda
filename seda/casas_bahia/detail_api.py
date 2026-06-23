@@ -327,7 +327,7 @@ def _known_text(value):
         return ""
     return text
 
-def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None):
+def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None, referer_url=None):
     if not sku_id or not seller_id:
         return {"success": False, "error": "missing_sku_or_seller"}
     zipcode = zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")
@@ -335,15 +335,20 @@ def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None):
     url = f"{PDP_API}/api/v2/sku/{sku_id}/freight/seller/{seller_id}/zipcode/{zipcode}/source/CB"
     params = _freight_params()
     headers = _headers(zipcode=zipcode, include_cvip=True)
+    if referer_url:
+        headers["referer"] = str(referer_url)
     last_error = "not_attempted"
     for transport in _freight_transports():
         try:
             response = _freight_get(transport, url, params, headers, timeout)
         except Exception as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
+            last_error = f"{transport}_{type(exc).__name__}: {exc}"
             continue
         if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
-            last_error = f"status_{response.status_code}"
+            content_type = response.headers.get("content-type", "")[:60]
+            body_len = len(response.text or "")
+            prefix = "blocked" if _blocked_response(response.text, response.status_code) else "status"
+            last_error = f"{transport}_{prefix}_{response.status_code}:ct={content_type}:len={body_len}"
             continue
         try:
             data = response.json()

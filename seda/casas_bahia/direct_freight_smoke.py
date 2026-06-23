@@ -58,7 +58,13 @@ def run(args):
     results = []
     ok = 0
     for pos, target in enumerate(targets, start=1):
-        result = fetch_freight(target["sku_id"], target["seller_id"], zipcode=args.zipcode, timeout=args.timeout)
+        result = fetch_freight(
+            target["sku_id"],
+            target["seller_id"],
+            zipcode=args.zipcode,
+            timeout=args.timeout,
+            referer_url=target.get("product_url", ""),
+        )
         detail = result.get("detail") or {}
         delivery = detail.get("delivery_availability", "")
         success = bool(result.get("success") and delivery)
