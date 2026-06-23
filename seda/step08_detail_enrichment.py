@@ -219,7 +219,10 @@ def _merge_casas_bahia_apis(row):
             freight = fetch_freight(sku_id, seller_id, referer_url=row.get("product_url", ""))
             if freight.get("success"):
                 _merge_non_empty(row, freight.get("detail") or {})
-                row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_freight_api")
+                row["fetch_method"] = _append_token(row.get("fetch_method", ""), freight.get("method", "casas_bahia_freight_api"))
+                cost = (freight.get("headers") or {}).get("X-Request-Cost", "")
+                if cost:
+                    row["parse_status"] = _append_token(row.get("parse_status", ""), f"freight_cost:{cost}")
             else:
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"freight_api_failed:{freight.get('error','unknown')}")
 

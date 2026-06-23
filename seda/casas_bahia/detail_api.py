@@ -356,7 +356,135 @@ def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None, referer_url=Non
             last_error = "invalid_json"
             continue
         return {"success": True, "detail": _freight_detail(data), "method": f"{transport}_freight_api"}
+    if _freight_zenrows_enabled() and referer_url:
+        fallback = _fetch_freight_zenrows_pdp(referer_url, sku_id, seller_id, zipcode=zipcode, timeout=timeout)
+        if fallback.get("success"):
+            return fallback
+        last_error = f"{last_error}|{fallback.get('error', 'zenrows_pdp_failed')}"
     return {"success": False, "error": last_error}
+
+def _freight_zenrows_enabled():
+    return os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_FALLBACK", "0").lower() in {"1", "true", "yes", "y"}
+
+def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, timeout=None):
+    try:
+        from ..magalu.zenrows_client import request_url
+    except Exception as exc:
+        return {"success": False, "error": f"zenrows_import_{type(exc).__name__}: {exc}"}
+
+    zipcode = zipcode or os.getenv("SEDA_POSTAL_CODE", "01010-010")
+    instructions = [
+        {"wait_for": "#frete"},
+        {"fill": ["#frete", zipcode]},
+        {"click": "button[data-testid=calcular-frete]"},
+        {"wait": int(os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_AFTER_CLICK_WAIT_MS", "8000"))},
+    ]
+    extra = {
+        "js_render": "true",
+        "premium_proxy": "true",
+        "proxy_country": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_PROXY_COUNTRY", "br"),
+        "json_response": "true",
+        "wait": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_WAIT", "15000"),
+        "js_instructions": json.dumps(instructions, separators=(",", ":")),
+    }
+    restore = {
+        "SEDA_ALLOW_ZENROWS": os.environ.get("SEDA_ALLOW_ZENROWS"),
+        "SEDA_ZENROWS_DRY_RUN": os.environ.get("SEDA_ZENROWS_DRY_RUN"),
+        "SEDA_ZENROWS_SESSION_ID": os.environ.get("SEDA_ZENROWS_SESSION_ID"),
+    }
+    profile = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_PROFILE", "basic_html")
+    attempts = _int_env("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_ATTEMPTS", 3)
+    base_session = _int_env("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_SESSION_ID", 12345)
+    last_error = "zenrows_pdp_not_attempted"
+    last_headers = {}
+    last_method = "zenrows_pdp_shipping"
+    try:
+        os.environ["SEDA_ALLOW_ZENROWS"] = "1"
+        os.environ["SEDA_ZENROWS_DRY_RUN"] = "0"
+        for attempt in range(max(1, attempts)):
+            os.environ["SEDA_ZENROWS_SESSION_ID"] = str(base_session + attempt)
+            result = request_url(product_url, profile=profile, timeout=timeout, extra=extra)
+            _dump_zenrows_freight_response(result.text, attempt=attempt + 1)
+            last_headers = result.headers
+            last_method = f"zenrows_pdp_shipping:{result.estimated_multiplier}"
+            if not result.success:
+                last_error = f"zenrows_pdp_{result.error or result.status_code}"
+                continue
+            payload = _parse_json_text(result.text)
+            if not isinstance(payload, dict):
+                last_error = "zenrows_pdp_invalid_json"
+                continue
+            data = _freight_json_from_zenrows_payload(payload, sku_id, seller_id)
+            if not isinstance(data, dict):
+                last_error = "zenrows_pdp_missing_freight_xhr"
+                continue
+            detail = _freight_detail(data)
+            if not detail.get("delivery_availability") and not detail.get("pick_up_availability"):
+                last_error = "zenrows_pdp_empty_freight"
+                continue
+            return {
+                "success": True,
+                "detail": detail,
+                "method": last_method,
+                "headers": last_headers,
+            }
+    finally:
+        for key, value in restore.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return {
+        "success": False,
+        "error": last_error,
+        "headers": last_headers,
+        "method": last_method,
+    }
+
+def _int_env(name, default):
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except ValueError:
+        return default
+
+def _dump_zenrows_freight_response(text, attempt=None):
+    path = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_DUMP", "").strip()
+    if not path:
+        return
+    try:
+        output = Path(path)
+        if attempt is not None and output.suffix:
+            output = output.with_name(f"{output.stem}_{attempt}{output.suffix}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text or "", encoding="utf-8")
+    except OSError:
+        return
+
+def _parse_json_text(text):
+    try:
+        return json.loads(text or "")
+    except ValueError:
+        return None
+
+def _freight_json_from_zenrows_payload(payload, sku_id, seller_id):
+    expected = f"/sku/{sku_id}/freight/seller/{seller_id}/"
+    candidates = []
+    for entry in payload.get("xhr") or []:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "")
+        if expected not in url:
+            continue
+        candidates.append(entry)
+    for entry in candidates:
+        data = _parse_json_text(entry.get("body") or "")
+        if isinstance(data, dict) and data.get("options"):
+            return data
+    for entry in candidates:
+        data = _parse_json_text(entry.get("body") or "")
+        if isinstance(data, dict):
+            return data
+    return None
 
 def _freight_params():
     params = {
