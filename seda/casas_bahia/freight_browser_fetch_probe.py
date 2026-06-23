@@ -123,30 +123,41 @@ const done = arguments[arguments.length - 1];
 const url = arguments[0];
 const cvip = arguments[1];
 const timeoutMs = arguments[2] * 1000;
-const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), timeoutMs);
-const headers = {
-  "accept": "application/json, text/plain, */*",
-  "content-type": "application/json"
-};
-if (cvip) headers["x-cvip"] = cvip;
-fetch(url, {
-  method: "GET",
-  headers,
-  mode: "cors",
-  credentials: "omit",
-  signal: controller.signal
-}).then(async response => {
-  const text = await response.text();
-  clearTimeout(timer);
-  done({
-    ok: response.ok,
-    status: response.status,
-    contentType: response.headers.get("content-type") || "",
-    text
-  });
-}).catch(error => {
-  clearTimeout(timer);
+try {
+  const xhr = new XMLHttpRequest();
+  xhr.open("GET", url, true);
+  xhr.timeout = timeoutMs;
+  xhr.setRequestHeader("accept", "application/json, text/plain, */*");
+  xhr.setRequestHeader("content-type", "application/json");
+  if (cvip) xhr.setRequestHeader("x-cvip", cvip);
+  xhr.onload = () => {
+    done({
+      ok: xhr.status >= 200 && xhr.status < 300,
+      status: xhr.status,
+      contentType: xhr.getResponseHeader("content-type") || "",
+      text: xhr.responseText || ""
+    });
+  };
+  xhr.onerror = () => {
+    done({
+      ok: false,
+      status: xhr.status || 0,
+      contentType: xhr.getResponseHeader("content-type") || "",
+      text: xhr.responseText || "",
+      error: "xhr_error"
+    });
+  };
+  xhr.ontimeout = () => {
+    done({
+      ok: false,
+      status: xhr.status || 0,
+      contentType: xhr.getResponseHeader("content-type") || "",
+      text: xhr.responseText || "",
+      error: "xhr_timeout"
+    });
+  };
+  xhr.send();
+} catch (error) {
   done({
     ok: false,
     status: 0,
@@ -154,9 +165,22 @@ fetch(url, {
     text: "",
     error: String(error && error.message ? error.message : error)
   });
-});
+}
 """
-    return driver.execute_async_script(script, url, cvip, timeout_seconds)
+    try:
+        return driver.execute_async_script(script, url, cvip, timeout_seconds)
+    except Exception as exc:
+        try:
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "status": 0,
+            "contentType": "",
+            "text": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _parse_result(raw):
