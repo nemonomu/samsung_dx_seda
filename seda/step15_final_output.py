@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -145,7 +146,7 @@ def _format_row(row, now):
         "star_rating": _star_rating_for_output(row.get("star_rating", "")),
         "count_of_star_ratings": _count_metric_for_output(row.get("count_of_star_ratings", "")),
         "count_of_reviews": _count_metric_for_output(row.get("count_of_reviews", "")),
-        "recommendation_intent": row.get("recommendation_intent", ""),
+        "recommendation_intent": _recommendation_for_output(row.get("recommendation_intent", "")),
         "detailed_review_content": _join_reviews(row.get("detailed_review_content", "")),
         "bsr_rank": row.get("bsr_rank", ""),
         "main_rank": row.get("main_rank", ""),
@@ -160,6 +161,10 @@ def _delivery_for_output(row):
     if _is_casas_bahia_row(row) and "calculo de frete apresentou problemas" in _ascii_key(text):
         return ""
     return text
+
+def _ascii_key(value):
+    text = str(value or "").lower()
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
 
 def _energy_use_for_output(row):
     return str(row.get("estimated_annual_electricity_use") or "").strip()
@@ -334,6 +339,17 @@ def _summary_for_output(value):
 
 def _is_synthetic_review_summary(text):
     return bool(re.search(r"(?:^|\s\|\|\|\s)(?:Average rating|Star ratings|Comments):", str(text or ""), re.I))
+
+def _recommendation_for_output(value):
+    text = str(value or "").strip()
+    match = re.match(r"^(\d+(?:[.,]\d+)?)%(.*)$", text)
+    if not match:
+        return text
+    try:
+        percent = int(float(match.group(1).replace(",", ".")))
+    except ValueError:
+        return text
+    return f"{percent}%{match.group(2)}"
 
 def _join_reviews(value):
     values = [item for item in _as_review_list(value) if _review_body_present(item)]
