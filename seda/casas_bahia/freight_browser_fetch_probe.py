@@ -90,6 +90,7 @@ def _create_driver(args):
     import undetected_chromedriver as uc
 
     options = uc.ChromeOptions()
+    options.set_capability("pageLoadStrategy", args.page_load_strategy)
     if args.headless:
         options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
@@ -219,9 +220,18 @@ def run(args):
         driver.set_script_timeout(args.fetch_timeout + 5)
         bootstrap_url = args.bootstrap_url or "https://www.casasbahia.com.br/"
         print(f"[casas_freight_browser_probe] opening bootstrap={bootstrap_url}", flush=True)
-        driver.get(bootstrap_url)
+        bootstrap_error = ""
+        try:
+            driver.get(bootstrap_url)
+        except Exception as exc:
+            bootstrap_error = f"{type(exc).__name__}: {exc}"
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
         time.sleep(args.wait_seconds)
         results["bootstrap_url"] = bootstrap_url
+        results["bootstrap_error"] = bootstrap_error
         results["bootstrap_blocked"] = _is_blocked_page(driver)
         results["browser_current_url"] = driver.current_url
 
@@ -248,7 +258,10 @@ def run(args):
                     driver.get(target["product_url"])
                     time.sleep(args.wait_seconds)
                 except Exception:
-                    pass
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
             for cvip_mode in cvip_modes:
                 cvip = _cvip_for_mode(cvip_mode, har_entry, args.zipcode)
                 raw = _browser_fetch(driver, url, cvip, args.fetch_timeout)
@@ -295,6 +308,7 @@ def main():
     parser.add_argument("--wait-seconds", type=float, default=float(os.getenv("SEDA_CASAS_BAHIA_BROWSER_WAIT_SECONDS", "3")))
     parser.add_argument("--page-timeout", type=int, default=int(os.getenv("SEDA_CASAS_BAHIA_BROWSER_PAGE_TIMEOUT", "45")))
     parser.add_argument("--fetch-timeout", type=int, default=int(os.getenv("SEDA_CASAS_BAHIA_BROWSER_FETCH_TIMEOUT", "30")))
+    parser.add_argument("--page-load-strategy", default=os.getenv("SEDA_CASAS_BAHIA_BROWSER_PAGE_LOAD_STRATEGY", "eager"), choices=["normal", "eager", "none"])
     parser.add_argument("--headless", action="store_true", default=os.getenv("SEDA_CASAS_BAHIA_BROWSER_HEADLESS", "0").lower() in {"1", "true", "yes", "y"})
     parser.add_argument("--close-browser", action="store_true", default=os.getenv("SEDA_CASAS_BAHIA_BROWSER_CLOSE", "1").lower() in {"1", "true", "yes", "y"})
     args = parser.parse_args()
