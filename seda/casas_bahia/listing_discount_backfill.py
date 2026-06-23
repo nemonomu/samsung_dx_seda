@@ -10,6 +10,9 @@ from .destaque_api import fetch_discount_type
 
 
 def default_input():
+    delivery_backfilled = run_root() / "output" / "final_output_delivery_backfilled.csv"
+    if delivery_backfilled.exists():
+        return str(delivery_backfilled)
     return str(run_root() / "output" / "final_output_enriched.csv")
 
 

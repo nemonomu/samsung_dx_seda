@@ -29,13 +29,21 @@ def steps_for(package_name):
         Step(4, "bsr_rank", f"{package_name}.step04_bsr_rank"),
         Step(5, "final_targets", f"{package_name}.step07_final_targets"),
         Step(6, "detail_enrichment", f"{package_name}.step08_detail_enrichment"),
-        Step(7, "review20", f"{package_name}.step09_review20"),
     ]
-    next_number = 8
+    next_number = 7
     if package_name.endswith(".casas_bahia"):
         steps.extend(
             [
-                Step(next_number, "listing_discount_backfill", "seda.casas_bahia.listing_discount_backfill"),
+                Step(next_number, "freight_cdp_backfill", "seda.casas_bahia.freight_cdp_backfill"),
+                Step(next_number + 1, "review20", f"{package_name}.step09_review20"),
+                Step(next_number + 2, "listing_discount_backfill", "seda.casas_bahia.listing_discount_backfill"),
+            ]
+        )
+        next_number += 3
+    else:
+        steps.extend(
+            [
+                Step(next_number, "review20", f"{package_name}.step09_review20"),
             ]
         )
         next_number += 1
@@ -71,6 +79,7 @@ def step_complete(step):
         "bsr_rank": (root / "bsr" / "parsed" / "bsr_rank_map.csv", "bsr rank map"),
         "final_targets": (root / "output" / "seda_final_targets.csv", "final targets"),
         "detail_enrichment": (root / "output" / "final_output_enriched.csv", "enriched output"),
+        "freight_cdp_backfill": (root / "output" / "final_output_delivery_backfilled.csv", "delivery backfilled output"),
         "review20": (root / "detail" / "manifest_review20.json", "review manifest"),
         "listing_discount_backfill": (root / "output" / "final_output_badged.csv", "listing discount backfilled output"),
         "final_output": (root / "output" / "final_output.csv", "final output"),
@@ -78,6 +87,16 @@ def step_complete(step):
     }
     if step.name in checks:
         path, label = checks[step.name]
+        if step.name == "freight_cdp_backfill":
+            manifest = _read_json(path.with_suffix(".manifest.json"))
+            stats = manifest.get("stats") if isinstance(manifest, dict) else {}
+            if not path.exists() or csv_count(path) <= 0:
+                return False, label
+            if manifest.get("aborted"):
+                return False, f"{label} aborted: {manifest.get('aborted_reason', '')}"
+            if int(stats.get("targets", 0) or 0) > 0 and int(stats.get("updated", 0) or 0) <= 0:
+                return False, f"{label} has no delivery updates"
+            return True, label
         if path.suffix.lower() == ".csv":
             return csv_count(path) > 0, label
         return path.exists(), label
