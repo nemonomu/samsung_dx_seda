@@ -42,8 +42,8 @@ def step_env(retailer_key, extra=None):
         "SEDA_RETAILERS": retailer_key,
         "SEDA_ACTIVE_RETAILER": retailer_key,
         "SEDA_PRODUCT_LINE": product_line(),
-        "SEDA_FETCH_MODE": default_fetch_mode,
-        "SEDA_RUN_ROOT": str(dated_run_root(retailer=retailer_key)),
+        "SEDA_FETCH_MODE": os.environ.get("SEDA_FETCH_MODE") or default_fetch_mode,
+        "SEDA_RUN_ROOT": os.environ.get("SEDA_RUN_ROOT") or str(dated_run_root(retailer=retailer_key)),
     }
     if extra:
         env.update(extra)
