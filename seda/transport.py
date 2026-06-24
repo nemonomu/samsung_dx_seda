@@ -257,8 +257,7 @@ def _unique_profiles(profiles):
 
 def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attempts=1):
     print(
-        f"[seda] zenrows fetch start attempt={attempt}/{max_attempts} "
-        f"profile={profile_hint} timeout={zenrows_timeout} url={url}",
+        f"[seda] zenrows fetch start attempt={attempt}/{max_attempts} profile={profile_hint}",
         flush=True,
     )
     try:
@@ -274,19 +273,19 @@ def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attem
             method_prefix = "zenrows"
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")
-    method = f"{method_prefix}:{result.profile}:{result.estimated_multiplier}"
     blocked_reason = blocked_html_reason(result.text, result.status_code)
     print(
         f"[seda] zenrows fetch done status={result.status_code} length={len(result.text or '')} "
-        f"method={method} blocked={blocked_reason or 0} error={result.error or ''}",
+        f"method=zenrows profile={result.profile} cost={result.estimated_multiplier} "
+        f"blocked={blocked_reason or 0} error={result.error or ''}",
         flush=True,
     )
     if result.success:
-        return FetchResult(url=url, text=result.text, status_code=result.status_code, method=method)
+        return FetchResult(url=url, text=result.text, status_code=result.status_code, method="zenrows")
     error = result.error or "zenrows_failed"
     if result.headers:
         error = f"{error}:{result.headers}"
-    return FetchResult(url=url, text=result.text, status_code=result.status_code, method=method, error=error)
+    return FetchResult(url=url, text=result.text, status_code=result.status_code, method="zenrows", error=error)
 
 
 def _is_magalu_listing_url(url):
