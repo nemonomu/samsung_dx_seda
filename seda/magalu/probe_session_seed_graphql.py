@@ -3,14 +3,16 @@ import csv
 import json
 import os
 import time
+import unicodedata
 from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
 from seda.magalu import search_api
-from seda.parsers import parse_listing
+from seda.parsers import magalu_next_search_is_null, parse_listing
 from seda.step00_config import DEFAULT_RUNS_BASE, RETAILERS, page_url, run_date
 
 
@@ -32,6 +34,8 @@ CSV_COLUMNS = [
     "error",
     "bootstrap_url",
     "bootstrap_success",
+    "bootstrap_attempts",
+    "bootstrap_reason",
     "browser_url",
     "browser_title",
     "browser_ready_state",
@@ -54,10 +58,17 @@ def main():
     json_path = out_dir / f"session_seed_graphql_{args.product_line}_{stamp}.json"
 
     bootstrap_url = args.bootstrap_url or page_url(RETAILERS["magalu"], 1, run_id="main")
-    seed = seed_browser_session(bootstrap_url, args.bootstrap_wait_seconds, args.browser_timeout)
+    seed = seed_browser_session(
+        bootstrap_url,
+        args.bootstrap_wait_seconds,
+        args.browser_timeout,
+        args.bootstrap_attempts,
+        args.refresh_wait_seconds,
+    )
     print(
         "[session_seed] "
         f"bootstrap_success={int(seed['success'])} cookies={len(seed['cookies'])} "
+        f"attempts={seed['bootstrap_attempts']} reason={seed['bootstrap_reason'] or '-'} "
         f"url={seed['browser_url'] or '-'} error={seed['error'] or '-'}",
         flush=True,
     )
@@ -96,6 +107,8 @@ def parse_args():
     parser.add_argument("--timeout", type=int, default=int(os.getenv("SEDA_TIMEOUT", "60")))
     parser.add_argument("--browser-timeout", type=float, default=float(os.getenv("SEDA_MAGALU_SESSION_SEED_BROWSER_TIMEOUT", "30")))
     parser.add_argument("--bootstrap-wait-seconds", type=float, default=float(os.getenv("SEDA_MAGALU_SESSION_SEED_WAIT_SECONDS", "5")))
+    parser.add_argument("--bootstrap-attempts", type=int, default=int(os.getenv("SEDA_MAGALU_SESSION_SEED_ATTEMPTS", "3")))
+    parser.add_argument("--refresh-wait-seconds", type=float, default=float(os.getenv("SEDA_MAGALU_SESSION_SEED_REFRESH_WAIT_SECONDS", "3")))
     parser.add_argument("--bootstrap-url", default=os.getenv("SEDA_MAGALU_SESSION_SEED_BOOTSTRAP_URL", ""))
     parser.add_argument("--postal-code", default=os.getenv("SEDA_POSTAL_CODE", "01001-001"))
     parser.add_argument("--output-dir", default="")
@@ -109,12 +122,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def seed_browser_session(url, wait_seconds, timeout_seconds):
+def seed_browser_session(url, wait_seconds, timeout_seconds, attempts, refresh_wait_seconds):
     started = time.perf_counter()
     seed = {
         "success": False,
         "error": "",
         "bootstrap_url": url,
+        "bootstrap_attempts": 0,
+        "bootstrap_reason": "",
+        "bootstrap_state": {},
         "browser_url": "",
         "browser_title": "",
         "browser_ready_state": "",
@@ -131,14 +147,37 @@ def seed_browser_session(url, wait_seconds, timeout_seconds):
             page.set.timeouts(page_load=timeout_seconds, script=timeout_seconds)
         except Exception:
             pass
-        page.get(url)
-        _wait_doc_loaded(page, timeout_seconds)
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
-        seed.update(read_browser_context(page))
-        seed["success"] = bool(seed["cookies"]) and seed["browser_url"].startswith("https://www.magazineluiza.com.br")
+
+        max_attempts = max(1, int(attempts or 1))
+        for attempt in range(1, max_attempts + 1):
+            seed["bootstrap_attempts"] = attempt
+            if attempt == 1:
+                page.get(url)
+            else:
+                method = refresh_or_reload(page, url)
+                print(f"[session_seed] bootstrap attempt={attempt}/{max_attempts} method={method}", flush=True)
+            _wait_doc_loaded(page, timeout_seconds)
+            sleep_seconds = wait_seconds if attempt == 1 else refresh_wait_seconds
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+            seed.update(read_browser_context(page))
+            state = bootstrap_page_state(page, url)
+            seed["bootstrap_state"] = state
+            seed["bootstrap_reason"] = state.get("reason", "")
+            seed["success"] = bool(seed["cookies"]) and bool(state.get("normal"))
+            print(
+                "[session_seed] "
+                f"bootstrap check attempt={attempt}/{max_attempts} normal={int(bool(state.get('normal')))} "
+                f"parsed={state.get('parsed_rows', 0)} next={int(bool(state.get('has_next_data')))} "
+                f"search_null={int(bool(state.get('search_null')))} reason={state.get('reason') or '-'}",
+                flush=True,
+            )
+            if seed["success"]:
+                break
+
         if not seed["success"] and not seed["error"]:
-            seed["error"] = "missing_magalu_browser_context"
+            seed["error"] = seed.get("bootstrap_reason") or "missing_normal_magalu_search_page"
     except Exception as exc:
         seed["error"] = f"{type(exc).__name__}: {exc}"
     seed["seconds"] = round(time.perf_counter() - started, 3)
@@ -150,6 +189,108 @@ def _wait_doc_loaded(page, timeout_seconds):
         page.wait.doc_loaded(timeout=timeout_seconds, raise_err=False)
     except Exception:
         pass
+
+
+def refresh_or_reload(page, url):
+    try:
+        refresh = getattr(page, "refresh", None)
+        if callable(refresh):
+            refresh()
+            return "refresh"
+    except Exception:
+        pass
+    try:
+        page.run_js("location.reload();", timeout=5)
+        return "js_reload"
+    except Exception:
+        pass
+    page.get(url)
+    return "get"
+
+
+def bootstrap_page_state(page, expected_url):
+    state = {
+        "normal": False,
+        "reason": "",
+        "url": "",
+        "title": "",
+        "ready_state": "",
+        "html_length": 0,
+        "has_next_data": False,
+        "search_null": False,
+        "blocked": False,
+        "same_path": False,
+        "parsed_rows": 0,
+    }
+    try:
+        context = read_browser_context(page)
+        state["url"] = context.get("browser_url", "")
+        state["title"] = context.get("browser_title", "")
+        state["ready_state"] = context.get("browser_ready_state", "")
+    except Exception as exc:
+        state["reason"] = f"context:{type(exc).__name__}: {exc}"
+
+    try:
+        html_text = page.html or ""
+    except Exception as exc:
+        html_text = ""
+        state["reason"] = state["reason"] or f"html:{type(exc).__name__}: {exc}"
+
+    state["html_length"] = len(html_text)
+    state["has_next_data"] = "__NEXT_DATA__" in html_text
+    state["search_null"] = bool(state["has_next_data"] and magalu_next_search_is_null(html_text))
+    state["blocked"] = is_blocked_page(state.get("url", ""), state.get("title", ""), html_text)
+    state["same_path"] = same_path(state.get("url", ""), expected_url)
+    if state["has_next_data"] and not state["search_null"]:
+        try:
+            state["parsed_rows"] = len(
+                parse_listing(html_text, "Magalu", RETAILERS["magalu"].base_url, expected_url, run_id="main")
+            )
+        except Exception as exc:
+            state["reason"] = state["reason"] or f"parse:{type(exc).__name__}: {exc}"
+
+    if state["blocked"]:
+        state["reason"] = state["reason"] or "blocked_or_error_page"
+    elif not state["same_path"]:
+        state["reason"] = state["reason"] or f"url_not_expected:{state.get('url', '')}"
+    elif state["ready_state"] not in {"interactive", "complete"}:
+        state["reason"] = state["reason"] or f"not_ready:{state['ready_state']}"
+    elif not state["has_next_data"]:
+        state["reason"] = state["reason"] or "missing_next_data"
+    elif state["search_null"]:
+        state["reason"] = state["reason"] or "next_search_null"
+    elif state["parsed_rows"] <= 0:
+        state["reason"] = state["reason"] or "zero_parsed_rows"
+    else:
+        state["normal"] = True
+        state["reason"] = ""
+    return state
+
+
+def is_blocked_page(url, title, html_text):
+    text = ascii_lower(f"{url}\n{title}\n{html_text[:5000]}")
+    markers = (
+        "nao e possivel acessar a pagina",
+        "nao e possivel acessar",
+        "erro 403",
+        "access denied",
+        "akamai",
+        "captcha",
+    )
+    return any(marker in text for marker in markers)
+
+
+def same_path(actual_url, expected_url):
+    actual = urlparse(str(actual_url or ""))
+    expected = urlparse(str(expected_url or ""))
+    if not actual.netloc.endswith("magazineluiza.com.br"):
+        return False
+    return actual.path.rstrip("/") == expected.path.rstrip("/")
+
+
+def ascii_lower(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii").lower()
 
 
 def read_browser_context(page):
@@ -337,6 +478,8 @@ def run_profile(profile, seed, listing_url, payload, run_id, page, timeout):
         "error": error,
         "bootstrap_url": seed["bootstrap_url"],
         "bootstrap_success": int(bool(seed["success"])),
+        "bootstrap_attempts": seed.get("bootstrap_attempts", 0),
+        "bootstrap_reason": seed.get("bootstrap_reason", ""),
         "browser_url": seed["browser_url"],
         "browser_title": seed["browser_title"],
         "browser_ready_state": seed["browser_ready_state"],
