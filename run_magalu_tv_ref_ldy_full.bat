@@ -42,15 +42,15 @@ set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
 call :log "[SEDA] Magalu TV full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line TV --all 2>> "%SEDA_RUN_LOG_FILE%"
+call python -m seda.magalu.magalu_orchestrator --product-line TV --all
 if errorlevel 1 goto :failed_tv
 
 call :log "[SEDA] Magalu REF full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line REF --all 2>> "%SEDA_RUN_LOG_FILE%"
+call python -m seda.magalu.magalu_orchestrator --product-line REF --all
 if errorlevel 1 goto :failed_ref
 
 call :log "[SEDA] Magalu LDY full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line LDY --all 2>> "%SEDA_RUN_LOG_FILE%"
+call python -m seda.magalu.magalu_orchestrator --product-line LDY --all
 if errorlevel 1 goto :failed_ldy
 
 call :log "[SEDA] Magalu TV/REF/LDY full run completed"

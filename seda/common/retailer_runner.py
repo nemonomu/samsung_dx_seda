@@ -64,11 +64,20 @@ def _call_with_live_log(command, env, log_file):
         bufsize=1,
     )
     assert process.stdout is not None
-    with open(log_file, "a", encoding="utf-8", errors="replace") as handle:
+    try:
+        handle = open(log_file, "a", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"[run] log file disabled: {type(exc).__name__}: {exc}", flush=True)
+        handle = None
+    try:
         for line in process.stdout:
             print(line, end="", flush=True)
-            handle.write(line)
-            handle.flush()
+            if handle:
+                handle.write(line)
+                handle.flush()
+    finally:
+        if handle:
+            handle.close()
     return process.wait()
 
 
