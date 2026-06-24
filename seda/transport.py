@@ -74,7 +74,7 @@ def fetch_attempts(mode):
     elif mode in {"auto", "uc_first"} or mode.endswith("_uc_first"):
         attempts = ["uc", "graphql", "requests", "zenrows"]
     elif mode == "magalu_graphql_first":
-        attempts = _split_attempts(os.getenv("SEDA_MAGALU_GRAPHQL_FIRST_ATTEMPTS", "graphql,browser"))
+        attempts = ["graphql", "browser", "uc", "requests", "zenrows"]
     elif mode == "graphql_first" or mode.endswith("_graphql_first"):
         attempts = ["graphql", "uc", "requests", "zenrows"]
     elif mode == "requests_first" or mode.endswith("_requests_first"):
@@ -86,11 +86,6 @@ def fetch_attempts(mode):
     if os.getenv("SEDA_ALLOW_ZENROWS", "0").lower() not in {"1", "true", "yes", "y"}:
         attempts = [attempt for attempt in attempts if attempt != "zenrows"]
     return attempts
-
-
-def _split_attempts(value):
-    attempts = [item.strip().lower() for item in str(value or "").split(",") if item.strip()]
-    return attempts or ["graphql", "browser"]
 
 
 def _fetch_browser(url, timeout):
