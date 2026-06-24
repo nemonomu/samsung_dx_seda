@@ -30,10 +30,46 @@ def run_module(module_name, env=None, dry_run=False):
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    print(f"[run] {' '.join(command)}")
+    log_file = merged_env.get("SEDA_RUN_LOG_FILE", "").strip()
+    _log_line(f"[run] {' '.join(command)}", log_file)
     if dry_run:
         return 0
-    return subprocess.call(command, env=merged_env, cwd=PROJECT_ROOT)
+    if not log_file:
+        return subprocess.call(command, env=merged_env, cwd=PROJECT_ROOT)
+    return _call_with_live_log(command, merged_env, log_file)
+
+
+def _log_line(message, log_file=""):
+    print(message, flush=True)
+    if not log_file:
+        return
+    try:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8", errors="replace") as handle:
+            handle.write(f"{message}\n")
+    except OSError:
+        pass
+
+
+def _call_with_live_log(command, env, log_file):
+    process = subprocess.Popen(
+        command,
+        env=env,
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    with open(log_file, "a", encoding="utf-8", errors="replace") as handle:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            handle.write(line)
+            handle.flush()
+    return process.wait()
 
 
 def step_env(retailer_key, extra=None):

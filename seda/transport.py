@@ -196,6 +196,8 @@ def _fetch_graphql(url, timeout):
 
 def _fetch_zenrows(url, timeout):
     zenrows_timeout = int(os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", str(timeout))))
+    profile_hint = os.getenv("SEDA_ZENROWS_LISTING_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
+    print(f"[seda] zenrows fetch start profile={profile_hint} timeout={zenrows_timeout} url={url}", flush=True)
     try:
         if "magazineluiza.com.br" in url and "/busca/" in url:
             from .magalu.zenrows_client import fetch_listing_next_data_html
@@ -210,6 +212,11 @@ def _fetch_zenrows(url, timeout):
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")
     method = f"{method_prefix}:{result.profile}:{result.estimated_multiplier}"
+    print(
+        f"[seda] zenrows fetch done status={result.status_code} length={len(result.text or '')} "
+        f"method={method} error={result.error or ''}",
+        flush=True,
+    )
     if result.success:
         return FetchResult(url=url, text=result.text, status_code=result.status_code, method=method)
     error = result.error or "zenrows_failed"
