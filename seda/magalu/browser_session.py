@@ -345,6 +345,75 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
 
 
 def _read_search_next_data_snapshot(page):
+    payload, source, error = _read_search_next_data_with_cdp(page)
+    if not _payload_has_next_data(payload):
+        payload, source, error = _read_search_next_data_with_run_js(page)
+    if not payload:
+        payload = {"error": error}
+        source = source or "script_text_missing"
+
+    next_data = payload.get("nextData") if isinstance(payload, dict) else ""
+    if not isinstance(next_data, str):
+        next_data = ""
+    html = _next_data_text_to_html(next_data) if next_data.strip() else ""
+    browser_text = "\n".join(
+        str(payload.get(key, "") or "") for key in ("title", "href", "bodyText", "error") if isinstance(payload, dict)
+    )
+    return {
+        "url": str(payload.get("href", "") or "") if isinstance(payload, dict) else "",
+        "title": str(payload.get("title", "") or "") if isinstance(payload, dict) else "",
+        "ready_state": str(payload.get("readyState", "") or "") if isinstance(payload, dict) else "",
+        "html": html,
+        "browser_text": browser_text,
+        "next_data_length": len(next_data),
+        "source": source if next_data.strip() else f"{source}_missing",
+        "error": str(payload.get("error", "") or error or "") if isinstance(payload, dict) else str(error or ""),
+    }
+
+
+def _payload_has_next_data(payload):
+    if not isinstance(payload, dict):
+        return False
+    next_data = payload.get("nextData")
+    return isinstance(next_data, str) and bool(next_data.strip())
+
+
+def _next_data_reader_script():
+    return """
+(() => {
+  try {
+    const node = document.querySelector('script#__NEXT_DATA__');
+    const body = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+    return JSON.stringify({
+      href: location.href || '',
+      title: document.title || '',
+      readyState: document.readyState || '',
+      nextData: node ? (node.textContent || '') : '',
+      bodyText: body.slice(0, 3000)
+    });
+  } catch (error) {
+    return JSON.stringify({error: String(error), href: location.href || '', title: document.title || '', readyState: document.readyState || '', nextData: '', bodyText: ''});
+  }
+})()
+"""
+
+
+def _read_search_next_data_with_cdp(page):
+    try:
+        result = page.run_cdp(
+            "Runtime.evaluate",
+            expression=_next_data_reader_script(),
+            returnByValue=True,
+            awaitPromise=False,
+        )
+        raw = ((result or {}).get("result") or {}).get("value") or ""
+        payload = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+        return payload, "script_text_cdp", str(payload.get("error", "") or "")
+    except Exception as exc:
+        return {}, "script_text_cdp", f"{type(exc).__name__}: {exc}"
+
+
+def _read_search_next_data_with_run_js(page):
     script = """
 return (() => {
   try {
@@ -365,25 +434,9 @@ return (() => {
     try:
         raw = page.run_js(script, timeout=_env_float("SEDA_MAGALU_SEARCH_NEXTDATA_JS_TIMEOUT", 2))
         payload = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+        return payload, "script_text_js", str(payload.get("error", "") or "")
     except Exception as exc:
-        payload = {"error": f"{type(exc).__name__}: {exc}"}
-    next_data = payload.get("nextData") if isinstance(payload, dict) else ""
-    if not isinstance(next_data, str):
-        next_data = ""
-    html = _next_data_text_to_html(next_data) if next_data.strip() else ""
-    browser_text = "\n".join(
-        str(payload.get(key, "") or "") for key in ("title", "href", "bodyText", "error") if isinstance(payload, dict)
-    )
-    return {
-        "url": str(payload.get("href", "") or "") if isinstance(payload, dict) else "",
-        "title": str(payload.get("title", "") or "") if isinstance(payload, dict) else "",
-        "ready_state": str(payload.get("readyState", "") or "") if isinstance(payload, dict) else "",
-        "html": html,
-        "browser_text": browser_text,
-        "next_data_length": len(next_data),
-        "source": "script_text" if next_data.strip() else "script_text_missing",
-        "error": str(payload.get("error", "") or "") if isinstance(payload, dict) else "",
-    }
+        return {}, "script_text_js", f"{type(exc).__name__}: {exc}"
 
 
 def _next_data_text_to_html(next_data_text):
