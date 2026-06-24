@@ -1,8 +1,9 @@
 ﻿import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-from .parsers import magalu_next_search_is_null, parse_listing
+from .parsers import extract_next_data, magalu_next_search_is_null, parse_listing
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, page_url, product_identity, run_root, selected_retailers, write_csv
 from .transport import fetch_url, is_blocked_html
 
@@ -72,6 +73,51 @@ def _magalu_browser_fill_search_null_retries():
         return 1
 
 
+def _magalu_requested_page(url):
+    query = parse_qs(urlparse(str(url or "")).query)
+    raw = (query.get("page") or ["1"])[0]
+    return _safe_int(raw, 1)
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _magalu_next_search_pagination(html_text):
+    data = extract_next_data(html_text)
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    search = page_data.get("search") if isinstance(page_data, dict) else {}
+    if not isinstance(search, dict):
+        return {}, 0
+    products = search.get("products") or []
+    product_count = len(products) if isinstance(products, list) else 0
+    pagination = search.get("pagination") or {}
+    return pagination if isinstance(pagination, dict) else {}, product_count
+
+
+def _magalu_browser_fill_payload_ok(url, html_text, parsed_count):
+    pagination, product_count = _magalu_next_search_pagination(html_text)
+    if not pagination:
+        return False, "missing_pagination"
+    requested_page = _magalu_requested_page(url)
+    payload_page = _safe_int(pagination.get("page"), 0)
+    payload_size = _safe_int(pagination.get("size"), 0)
+    if payload_page != requested_page:
+        return False, f"page_mismatch:{payload_page}!={requested_page}"
+    max_page_size = int(os.getenv("SEDA_MAGALU_BROWSER_FILL_MAX_PAGE_SIZE", "100"))
+    if payload_size > max_page_size:
+        return False, f"page_size_too_large:{payload_size}"
+    max_products = int(os.getenv("SEDA_MAGALU_BROWSER_FILL_MAX_PRODUCTS", "120"))
+    if product_count > max_products or parsed_count > max_products:
+        return False, f"too_many_products:{max(product_count, parsed_count)}"
+    return True, ""
+
+
 def _magalu_browser_fill(url, config, run_id, base_count):
     attempts = []
     max_attempts = _magalu_browser_fill_search_null_retries() + 1
@@ -90,6 +136,9 @@ def _magalu_browser_fill(url, config, run_id, base_count):
                 )
                 continue
             return parsed, result, attempts, "search_null"
+        payload_ok, payload_error = _magalu_browser_fill_payload_ok(url, result.text, len(parsed))
+        if not payload_ok:
+            return parsed, result, attempts, payload_error
         if len(parsed) <= base_count:
             return parsed, result, attempts, "no_growth"
         return parsed, result, attempts, ""
