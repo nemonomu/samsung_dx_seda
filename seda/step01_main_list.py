@@ -50,7 +50,7 @@ def _should_magalu_browser_fill(retailer_name, method, parsed):
         return False
     if "direct_graphql_search" not in str(method or ""):
         return False
-    minimum = int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "40"))
+    minimum = _safe_int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "60"), 60)
     return len(parsed) < minimum
 
 

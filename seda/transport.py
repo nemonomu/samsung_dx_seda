@@ -72,6 +72,8 @@ def fetch_attempts(mode):
         attempts = ["browser", "graphql", "uc", "requests", "zenrows"]
     elif mode in {"auto", "uc_first"} or mode.endswith("_uc_first"):
         attempts = ["uc", "graphql", "requests", "zenrows"]
+    elif mode == "magalu_graphql_first":
+        attempts = ["graphql", "browser", "uc", "requests", "zenrows"]
     elif mode == "graphql_first" or mode.endswith("_graphql_first"):
         attempts = ["graphql", "uc", "requests", "zenrows"]
     elif mode == "requests_first" or mode.endswith("_requests_first"):

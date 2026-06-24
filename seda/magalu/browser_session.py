@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+from ..parsers import extract_next_data, magalu_next_search_is_null
+
 
 _PAGE = None
 _PAGE_CREATED_AT = 0.0
@@ -32,9 +34,9 @@ def get_page():
 
     options.set_load_mode(os.getenv("SEDA_MAGALU_BROWSER_LOAD_MODE", "eager"))
     options.set_timeouts(
-        base=float(os.getenv("SEDA_MAGALU_BROWSER_BASE_TIMEOUT", "30")),
-        page_load=float(os.getenv("SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT", "30")),
-        script=float(os.getenv("SEDA_MAGALU_BROWSER_SCRIPT_TIMEOUT", "30")),
+        base=_env_float("SEDA_MAGALU_BROWSER_BASE_TIMEOUT", 30),
+        page_load=_env_float("SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT", 30),
+        script=_env_float("SEDA_MAGALU_BROWSER_SCRIPT_TIMEOUT", 30),
     )
     _PAGE = ChromiumPage(options)
     _PAGE_CREATED_AT = time.time()
@@ -53,8 +55,8 @@ def _page_for_use(reason=""):
 
 
 def _should_recycle_page(page):
-    max_uses = int(os.getenv("SEDA_MAGALU_BROWSER_MAX_USES", "80"))
-    max_age = float(os.getenv("SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS", "1800"))
+    max_uses = _env_int("SEDA_MAGALU_BROWSER_MAX_USES", 80)
+    max_age = _env_float("SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS", 1800)
     if max_uses > 0 and _PAGE_USE_COUNT >= max_uses:
         return True
     if max_age > 0 and _PAGE_CREATED_AT and time.time() - _PAGE_CREATED_AT >= max_age:
@@ -69,7 +71,7 @@ def _should_recycle_page(page):
 
 def _restart_page(reason=""):
     close_page(force=True)
-    sleep_seconds = float(os.getenv("SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS", "3"))
+    sleep_seconds = _env_float("SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS", 3)
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
 
@@ -104,7 +106,7 @@ def _trace_oom(trace, attempt, page):
 
 def _warmup_page(page, reason):
     warmup_url = os.getenv("SEDA_MAGALU_BROWSER_WARMUP_URL", "https://www.magazineluiza.com.br/busca/tv/")
-    warmup_seconds = float(os.getenv("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", "5"))
+    warmup_seconds = _env_float("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", 5)
     try:
         page.get(warmup_url)
         time.sleep(warmup_seconds)
@@ -118,42 +120,94 @@ def _warmup_page(page, reason):
 
 
 def fetch_page_html(url, wait_seconds=None, attempts=None):
-    wait_seconds = float(wait_seconds or os.getenv("SEDA_MAGALU_BROWSER_WAIT_SECONDS", "5"))
-    attempts = int(attempts or os.getenv("SEDA_MAGALU_BROWSER_ATTEMPTS", "3"))
+    wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
+    attempts = int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3)
+    search_recycle_attempts = _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1)
+    max_cycles = 1 + search_recycle_attempts if _is_magalu_search_url(url) else 1
     page = _page_for_use("fetch_page_html")
     trace = []
     last_error = ""
 
-    for attempt in range(1, attempts + 1):
-        try:
-            page.get(url)
-            time.sleep(wait_seconds)
-            if _trace_oom(trace, attempt, page):
-                _restart_page("fetch_page_html_oom")
-                page = _page_for_use("fetch_page_html_retry")
-                last_error = "chrome_oom_or_crash_page"
-                continue
-            html = page.html or ""
-            trace.append({"attempt": attempt, "length": len(html), "url": page.url})
-            if "__NEXT_DATA__" in html or len(html) > 100000:
-                return {"success": True, "text": html, "trace": trace, "url": page.url}
-            last_error = "browser_html_missing_next_data"
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-            trace.append({"attempt": attempt, "length": 0, "error": last_error})
-            time.sleep(wait_seconds)
+    for cycle in range(1, max_cycles + 1):
+        if cycle > 1:
+            trace.append({"cycle": cycle, "error": "restart_after_search_payload_error", "previous_error": last_error})
+            _restart_page("fetch_page_html_search_payload_error")
+            page = _page_for_use("fetch_page_html_search_payload_retry")
+
+        for attempt in range(1, attempts + 1):
+            try:
+                page.get(url)
+                time.sleep(wait_seconds)
+                if _trace_oom(trace, attempt, page):
+                    _restart_page("fetch_page_html_oom")
+                    page = _page_for_use("fetch_page_html_retry")
+                    last_error = "chrome_oom_or_crash_page"
+                    continue
+                html = page.html or ""
+                trace_item = {"cycle": cycle, "attempt": attempt, "length": len(html), "url": page.url}
+                trace.append(trace_item)
+                if "__NEXT_DATA__" in html or len(html) > 100000:
+                    search_error = _magalu_search_payload_error(url, html)
+                    if search_error:
+                        last_error = search_error
+                        trace_item["error"] = search_error
+                        if attempt < attempts:
+                            continue
+                        break
+                    return {"success": True, "text": html, "trace": trace, "url": page.url}
+                last_error = "browser_html_missing_next_data"
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                trace.append({"cycle": cycle, "attempt": attempt, "length": 0, "error": last_error})
+                time.sleep(wait_seconds)
 
     return {"success": False, "text": "", "error": last_error or "browser_fetch_failed", "trace": trace}
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_magalu_search_url(url):
+    return "magazineluiza.com.br" in str(url or "") and "/busca/" in str(url or "")
+
+
+def _magalu_search_payload_error(url, html):
+    if not _is_magalu_search_url(url):
+        return ""
+    if magalu_next_search_is_null(html):
+        return "browser_html_search_null"
+    data = extract_next_data(html)
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    search = page_data.get("search") if isinstance(page_data, dict) else {}
+    if not isinstance(search, dict):
+        return "browser_html_search_missing"
+    products = search.get("products") or []
+    if not isinstance(products, list) or not products:
+        return "browser_html_products_missing"
+    return ""
+
+
 def graphql_post(payload, timeout=None):
     page = _page_for_use("graphql_post")
-    timeout = int(timeout or os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", "60"))
+    timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
     if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
         page = _warmup_page(page, "graphql_post_warmup")
 
     operation = payload.get("operationName") or ""
-    attempts = int(os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", "2"))
+    attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
     script = """
 return (async () => {
   try {
@@ -226,7 +280,7 @@ def _graphql_result_blocked(result):
 
 def graphql_post_raw(payload, timeout=None, endpoint=None):
     page = _page_for_use("graphql_post_raw")
-    timeout = int(timeout or os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", "60"))
+    timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
     if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
         page = _warmup_page(page, "graphql_post_raw_warmup")
 
@@ -284,8 +338,8 @@ return (async () => {
 
 def fetch_html(url, timeout=None):
     page = _page_for_use("fetch_html")
-    timeout = int(timeout or os.getenv("SEDA_MAGALU_BROWSER_HTML_TIMEOUT", "90"))
-    attempts = int(os.getenv("SEDA_MAGALU_BROWSER_HTML_ATTEMPTS", "2"))
+    timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_HTML_TIMEOUT", 90)
+    attempts = _env_int("SEDA_MAGALU_BROWSER_HTML_ATTEMPTS", 2)
     if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
         page = _warmup_page(page, "fetch_html_warmup")
     script = """
@@ -331,12 +385,13 @@ return (async () => {
     if os.getenv("SEDA_MAGALU_PDP_NAV_FALLBACK", "1").lower() not in {"0", "false", "no", "n"}:
         try:
             page.get(url)
-            time.sleep(float(os.getenv("SEDA_MAGALU_PDP_NAV_WAIT_SECONDS", "5")))
+            nav_wait_seconds = _env_float("SEDA_MAGALU_PDP_NAV_WAIT_SECONDS", 5)
+            time.sleep(nav_wait_seconds)
             if _trace_oom(trace, len(trace) + 1, page):
                 _restart_page("fetch_html_navigation_oom")
                 page = _page_for_use("fetch_html_navigation_retry")
                 page.get(url)
-                time.sleep(float(os.getenv("SEDA_MAGALU_PDP_NAV_WAIT_SECONDS", "5")))
+                time.sleep(nav_wait_seconds)
             text = page.html or ""
             trace.append(
                 {
