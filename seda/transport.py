@@ -117,11 +117,15 @@ def _fetch_browser(url, timeout):
 
 
 def is_blocked_html(text, status_code=0):
+    return bool(blocked_html_reason(text, status_code))
+
+
+def blocked_html_reason(text, status_code=0):
     haystack = _ascii_lower(text or "")
     if "__next_data__" in haystack and "pageprops" in haystack:
-        return False
+        return ""
     if status_code in {401, 403, 429}:
-        return True
+        return f"status_{status_code}"
     blocked_markers = [
         "akamai-bot",
         "customdeny",
@@ -136,7 +140,10 @@ def is_blocked_html(text, status_code=0):
         "bot detection",
         "robot",
     ]
-    return any(marker in haystack for marker in blocked_markers)
+    for marker in blocked_markers:
+        if marker in haystack:
+            return marker
+    return ""
 
 
 def _ascii_lower(value):
@@ -197,7 +204,40 @@ def _fetch_graphql(url, timeout):
 def _fetch_zenrows(url, timeout):
     zenrows_timeout = int(os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", str(timeout))))
     profile_hint = os.getenv("SEDA_ZENROWS_LISTING_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
-    print(f"[seda] zenrows fetch start profile={profile_hint} timeout={zenrows_timeout} url={url}", flush=True)
+    max_attempts = _zenrows_max_attempts(url)
+    last = None
+    for attempt in range(1, max_attempts + 1):
+        result = _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt, max_attempts)
+        blocked_reason = blocked_html_reason(result.text, result.status_code)
+        if not blocked_reason:
+            return result
+        result.error = result.error or f"blocked_html:{blocked_reason}"
+        last = result
+        if attempt < max_attempts:
+            sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_RETRY_SLEEP_SECONDS", "2"))
+            print(
+                f"[seda] zenrows fetch retry blocked_reason={blocked_reason} "
+                f"attempt={attempt}/{max_attempts} sleep={sleep_seconds}",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+    return last or FetchResult(url=url, text="", method="zenrows", error="zenrows_not_attempted")
+
+
+def _zenrows_max_attempts(url):
+    if "magazineluiza.com.br" in url and "/busca/" in url:
+        retries = int(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_RETRIES", "1"))
+    else:
+        retries = int(os.getenv("SEDA_ZENROWS_RETRIES", "0"))
+    return max(1, retries + 1)
+
+
+def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attempts=1):
+    print(
+        f"[seda] zenrows fetch start attempt={attempt}/{max_attempts} "
+        f"profile={profile_hint} timeout={zenrows_timeout} url={url}",
+        flush=True,
+    )
     try:
         if "magazineluiza.com.br" in url and "/busca/" in url:
             from .magalu.zenrows_client import fetch_listing_next_data_html
@@ -212,9 +252,10 @@ def _fetch_zenrows(url, timeout):
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")
     method = f"{method_prefix}:{result.profile}:{result.estimated_multiplier}"
+    blocked_reason = blocked_html_reason(result.text, result.status_code)
     print(
         f"[seda] zenrows fetch done status={result.status_code} length={len(result.text or '')} "
-        f"method={method} error={result.error or ''}",
+        f"method={method} blocked={blocked_reason or 0} error={result.error or ''}",
         flush=True,
     )
     if result.success:
