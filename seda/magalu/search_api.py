@@ -239,7 +239,7 @@ def fetch_search_listing(url, timeout=None):
 
 def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
     try:
-        from .browser_session import fetch_page_html, graphql_post
+        from .browser_session import ensure_magalu_session, graphql_post
     except Exception as exc:
         trace.append(
             {
@@ -250,9 +250,11 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
         )
         return {"success": False, "error": "browser_graphql_unavailable", "text": "", "trace": trace}
 
-    warmup_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_SECONDS", os.getenv("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", "5")))
-    attempts = int(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS", "2"))
-    fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1, validate_search_payload=False)
+    attempts = int(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS", "2") or "2")
+    session = ensure_magalu_session("search_browser_graphql")
+    trace.extend(session.get("trace") or [])
+    if not session.get("success"):
+        return {"success": False, "error": "browser_session_unavailable", "text": "", "trace": trace}
     last_error = "browser_graphql_failed"
     for page_size in page_sizes:
         payload = _payload(url, page_size)
@@ -282,7 +284,11 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
                 }
             last_error = trace_item["error"] or "empty_products"
             if attempt < attempts:
-                fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1, validate_search_payload=False)
+                session = ensure_magalu_session("search_browser_graphql_retry")
+                trace.extend(session.get("trace") or [])
+                if not session.get("success"):
+                    last_error = "browser_session_unavailable"
+                    break
     return {"success": False, "error": last_error, "text": "", "trace": trace}
 
 

@@ -2,6 +2,7 @@ import atexit
 import json
 import os
 import time
+import unicodedata
 
 from ..parsers import extract_next_data, magalu_next_search_is_null
 
@@ -69,6 +70,43 @@ def _should_recycle_page(page):
     return False
 
 
+def _page_state(page):
+    try:
+        return page.url or "", page.html or ""
+    except Exception:
+        return "", ""
+
+
+def _is_magalu_url(url):
+    return "magazineluiza.com.br" in str(url or "")
+
+
+def _ascii_lower(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _is_bad_browser_state(url, html):
+    if _is_oom_state(url, html):
+        return True
+    haystack = _ascii_lower(f"{url}\n{html}")
+    markers = (
+        "nao e possivel acessar a pagina",
+        "erro 403",
+        "ops!",
+        "alguma coisa deu errado",
+        "access denied",
+        "akamai",
+        "captcha",
+        "customdeny",
+        "bot detection",
+        "robot",
+        "chrome-error://",
+        "chromewebdata",
+    )
+    return any(marker in haystack for marker in markers)
+
+
 def _restart_page(reason=""):
     close_page(force=True)
     sleep_seconds = _env_float("SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS", 3)
@@ -107,16 +145,36 @@ def _trace_oom(trace, attempt, page):
 def _warmup_page(page, reason):
     warmup_url = os.getenv("SEDA_MAGALU_BROWSER_WARMUP_URL", "https://www.magazineluiza.com.br/busca/tv/")
     warmup_seconds = _env_float("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", 5)
-    try:
-        page.get(warmup_url)
-        time.sleep(warmup_seconds)
-        if _is_oom_state(page.url or "", page.html or ""):
-            _restart_page(f"{reason}_oom")
-            return _page_for_use(f"{reason}_retry")
-        return page
-    except Exception:
-        _restart_page(f"{reason}_failed")
-        return _page_for_use(f"{reason}_retry")
+    attempts = max(1, _env_int("SEDA_MAGALU_BROWSER_WARMUP_ATTEMPTS", 2))
+    last_page = page
+    for attempt in range(1, attempts + 1):
+        try:
+            last_page.get(warmup_url)
+            time.sleep(warmup_seconds)
+            url, html = _page_state(last_page)
+            if not _is_bad_browser_state(url, html):
+                return last_page
+            _restart_page(f"{reason}_bad_state")
+        except Exception:
+            _restart_page(f"{reason}_failed")
+        last_page = _page_for_use(f"{reason}_retry")
+    return last_page
+
+
+def ensure_magalu_session(reason="ensure_magalu_session"):
+    page = _page_for_use(reason)
+    url, html = _page_state(page)
+    trace = [{"method": "browser_session_check", "url": url, "length": len(html)}]
+    if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
+        trace[-1]["reused"] = True
+        return {"success": True, "trace": trace}
+    page = _warmup_page(page, reason)
+    url, html = _page_state(page)
+    ok = _is_magalu_url(url) and not _is_bad_browser_state(url, html)
+    trace.append({"method": "browser_session_warmup", "url": url, "length": len(html), "success": ok})
+    if not ok:
+        _restart_page(f"{reason}_warmup_bad_state")
+    return {"success": ok, "trace": trace}
 
 
 def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_payload=True):
@@ -180,7 +238,7 @@ def _env_float(name, default):
 
 
 def _is_magalu_search_url(url):
-    return "magazineluiza.com.br" in str(url or "") and "/busca/" in str(url or "")
+    return _is_magalu_url(url) and "/busca/" in str(url or "")
 
 
 def _magalu_search_payload_error(url, html):
