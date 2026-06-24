@@ -260,13 +260,11 @@ def parse_listing(html_text, retailer, base_url, source_url, run_id="main"):
 
 def _parse_magalu_next_listing(html_text, base_url, source_url, run_id):
     data = extract_next_data(html_text)
-    products = (
-        data.get("props", {})
-        .get("pageProps", {})
-        .get("data", {})
-        .get("search", {})
-        .get("products", [])
-    )
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    search = page_data.get("search") if isinstance(page_data, dict) else {}
+    products = search.get("products", []) if isinstance(search, dict) else []
     if not isinstance(products, list):
         return []
     rows = []
