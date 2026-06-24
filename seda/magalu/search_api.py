@@ -168,7 +168,6 @@ def fetch_search_listing(url, timeout=None):
     sleep_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_RETRY_SLEEP_SECONDS", "3.0"))
     page_sizes = _page_sizes()
     trace = []
-    direct_min_products = int(os.getenv("SEDA_MAGALU_SEARCH_DIRECT_MIN_PRODUCTS", "40"))
     best_direct_result = None
 
     session = requests.Session()
@@ -218,10 +217,10 @@ def fetch_search_listing(url, timeout=None):
                     "trace": trace,
                     "method": "direct_graphql_search",
                 }
-                if len(products) >= direct_min_products:
+                if _valid_search_payload(url, search):
                     return direct_result
                 best_direct_result = direct_result
-                trace_item["error"] = f"insufficient_direct_products:{len(products)}<{direct_min_products}"
+                trace_item["error"] = "invalid_direct_pagination"
                 break
             trace_item["error"] = "empty_products"
 
@@ -315,6 +314,15 @@ def _payload(url, page_size):
     }
 
 
+def _valid_search_payload(url, search):
+    pagination = search.get("pagination") if isinstance(search, dict) else {}
+    if not isinstance(pagination, dict):
+        return False
+    requested_page = int(_first(parse_qs(urlparse(url).query), "page") or "1")
+    payload_page = _env_int_from_value(pagination.get("page"), 0)
+    return payload_page == requested_page
+
+
 def _page_sizes():
     first = int(os.getenv("SEDA_MAGALU_SEARCH_PAGE_SIZE", "60"))
     fallback = os.getenv("SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES", "20")
@@ -340,6 +348,13 @@ def _first(query, key):
 def _env_int(name, default):
     try:
         return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int_from_value(value, default):
+    try:
+        return int(value or default)
     except (TypeError, ValueError):
         return default
 

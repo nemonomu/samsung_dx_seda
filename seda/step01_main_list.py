@@ -43,15 +43,20 @@ def max_pages(is_bsr):
     return int(os.getenv(f"{prefix}_MAX_PAGES", os.getenv("SEDA_MAX_PAGES", default)))
 
 
-def _should_magalu_browser_fill(retailer_name, method, parsed):
+def _should_magalu_browser_fill(retailer_name, method, parsed, html_text="", source_url=""):
     if retailer_name != "Magalu":
         return False
     if os.getenv("SEDA_MAGALU_LISTING_BROWSER_FILL", "1").lower() in {"0", "false", "no", "n"}:
         return False
     if "direct_graphql_search" not in str(method or ""):
         return False
-    minimum = _safe_int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "60"), 60)
-    return len(parsed) < minimum
+    if html_text and source_url:
+        payload_ok, _ = _magalu_browser_fill_payload_ok(source_url, html_text, len(parsed))
+        if payload_ok:
+            return False
+        return True
+    minimum = _safe_int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "0"), 0)
+    return minimum > 0 and len(parsed) < minimum
 
 
 def _append_method(current, extra):
@@ -190,7 +195,7 @@ def main():
                 )
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
-            if _should_magalu_browser_fill(config.name, method, parsed):
+            if _should_magalu_browser_fill(config.name, method, parsed, text, url):
                 fill_parsed, fill_result, fill_attempts, fill_error = _magalu_browser_fill(
                     url,
                     config,
