@@ -50,15 +50,16 @@ def fetch_url(url, mode=None, timeout=None):
         blocked = is_blocked_html(result.text, result.status_code)
         if result.text and blocked:
             result.error = result.error or "blocked_html"
-        trace.append(
-            {
-                "method": result.method,
-                "status_code": result.status_code,
-                "length": len(result.text or ""),
-                "blocked": blocked,
-                "error": result.error,
-            }
-        )
+        trace_item = {
+            "method": result.method,
+            "status_code": result.status_code,
+            "length": len(result.text or ""),
+            "blocked": blocked,
+            "error": result.error,
+        }
+        if result.attempts:
+            trace_item["inner_attempts"] = result.attempts
+        trace.append(trace_item)
         result.attempts = trace[:]
         if result.text and len(result.text) > 500 and not blocked:
             return result
@@ -98,13 +99,20 @@ def _fetch_browser(url, timeout):
     except Exception as exc:
         return FetchResult(url=url, text="", method="browser", error=f"{type(exc).__name__}: {exc}")
     if result.get("success"):
-        return FetchResult(url=url, text=result.get("text", ""), status_code=200, method="browser")
+        return FetchResult(
+            url=url,
+            text=result.get("text", ""),
+            status_code=200,
+            method="browser",
+            attempts=result.get("trace", []),
+        )
     return FetchResult(
         url=url,
         text=result.get("text", ""),
         status_code=200 if result.get("text") else 0,
         method="browser",
         error=f"{result.get('error', 'browser_fetch_failed')}:{result.get('trace', [])}",
+        attempts=result.get("trace", []),
     )
 
 

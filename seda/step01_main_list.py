@@ -144,6 +144,49 @@ def _format_magalu_listing_stats(stats):
     )
 
 
+def _magalu_transport_trace_stats(attempts):
+    for attempt in reversed(attempts or []):
+        inner_attempts = attempt.get("inner_attempts") if isinstance(attempt, dict) else []
+        for inner in reversed(inner_attempts or []):
+            if not isinstance(inner, dict):
+                continue
+            if "cdp_success" not in inner and "fallback_used" not in inner:
+                continue
+            return {
+                "next_data_source": inner.get("source", ""),
+                "next_data_length": inner.get("next_data_length", 0),
+                "cdp_success": inner.get("cdp_success", 0),
+                "cdp_empty": inner.get("cdp_empty", 0),
+                "cdp_error": inner.get("cdp_error", ""),
+                "fallback_used": inner.get("fallback_used", 0),
+                "fallback_success": inner.get("fallback_success", 0),
+                "fallback_empty": inner.get("fallback_empty", 0),
+                "fallback_error": inner.get("fallback_error", ""),
+            }
+    return {}
+
+
+def _format_magalu_transport_trace_stats(stats):
+    if not stats:
+        return ""
+    parts = [
+        f"next_source={stats.get('next_data_source', '')}",
+        f"next_len={stats.get('next_data_length', 0)}",
+        f"cdp_success={stats.get('cdp_success', 0)}",
+        f"cdp_empty={stats.get('cdp_empty', 0)}",
+        f"fallback_used={stats.get('fallback_used', 0)}",
+        f"fallback_success={stats.get('fallback_success', 0)}",
+        f"fallback_empty={stats.get('fallback_empty', 0)}",
+    ]
+    cdp_error = stats.get("cdp_error")
+    fallback_error = stats.get("fallback_error")
+    if cdp_error:
+        parts.append(f"cdp_error={cdp_error}")
+    if fallback_error:
+        parts.append(f"fallback_error={fallback_error}")
+    return " ".join(parts) + " "
+
+
 def _magalu_browser_fill_payload_ok(url, html_text, parsed_count):
     pagination, product_count = _magalu_next_search_pagination(html_text)
     if not pagination:
@@ -239,6 +282,7 @@ def main():
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
             magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
+            magalu_trace_stats = _magalu_transport_trace_stats(attempts) if config.name == "Magalu" else {}
             if _should_magalu_browser_fill(config.name, method, parsed, text, url):
                 fill_parsed, fill_result, fill_attempts, fill_error = _magalu_browser_fill(
                     url,
@@ -262,6 +306,7 @@ def main():
                     method = _append_method(method, fill_result.method)
                     parsed = fill_parsed
                     magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
+                    magalu_trace_stats = _magalu_transport_trace_stats(attempts) if config.name == "Magalu" else {}
                     raw_path.write_text(text, encoding="utf-8", errors="ignore")
             rank_field = "bsr_rank" if run_id == "bsr" else "main_rank"
             for local_index, item in enumerate(parsed, start=1):
@@ -281,6 +326,7 @@ def main():
             print(
                 f"[seda] {run_id} {config.name} page={page} rows={len(parsed)} "
                 f"{_format_magalu_listing_stats(magalu_stats)}"
+                f"{_format_magalu_transport_trace_stats(magalu_trace_stats)}"
                 f"unique={unique_count} method={method}",
                 flush=True,
             )
@@ -293,6 +339,7 @@ def main():
                         "method": method,
                         "unique": unique_count,
                         **magalu_stats,
+                        **magalu_trace_stats,
                     }
                 )
             if target and unique_count >= target:

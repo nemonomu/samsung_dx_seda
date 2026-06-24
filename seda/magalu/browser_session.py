@@ -296,6 +296,13 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 "ready_state": state.get("ready_state", ""),
                 "next_data_length": state.get("next_data_length", 0),
                 "js_error": state.get("js_error", ""),
+                "cdp_success": state.get("cdp_success", 0),
+                "cdp_empty": state.get("cdp_empty", 0),
+                "cdp_error": state.get("cdp_error", ""),
+                "fallback_used": state.get("fallback_used", 0),
+                "fallback_success": state.get("fallback_success", 0),
+                "fallback_empty": state.get("fallback_empty", 0),
+                "fallback_error": state.get("fallback_error", ""),
             }
             trace.append(trace_item)
             if wait_result.get("success"):
@@ -332,6 +339,15 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
         state["ready_state"] = snapshot.get("ready_state", "")
         state["title"] = snapshot.get("title", "")
         state["next_data_length"] = snapshot.get("next_data_length", 0)
+        state["cdp_source"] = snapshot.get("cdp_source", "")
+        state["cdp_success"] = snapshot.get("cdp_success", 0)
+        state["cdp_empty"] = snapshot.get("cdp_empty", 0)
+        state["cdp_error"] = snapshot.get("cdp_error", "")
+        state["fallback_used"] = snapshot.get("fallback_used", 0)
+        state["fallback_source"] = snapshot.get("fallback_source", "")
+        state["fallback_success"] = snapshot.get("fallback_success", 0)
+        state["fallback_empty"] = snapshot.get("fallback_empty", 0)
+        state["fallback_error"] = snapshot.get("fallback_error", "")
         if snapshot.get("error"):
             state["js_error"] = snapshot["error"]
         last_state = state
@@ -345,9 +361,24 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
 
 
 def _read_search_next_data_snapshot(page):
-    payload, source, error = _read_search_next_data_with_cdp(page)
-    if not _payload_has_next_data(payload):
-        payload, source, error = _read_search_next_data_with_run_js(page)
+    cdp_payload, cdp_source, cdp_error = _read_search_next_data_with_cdp(page)
+    cdp_has_next_data = _payload_has_next_data(cdp_payload)
+    cdp_has_payload = bool(cdp_payload)
+    fallback_used = not cdp_has_next_data
+    payload = cdp_payload
+    source = cdp_source
+    error = cdp_error
+    fallback_source = ""
+    fallback_error = ""
+    fallback_has_next_data = False
+    fallback_has_payload = False
+    if fallback_used:
+        fallback_payload, fallback_source, fallback_error = _read_search_next_data_with_run_js(page)
+        fallback_has_payload = bool(fallback_payload)
+        fallback_has_next_data = _payload_has_next_data(fallback_payload)
+        payload = fallback_payload
+        source = fallback_source
+        error = fallback_error
     if not payload:
         payload = {"error": error}
         source = source or "script_text_missing"
@@ -367,6 +398,15 @@ def _read_search_next_data_snapshot(page):
         "browser_text": browser_text,
         "next_data_length": len(next_data),
         "source": source if next_data.strip() else f"{source}_missing",
+        "cdp_source": cdp_source,
+        "cdp_success": int(cdp_has_next_data),
+        "cdp_empty": int(cdp_has_payload and not cdp_has_next_data),
+        "cdp_error": cdp_error,
+        "fallback_used": int(fallback_used),
+        "fallback_source": fallback_source,
+        "fallback_success": int(fallback_has_next_data),
+        "fallback_empty": int(fallback_has_payload and not fallback_has_next_data),
+        "fallback_error": fallback_error,
         "error": str(payload.get("error", "") or error or "") if isinstance(payload, dict) else str(error or ""),
     }
 
