@@ -203,33 +203,56 @@ def _fetch_graphql(url, timeout):
 
 def _fetch_zenrows(url, timeout):
     zenrows_timeout = int(os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", str(timeout))))
-    profile_hint = os.getenv("SEDA_ZENROWS_LISTING_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
-    max_attempts = _zenrows_max_attempts(url)
+    if _is_magalu_listing_url(url):
+        profile_hint = os.getenv("SEDA_ZENROWS_LISTING_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "listing_js_full"))
+    else:
+        profile_hint = os.getenv("SEDA_ZENROWS_HTML_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
+    profiles = _zenrows_attempt_profiles(url, profile_hint)
+    max_attempts = len(profiles)
     last = None
-    for attempt in range(1, max_attempts + 1):
-        result = _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt, max_attempts)
+    for attempt, profile in enumerate(profiles, start=1):
+        result = _fetch_zenrows_once(url, zenrows_timeout, profile, attempt, max_attempts)
         blocked_reason = blocked_html_reason(result.text, result.status_code)
         if not blocked_reason:
             return result
         result.error = result.error or f"blocked_html:{blocked_reason}"
         last = result
         if attempt < max_attempts:
-            sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_RETRY_SLEEP_SECONDS", "2"))
+            sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS", "2"))
             print(
-                f"[seda] zenrows fetch retry blocked_reason={blocked_reason} "
-                f"attempt={attempt}/{max_attempts} sleep={sleep_seconds}",
+                f"[seda] zenrows fetch fallback blocked_reason={blocked_reason} "
+                f"attempt={attempt}/{max_attempts} profile={profile} next_profile={profiles[attempt]} "
+                f"sleep={sleep_seconds}",
                 flush=True,
             )
             time.sleep(sleep_seconds)
     return last or FetchResult(url=url, text="", method="zenrows", error="zenrows_not_attempted")
 
 
-def _zenrows_max_attempts(url):
-    if "magazineluiza.com.br" in url and "/busca/" in url:
-        retries = int(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_RETRIES", "1"))
+def _zenrows_attempt_profiles(url, profile_hint):
+    if _is_magalu_listing_url(url):
+        fallback_raw = os.getenv("SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES", "").strip()
+        if fallback_raw:
+            return _unique_profiles([profile_hint] + _split_profiles(fallback_raw))
+        retries = int(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_RETRIES", "0"))
     else:
         retries = int(os.getenv("SEDA_ZENROWS_RETRIES", "0"))
-    return max(1, retries + 1)
+    return [profile_hint] * max(1, retries + 1)
+
+
+def _split_profiles(raw):
+    return [item.strip() for item in str(raw or "").replace(";", ",").split(",") if item.strip()]
+
+
+def _unique_profiles(profiles):
+    unique = []
+    seen = set()
+    for profile in profiles:
+        if profile in seen:
+            continue
+        unique.append(profile)
+        seen.add(profile)
+    return unique or ["auto_html"]
 
 
 def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attempts=1):
@@ -239,15 +262,15 @@ def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attem
         flush=True,
     )
     try:
-        if "magazineluiza.com.br" in url and "/busca/" in url:
+        if _is_magalu_listing_url(url):
             from .magalu.zenrows_client import fetch_listing_next_data_html
 
-            result = fetch_listing_next_data_html(url, timeout=zenrows_timeout)
+            result = fetch_listing_next_data_html(url, profile=profile_hint, timeout=zenrows_timeout)
             method_prefix = "zenrows_listing_next_data"
         else:
             from .magalu.zenrows_client import fetch_html
 
-            result = fetch_html(url, timeout=zenrows_timeout)
+            result = fetch_html(url, profile=profile_hint, timeout=zenrows_timeout)
             method_prefix = "zenrows"
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")
@@ -264,6 +287,10 @@ def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attem
     if result.headers:
         error = f"{error}:{result.headers}"
     return FetchResult(url=url, text=result.text, status_code=result.status_code, method=method, error=error)
+
+
+def _is_magalu_listing_url(url):
+    return "magazineluiza.com.br" in str(url or "") and "/busca/" in str(url or "")
 
 
 def _fetch_uc(url, timeout):
