@@ -3,8 +3,10 @@ import csv
 import json
 import os
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -33,6 +35,10 @@ CSV_COLUMNS = [
     "browser_pagination_pages",
     "browser_pagination_records",
     "browser_error",
+    "browser_ready_success",
+    "browser_ready_state",
+    "browser_ready_url",
+    "browser_ready_error",
     "browser_html_length",
     "browser_html_parsed_rows",
     "browser_html_search_null",
@@ -78,7 +84,7 @@ def main():
         if not args.no_browser and browser_available:
             if args.restart_browser_per_page:
                 _close_browser_page()
-            browser = _fetch_browser(url, payload, args.timeout, args.browser_warmup_seconds)
+            browser = _fetch_browser(url, payload, args.timeout, args.browser_ready_timeout, args.browser_settle_seconds)
             if browser.get("error", "").startswith("browser_import_"):
                 browser_available = False
             if args.restart_browser_per_page:
@@ -117,6 +123,19 @@ def parse_args():
         "--browser-warmup-seconds",
         type=float,
         default=float(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_SECONDS", "3")),
+        help="Backward-compatible alias for --browser-settle-seconds when the latter is not set.",
+    )
+    parser.add_argument(
+        "--browser-ready-timeout",
+        type=float,
+        default=float(os.getenv("SEDA_MAGALU_PROBE_READY_TIMEOUT", "20")),
+        help="Seconds to wait for the opened Magalu page to become browser-fetch ready.",
+    )
+    parser.add_argument(
+        "--browser-settle-seconds",
+        type=float,
+        default=None,
+        help="Extra seconds to wait after readyState/fetch readiness. Defaults to --browser-warmup-seconds.",
     )
     parser.add_argument("--postal-code", default=os.getenv("SEDA_POSTAL_CODE", "01001-001"))
     parser.add_argument("--output-dir", default="")
@@ -129,7 +148,10 @@ def parse_args():
         not in {"0", "false", "no", "n"},
         help="Reuse the same browser session across pages. Default restarts the browser page per page.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.browser_settle_seconds is None:
+        args.browser_settle_seconds = args.browser_warmup_seconds
+    return args
 
 
 def _parse_pages(value):
@@ -195,10 +217,10 @@ def _fetch_direct(session, url, payload, timeout):
     }
 
 
-def _fetch_browser(url, payload, timeout, warmup_seconds):
+def _fetch_browser(url, payload, timeout, ready_timeout, settle_seconds):
     started = time.perf_counter()
     try:
-        from seda.magalu.browser_session import fetch_page_html, graphql_post
+        from seda.magalu.browser_session import get_page, graphql_post
     except Exception as exc:
         return {
             "success": False,
@@ -208,8 +230,32 @@ def _fetch_browser(url, payload, timeout, warmup_seconds):
             "search": {},
             "raw_text": "",
         }
+    ready = {}
+    navigation_error = ""
     try:
-        warmup = fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1)
+        page = get_page()
+        try:
+            page.get(url)
+        except Exception as exc:
+            navigation_error = f"{type(exc).__name__}: {exc}"
+        ready = _wait_browser_ready(page, url, ready_timeout, settle_seconds)
+        if not ready.get("success"):
+            error = ready.get("error") or "page_not_ready"
+            if navigation_error:
+                error = f"{error}; navigation={navigation_error}"
+            return {
+                "success": False,
+                "status_code": 0,
+                "elapsed": round(time.perf_counter() - started, 3),
+                "error": error,
+                "search": {},
+                "raw_text": "",
+                "ready_trace": ready.get("trace") or [],
+                "ready": ready,
+                "warmup_trace": ready.get("trace") or [],
+                "warmup_html": "",
+                "warmup_success": False,
+            }
         result = graphql_post(payload, timeout=timeout)
     except Exception as exc:
         return {
@@ -219,15 +265,14 @@ def _fetch_browser(url, payload, timeout, warmup_seconds):
             "error": f"{type(exc).__name__}: {exc}",
             "search": {},
             "raw_text": "",
+            "ready_trace": ready.get("trace") if isinstance(ready, dict) else [],
+            "ready": ready if isinstance(ready, dict) else {},
         }
     data = result.get("data") or {}
     search = ((data.get("data") or {}).get("search") or {}) if isinstance(data, dict) else {}
     error = result.get("error", "")
     if not error and not isinstance(search, dict):
         error = "missing_search"
-    warmup_error = "" if warmup.get("success") else warmup.get("error", "")
-    if warmup_error and not error:
-        error = f"warmup:{warmup_error}"
     return {
         "success": not error,
         "status_code": result.get("status_code", 0),
@@ -235,10 +280,145 @@ def _fetch_browser(url, payload, timeout, warmup_seconds):
         "error": error,
         "search": search if isinstance(search, dict) else {},
         "raw_text": str(result.get("text") or "")[:1000],
-        "warmup_trace": warmup.get("trace") or [],
-        "warmup_html": warmup.get("text") or "",
-        "warmup_success": bool(warmup.get("success")),
+        "ready_trace": ready.get("trace") or [],
+        "ready": ready,
+        "warmup_trace": ready.get("trace") or [],
+        "warmup_html": "",
+        "warmup_success": bool(ready.get("success")),
     }
+
+
+def _wait_browser_ready(page, expected_url, timeout_seconds, settle_seconds):
+    timeout_seconds = max(float(timeout_seconds or 0), 1.0)
+    settle_seconds = max(float(settle_seconds or 0), 0.0)
+    deadline = time.perf_counter() + timeout_seconds
+    trace = []
+    last_state = {}
+    last_error = ""
+
+    while time.perf_counter() < deadline:
+        state = _browser_state(page)
+        last_state = state
+        if state.get("error"):
+            last_error = state["error"]
+        trace.append(state)
+
+        if _state_is_blocked(state):
+            return {
+                "success": False,
+                "error": "blocked_page",
+                "trace": trace,
+                "state": state,
+                "ready_state": state.get("readyState", ""),
+                "url": state.get("href", ""),
+            }
+
+        if _state_is_ready(state, expected_url):
+            if settle_seconds > 0:
+                time.sleep(settle_seconds)
+                state = _browser_state(page)
+                trace.append({**state, "phase": "settle"})
+                if _state_is_blocked(state):
+                    return {
+                        "success": False,
+                        "error": "blocked_page_after_settle",
+                        "trace": trace,
+                        "state": state,
+                        "ready_state": state.get("readyState", ""),
+                        "url": state.get("href", ""),
+                    }
+                if not _state_is_ready(state, expected_url):
+                    last_state = state
+                    time.sleep(0.25)
+                    continue
+            return {
+                "success": True,
+                "error": "",
+                "trace": trace,
+                "state": state,
+                "ready_state": state.get("readyState", ""),
+                "url": state.get("href", ""),
+            }
+
+        time.sleep(0.25)
+
+    return {
+        "success": False,
+        "error": f"page_not_ready:{last_error or _not_ready_reason(last_state, expected_url)}",
+        "trace": trace,
+        "state": last_state,
+        "ready_state": last_state.get("readyState", ""),
+        "url": last_state.get("href", ""),
+    }
+
+
+def _browser_state(page):
+    script = """
+return JSON.stringify({
+  href: String(location.href || ''),
+  readyState: String(document.readyState || ''),
+  fetchType: String(typeof window.fetch),
+  title: String(document.title || ''),
+  bodyText: String((document.body && document.body.innerText) || '').slice(0, 800)
+});
+"""
+    try:
+        raw = page.run_js(script, timeout=2) or "{}"
+        state = json.loads(raw) if isinstance(raw, str) else raw
+        return state if isinstance(state, dict) else {"error": "invalid_state"}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "href": str(getattr(page, "url", "") or "")}
+
+
+def _state_is_ready(state, expected_url):
+    if not isinstance(state, dict):
+        return False
+    if state.get("fetchType") != "function":
+        return False
+    if state.get("readyState") not in {"interactive", "complete"}:
+        return False
+    return _same_listing_path(state.get("href", ""), expected_url)
+
+
+def _state_is_blocked(state):
+    text = _ascii_lower(" ".join(str(state.get(key, "")) for key in ("title", "bodyText", "href")))
+    markers = (
+        "nao e possivel acessar a pagina",
+        "nao e possivel acessar",
+        "erro 403",
+        "access denied",
+        "akamai",
+        "captcha",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _same_listing_path(actual_url, expected_url):
+    actual = urlparse(str(actual_url or ""))
+    expected = urlparse(str(expected_url or ""))
+    if not actual.netloc.endswith("magazineluiza.com.br"):
+        return False
+    return actual.path.rstrip("/") == expected.path.rstrip("/")
+
+
+def _not_ready_reason(state, expected_url):
+    if not state:
+        return "empty_state"
+    if state.get("error"):
+        return state["error"]
+    parts = []
+    if state.get("readyState") not in {"interactive", "complete"}:
+        parts.append(f"readyState={state.get('readyState', '')}")
+    if state.get("fetchType") != "function":
+        parts.append(f"fetchType={state.get('fetchType', '')}")
+    if not _same_listing_path(state.get("href", ""), expected_url):
+        parts.append(f"url={state.get('href', '')}")
+    return ",".join(parts) or "unknown"
+
+
+def _ascii_lower(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii").lower()
 
 
 def _summarize(run_id, product_line, page, url, page_size, direct, browser):
@@ -276,6 +456,10 @@ def _summarize(run_id, product_line, page, url, page_size, direct, browser):
         "browser_pagination_pages": _pagination_value(browser_search, "pages"),
         "browser_pagination_records": _pagination_value(browser_search, "records"),
         "browser_error": browser.get("error", ""),
+        "browser_ready_success": int(bool((browser.get("ready") or {}).get("success"))),
+        "browser_ready_state": (browser.get("ready") or {}).get("ready_state", ""),
+        "browser_ready_url": (browser.get("ready") or {}).get("url", ""),
+        "browser_ready_error": (browser.get("ready") or {}).get("error", ""),
         "browser_html_length": len(browser_html),
         "browser_html_parsed_rows": len(browser_html_rows),
         "browser_html_search_null": int(bool(browser_html and magalu_next_search_is_null(browser_html))),
@@ -300,6 +484,8 @@ def _details(result, search, products, rows, ids):
         "raw_preview": result.get("raw_text", ""),
         "warmup_trace": result.get("warmup_trace", []),
         "warmup_success": result.get("warmup_success", False),
+        "ready": result.get("ready", {}),
+        "ready_trace": result.get("ready_trace", []),
     }
 
 
