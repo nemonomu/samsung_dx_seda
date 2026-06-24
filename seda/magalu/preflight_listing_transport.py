@@ -34,8 +34,22 @@ def main():
     for run_id in ("main", "bsr"):
         for page in parse_pages(args.pages):
             url = page_url(RETAILERS["magalu"], page, run_id=run_id)
+            print(f"[magalu_preflight] {run_id} page={page} direct start", flush=True)
             direct = check_direct(url, run_id, page, args.timeout)
+            print(
+                f"[magalu_preflight] {run_id} page={page} direct done "
+                f"status={direct['status_code']} rows={direct['parsed_rows']} error={direct['error'] or '-'}",
+                flush=True,
+            )
+            if not args.no_browser:
+                print(f"[magalu_preflight] {run_id} page={page} browser_graphql start", flush=True)
             browser = check_browser(url, run_id, page, args.timeout) if not args.no_browser else skipped_browser()
+            if not args.no_browser:
+                print(
+                    f"[magalu_preflight] {run_id} page={page} browser_graphql done "
+                    f"status={browser['status_code']} rows={browser['parsed_rows']} error={browser['error'] or '-'}",
+                    flush=True,
+                )
             verdict = decide_verdict(direct, browser)
             record = {
                 "product_line": args.product_line,
@@ -97,14 +111,25 @@ def check_direct(url, run_id, page, timeout):
 def check_browser(url, run_id, page, timeout):
     started = time.perf_counter()
     try:
-        from seda.magalu.browser_session import fetch_page_html, graphql_post
+        from seda.magalu.browser_session import get_page
     except Exception as exc:
         return empty_result("browser_graphql", f"browser_import:{type(exc).__name__}: {exc}", elapsed(started))
 
     try:
-        fetch_page_html(url, wait_seconds=float(os.getenv("SEDA_MAGALU_PREFLIGHT_BROWSER_WAIT", "5")), attempts=1)
+        browser_page = get_page()
+        current_url = str(getattr(browser_page, "url", "") or "")
+        if "magazineluiza.com.br" not in current_url:
+            if os.getenv("SEDA_MAGALU_PREFLIGHT_BROWSER_NAVIGATE", "0").lower() in {"1", "true", "yes", "y"}:
+                browser_page.get(url)
+                time.sleep(float(os.getenv("SEDA_MAGALU_PREFLIGHT_BROWSER_WAIT", "3")))
+            else:
+                return empty_result(
+                    "browser_graphql",
+                    f"current_page_not_magalu:{current_url or 'blank'}",
+                    elapsed(started),
+                )
         payload = search_api._payload(url, int(os.getenv("SEDA_MAGALU_SEARCH_PAGE_SIZE", "60")))
-        result = graphql_post(payload, timeout=timeout)
+        result = browser_graphql_fetch(browser_page, payload, timeout)
     except Exception as exc:
         return empty_result("browser_graphql", f"{type(exc).__name__}: {exc}", elapsed(started))
 
@@ -112,6 +137,53 @@ def check_browser(url, run_id, page, timeout):
     text = result.get("text") or json.dumps(data, ensure_ascii=False)
     status_code = int(result.get("status_code") or 0)
     return summarize_graphql_data("browser_graphql", status_code, data, text, url, run_id, page, elapsed(started), result.get("error", ""))
+
+
+def browser_graphql_fetch(browser_page, payload, timeout):
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    script = """
+return (async () => {
+  try {
+    const payload = JSON.parse(arguments[0]);
+    const operation = payload.operationName || '';
+    const response = await fetch(
+      'https://federation.magazineluiza.com.br/graphql?operationName=' + encodeURIComponent(operation),
+      {
+        method: 'POST',
+        headers: {
+          'accept': 'application/json',
+          'content-type': 'application/json',
+          'x-channel-id': '45',
+          'x-channel-name': 'mixer-desk.magazineluiza.com.br'
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+    return JSON.stringify({status: response.status, text: await response.text()});
+  } catch (error) {
+    return JSON.stringify({status: 0, error: String(error), text: ''});
+  }
+})()
+"""
+    raw = browser_page.run_js(script, payload_text, timeout=int(timeout))
+    try:
+        result = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+    except (TypeError, ValueError):
+        result = {"status": 0, "error": "invalid_js_result", "text": str(raw or "")}
+    text = result.get("text") or ""
+    data = {}
+    error = result.get("error") or ""
+    if text:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            error = error or "invalid_json"
+    return {
+        "status_code": int(result.get("status") or 0),
+        "text": text,
+        "data": data,
+        "error": error,
+    }
 
 
 def summarize_graphql_response(method, status_code, text, url, run_id, page, seconds):
