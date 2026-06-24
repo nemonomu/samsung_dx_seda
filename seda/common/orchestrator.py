@@ -21,11 +21,12 @@ class Step:
 
 
 def steps_for(package_name):
+    listing_env = _magalu_listing_env(package_name)
     steps = [
         Step(0, "erd_schema", f"{package_name}.step00_erd_schema"),
-        Step(1, "main_list", f"{package_name}.step01_main_list"),
+        Step(1, "main_list", f"{package_name}.step01_main_list", env=listing_env),
         Step(2, "main_targets", f"{package_name}.step02_main_targets"),
-        Step(3, "bsr_list", f"{package_name}.step03_bsr_list"),
+        Step(3, "bsr_list", f"{package_name}.step03_bsr_list", env=listing_env),
         Step(4, "bsr_rank", f"{package_name}.step04_bsr_rank"),
         Step(5, "final_targets", f"{package_name}.step07_final_targets"),
         Step(6, "detail_enrichment", f"{package_name}.step08_detail_enrichment"),
@@ -59,6 +60,21 @@ def steps_for(package_name):
         ]
     )
     return steps
+
+
+def _magalu_listing_env(package_name):
+    if not package_name.endswith(".magalu"):
+        return None
+    fetch_mode = os.getenv("SEDA_MAGALU_LISTING_FETCH_MODE", "").strip()
+    if not fetch_mode:
+        return None
+    return {
+        "SEDA_FETCH_MODE": fetch_mode,
+        "SEDA_ALLOW_ZENROWS": os.getenv("SEDA_MAGALU_LISTING_ALLOW_ZENROWS", "1"),
+        "SEDA_ZENROWS_DRY_RUN": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN", "0"),
+        "SEDA_ZENROWS_LISTING_PROFILE": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_PROFILE", "listing_js_full"),
+        "SEDA_ZENROWS_TIMEOUT": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_TIMEOUT", "180"),
+    }
 
 
 def step_by_key(steps, value):

@@ -10,7 +10,12 @@ if not defined SEDA_RETAILER_SWITCH_SLEEP_SECONDS set SEDA_RETAILER_SWITCH_SLEEP
 set SEDA_RUN_ROOT=
 
 rem Magalu defaults.
-if not defined SEDA_FETCH_MODE set SEDA_FETCH_MODE=magalu_graphql_first
+if not defined SEDA_MAGALU_FETCH_MODE set SEDA_MAGALU_FETCH_MODE=magalu_graphql_first
+if not defined SEDA_MAGALU_LISTING_FETCH_MODE set SEDA_MAGALU_LISTING_FETCH_MODE=zenrows
+if not defined SEDA_MAGALU_LISTING_ALLOW_ZENROWS set SEDA_MAGALU_LISTING_ALLOW_ZENROWS=1
+if not defined SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN set SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN=0
+if not defined SEDA_MAGALU_LISTING_ZENROWS_PROFILE set SEDA_MAGALU_LISTING_ZENROWS_PROFILE=listing_js_full
+if not defined SEDA_MAGALU_LISTING_ZENROWS_TIMEOUT set SEDA_MAGALU_LISTING_ZENROWS_TIMEOUT=180
 if not defined SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS set SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS=1
 if not defined SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS set SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS=1
 if not defined SEDA_MAGALU_SEARCH_RETRIES set SEDA_MAGALU_SEARCH_RETRIES=0
@@ -31,34 +36,45 @@ if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_O
 set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
 
 rem Casas Bahia CDP defaults.
+if not defined SEDA_CASAS_BAHIA_FETCH_MODE set SEDA_CASAS_BAHIA_FETCH_MODE=graphql
 if not defined SEDA_CDP_CLOSE_EXISTING_TABS set SEDA_CDP_CLOSE_EXISTING_TABS=1
 if not defined SEDA_CDP_USER_DATA_DIR set SEDA_CDP_USER_DATA_DIR=C:\tmp\seda_casas_bahia_cdp_profile
 
-call :run_stage Magalu TV seda.magalu.magalu_orchestrator TV
+call :run_magalu TV
 if errorlevel 1 exit /b 1
 call :sleep_between
 
-call :run_stage "Casas Bahia" TV seda.casas_bahia.casas_bahia_orchestrator TV
+call :run_casas TV
 if errorlevel 1 exit /b 1
 call :sleep_between
 
-call :run_stage Magalu REF seda.magalu.magalu_orchestrator REF
+call :run_magalu REF
 if errorlevel 1 exit /b 1
 call :sleep_between
 
-call :run_stage "Casas Bahia" REF seda.casas_bahia.casas_bahia_orchestrator REF
+call :run_casas REF
 if errorlevel 1 exit /b 1
 call :sleep_between
 
-call :run_stage Magalu LDY seda.magalu.magalu_orchestrator LDY
+call :run_magalu LDY
 if errorlevel 1 exit /b 1
 call :sleep_between
 
-call :run_stage "Casas Bahia" LDY seda.casas_bahia.casas_bahia_orchestrator LDY
+call :run_casas LDY
 if errorlevel 1 exit /b 1
 
 echo [SEDA] Magalu/Casas Bahia interleaved TV/REF/LDY full run completed
 exit /b 0
+
+:run_magalu
+set "SEDA_FETCH_MODE=%SEDA_MAGALU_FETCH_MODE%"
+call :run_stage Magalu %~1 seda.magalu.magalu_orchestrator %~1
+exit /b %errorlevel%
+
+:run_casas
+set "SEDA_FETCH_MODE=%SEDA_CASAS_BAHIA_FETCH_MODE%"
+call :run_stage "Casas Bahia" %~1 seda.casas_bahia.casas_bahia_orchestrator %~1
+exit /b %errorlevel%
 
 :run_stage
 set "RETAILER_LABEL=%~1"

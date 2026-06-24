@@ -195,16 +195,17 @@ def _fetch_graphql(url, timeout):
 
 
 def _fetch_zenrows(url, timeout):
+    zenrows_timeout = int(os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", str(timeout))))
     try:
         if "magazineluiza.com.br" in url and "/busca/" in url:
             from .magalu.zenrows_client import fetch_listing_next_data_html
 
-            result = fetch_listing_next_data_html(url, timeout=timeout)
+            result = fetch_listing_next_data_html(url, timeout=zenrows_timeout)
             method_prefix = "zenrows_listing_next_data"
         else:
             from .magalu.zenrows_client import fetch_html
 
-            result = fetch_html(url, timeout=timeout)
+            result = fetch_html(url, timeout=zenrows_timeout)
             method_prefix = "zenrows"
     except Exception as exc:
         return FetchResult(url=url, text="", method="zenrows", error=f"{type(exc).__name__}: {exc}")

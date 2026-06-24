@@ -234,7 +234,7 @@ def fetch_html(url, profile=None, timeout=None):
 
 
 def fetch_listing_next_data_html(url, profile=None, timeout=None):
-    current_profile = profile or os.getenv("SEDA_ZENROWS_LISTING_PROFILE", "listing_next_data_js_wait")
+    current_profile = profile or os.getenv("SEDA_ZENROWS_LISTING_PROFILE", "listing_js_full")
     result = request_url(url, profile=current_profile, timeout=timeout)
     html_text = _result_to_next_data_html(result.text)
     if html_text:
