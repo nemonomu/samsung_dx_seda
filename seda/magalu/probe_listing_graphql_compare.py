@@ -39,6 +39,7 @@ CSV_COLUMNS = [
     "browser_ready_state",
     "browser_ready_url",
     "browser_ready_error",
+    "browser_raw_preview",
     "browser_html_length",
     "browser_html_parsed_rows",
     "browser_html_search_null",
@@ -80,6 +81,7 @@ def main():
             "search": {},
             "raw_text": "",
             "warmup_html": "",
+            "ready": {},
         }
         if not args.no_browser and browser_available:
             if args.restart_browser_per_page:
@@ -271,15 +273,19 @@ def _fetch_browser(url, payload, timeout, ready_timeout, settle_seconds):
     data = result.get("data") or {}
     search = ((data.get("data") or {}).get("search") or {}) if isinstance(data, dict) else {}
     error = result.get("error", "")
+    raw_text = str(result.get("text") or "")
+    status_code = result.get("status_code", 0)
     if not error and not isinstance(search, dict):
         error = "missing_search"
+    if error == "invalid_json":
+        error = _classify_browser_graphql_invalid_json(status_code, raw_text)
     return {
         "success": not error,
-        "status_code": result.get("status_code", 0),
+        "status_code": status_code,
         "elapsed": round(time.perf_counter() - started, 3),
         "error": error,
         "search": search if isinstance(search, dict) else {},
-        "raw_text": str(result.get("text") or "")[:1000],
+        "raw_text": raw_text[:1000],
         "ready_trace": ready.get("trace") or [],
         "ready": ready,
         "warmup_trace": ready.get("trace") or [],
@@ -295,6 +301,8 @@ def _wait_browser_ready(page, expected_url, timeout_seconds, settle_seconds):
     trace = []
     last_state = {}
     last_error = ""
+    doc_loaded = _wait_doc_loaded(page, min(timeout_seconds, max(1.0, timeout_seconds / 2)))
+    trace.append({"phase": "doc_loaded", **doc_loaded})
 
     while time.perf_counter() < deadline:
         state = _browser_state(page)
@@ -353,21 +361,59 @@ def _wait_browser_ready(page, expected_url, timeout_seconds, settle_seconds):
 
 
 def _browser_state(page):
-    script = """
-return JSON.stringify({
-  href: String(location.href || ''),
-  readyState: String(document.readyState || ''),
-  fetchType: String(typeof window.fetch),
-  title: String(document.title || ''),
-  bodyText: String((document.body && document.body.innerText) || '').slice(0, 800)
-});
-"""
+    state = {}
+    target = _target_info(page)
+    if target.get("error"):
+        state["targetError"] = target["error"]
+    state["href"] = target.get("url", "")
+    state["title"] = target.get("title", "")
     try:
-        raw = page.run_js(script, timeout=2) or "{}"
-        state = json.loads(raw) if isinstance(raw, str) else raw
-        return state if isinstance(state, dict) else {"error": "invalid_state"}
+        state["isLoading"] = bool(getattr(page, "_is_loading", False))
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}", "href": str(getattr(page, "url", "") or "")}
+        state["isLoadingError"] = f"{type(exc).__name__}: {exc}"
+    try:
+        state["readyState"] = str(getattr(page, "_js_ready_state", "") or "")
+    except Exception as exc:
+        state["readyError"] = f"{type(exc).__name__}: {exc}"
+
+    if _can_probe_fetch_type(state):
+        try:
+            state["fetchType"] = str(page.run_js("return typeof window.fetch;", timeout=_state_js_timeout()) or "")
+        except Exception as exc:
+            state["fetchType"] = ""
+            state["fetchError"] = f"{type(exc).__name__}: {exc}"
+
+    return state
+
+
+def _wait_doc_loaded(page, timeout_seconds):
+    try:
+        ok = bool(page.wait.doc_loaded(timeout=timeout_seconds, raise_err=False))
+        return {"docLoaded": int(ok), "docLoadedError": ""}
+    except Exception as exc:
+        return {"docLoaded": 0, "docLoadedError": f"{type(exc).__name__}: {exc}"}
+
+
+def _target_info(page):
+    try:
+        target_id = getattr(page, "_target_id", None)
+        result = page._run_cdp("Target.getTargetInfo", targetId=target_id) if target_id else {}
+        info = result.get("targetInfo") or {}
+        return {"url": str(info.get("url") or ""), "title": str(info.get("title") or "")}
+    except Exception as exc:
+        return {"url": "", "title": "", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _can_probe_fetch_type(state):
+    if state.get("readyState") not in {"interactive", "complete"}:
+        return False
+    if state.get("isLoading"):
+        return False
+    return bool(state.get("href", "").startswith("https://www.magazineluiza.com.br"))
+
+
+def _state_js_timeout():
+    return float(os.getenv("SEDA_MAGALU_PROBE_STATE_JS_TIMEOUT", "6"))
 
 
 def _state_is_ready(state, expected_url):
@@ -381,7 +427,7 @@ def _state_is_ready(state, expected_url):
 
 
 def _state_is_blocked(state):
-    text = _ascii_lower(" ".join(str(state.get(key, "")) for key in ("title", "bodyText", "href")))
+    text = _ascii_lower(" ".join(str(state.get(key, "")) for key in ("title", "href", "rawText")))
     markers = (
         "nao e possivel acessar a pagina",
         "nao e possivel acessar",
@@ -411,9 +457,23 @@ def _not_ready_reason(state, expected_url):
         parts.append(f"readyState={state.get('readyState', '')}")
     if state.get("fetchType") != "function":
         parts.append(f"fetchType={state.get('fetchType', '')}")
+    if state.get("fetchError"):
+        parts.append(f"fetchError={state.get('fetchError', '')}")
     if not _same_listing_path(state.get("href", ""), expected_url):
         parts.append(f"url={state.get('href', '')}")
     return ",".join(parts) or "unknown"
+
+
+def _classify_browser_graphql_invalid_json(status_code, raw_text):
+    raw = str(raw_text or "")
+    state = {"title": raw[:1000], "href": "", "rawText": raw[:1000]}
+    if _state_is_blocked(state):
+        return f"blocked_html_response:{status_code or 0}"
+    if int(status_code or 0) in {401, 403, 429}:
+        return f"blocked_http_{int(status_code or 0)}_invalid_json"
+    if raw.lstrip().lower().startswith(("<!doctype", "<html")):
+        return f"html_response_invalid_json:{status_code or 0}"
+    return "invalid_json"
 
 
 def _ascii_lower(value):
@@ -460,6 +520,7 @@ def _summarize(run_id, product_line, page, url, page_size, direct, browser):
         "browser_ready_state": (browser.get("ready") or {}).get("ready_state", ""),
         "browser_ready_url": (browser.get("ready") or {}).get("url", ""),
         "browser_ready_error": (browser.get("ready") or {}).get("error", ""),
+        "browser_raw_preview": browser.get("raw_text", "")[:300],
         "browser_html_length": len(browser_html),
         "browser_html_parsed_rows": len(browser_html_rows),
         "browser_html_search_null": int(bool(browser_html and magalu_next_search_is_null(browser_html))),
