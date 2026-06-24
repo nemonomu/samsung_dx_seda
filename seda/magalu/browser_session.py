@@ -77,6 +77,13 @@ def _page_state(page):
         return "", ""
 
 
+def _stop_loading(page):
+    try:
+        page.stop_loading()
+    except Exception:
+        pass
+
+
 def _is_magalu_url(url):
     return "magazineluiza.com.br" in str(url or "")
 
@@ -114,6 +121,14 @@ def _restart_page(reason=""):
         time.sleep(sleep_seconds)
 
 
+def _prepare_js_page(page, reason):
+    _stop_loading(page)
+    url, html = _page_state(page)
+    if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
+        return page
+    return _warmup_page(page, reason)
+
+
 def _is_oom_state(url, html):
     haystack = f"{url}\n{html}".lower()
     markers = (
@@ -144,18 +159,25 @@ def _trace_oom(trace, attempt, page):
 
 def _warmup_page(page, reason):
     warmup_url = os.getenv("SEDA_MAGALU_BROWSER_WARMUP_URL", "https://www.magazineluiza.com.br/busca/tv/")
-    warmup_seconds = _env_float("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", 5)
+    if str(reason or "").startswith("search_browser_graphql"):
+        warmup_seconds = _env_float("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_SECONDS", 1)
+        nav_timeout = _env_float("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_NAV_TIMEOUT", 4)
+    else:
+        warmup_seconds = _env_float("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", 5)
+        nav_timeout = _env_float("SEDA_MAGALU_BROWSER_WARMUP_NAV_TIMEOUT", 8)
     attempts = max(1, _env_int("SEDA_MAGALU_BROWSER_WARMUP_ATTEMPTS", 2))
     last_page = page
     for attempt in range(1, attempts + 1):
         try:
-            last_page.get(warmup_url)
+            last_page.get(warmup_url, timeout=nav_timeout)
+            _stop_loading(last_page)
             time.sleep(warmup_seconds)
             url, html = _page_state(last_page)
             if not _is_bad_browser_state(url, html):
                 return last_page
             _restart_page(f"{reason}_bad_state")
         except Exception:
+            _stop_loading(last_page)
             _restart_page(f"{reason}_failed")
         last_page = _page_for_use(f"{reason}_retry")
     return last_page
@@ -163,6 +185,7 @@ def _warmup_page(page, reason):
 
 def ensure_magalu_session(reason="ensure_magalu_session"):
     page = _page_for_use(reason)
+    _stop_loading(page)
     url, html = _page_state(page)
     trace = [{"method": "browser_session_check", "url": url, "length": len(html)}]
     if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
@@ -178,10 +201,16 @@ def ensure_magalu_session(reason="ensure_magalu_session"):
 
 
 def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_payload=True):
-    wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
-    attempts = int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3)
     search_recycle_attempts = _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1)
     should_validate_search = validate_search_payload and _is_magalu_search_url(url)
+    if should_validate_search:
+        wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS", 1)
+        attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS", 1))
+        nav_timeout = _env_float("SEDA_MAGALU_SEARCH_BROWSER_NAV_TIMEOUT", 8)
+    else:
+        wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
+        attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3))
+        nav_timeout = _env_float("SEDA_MAGALU_BROWSER_NAV_TIMEOUT", 20)
     max_cycles = 1 + search_recycle_attempts if should_validate_search else 1
     page = _page_for_use("fetch_page_html")
     trace = []
@@ -195,7 +224,8 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
 
         for attempt in range(1, attempts + 1):
             try:
-                page.get(url)
+                page.get(url, timeout=nav_timeout)
+                _stop_loading(page)
                 time.sleep(wait_seconds)
                 if _trace_oom(trace, attempt, page):
                     _restart_page("fetch_page_html_oom")
@@ -216,6 +246,7 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
                     return {"success": True, "text": html, "trace": trace, "url": page.url}
                 last_error = "browser_html_missing_next_data"
             except Exception as exc:
+                _stop_loading(page)
                 last_error = f"{type(exc).__name__}: {exc}"
                 trace.append({"cycle": cycle, "attempt": attempt, "length": 0, "error": last_error})
                 time.sleep(wait_seconds)
@@ -262,8 +293,7 @@ def _magalu_search_payload_error(url, html):
 def graphql_post(payload, timeout=None):
     page = _page_for_use("graphql_post")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
-        page = _warmup_page(page, "graphql_post_warmup")
+    page = _prepare_js_page(page, "graphql_post_warmup")
 
     operation = payload.get("operationName") or ""
     attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
@@ -325,23 +355,22 @@ return (async () => {
         if not blocked and last["status_code"] == 200:
             return last
         if attempt < attempts:
-            page = _warmup_page(page, "graphql_post_warmup")
+            page = _prepare_js_page(page, "graphql_post_warmup")
     return last
 
 
 def _graphql_result_blocked(result):
     status = int(result.get("status_code") or 0)
-    text = (result.get("text") or "").lower()
+    text = _ascii_lower(result.get("text") or "")
     if status in {401, 403, 429}:
         return True
-    return any(marker in text for marker in ("akamai", "captcha", "access denied", "não é possível", "nao e possivel"))
+    return any(marker in text for marker in ("akamai", "captcha", "access denied", "nao e possivel", "erro 403", "oops", "ops!"))
 
 
 def graphql_post_raw(payload, timeout=None, endpoint=None):
     page = _page_for_use("graphql_post_raw")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
-        page = _warmup_page(page, "graphql_post_raw_warmup")
+    page = _prepare_js_page(page, "graphql_post_raw_warmup")
 
     endpoint = endpoint or os.getenv("SEDA_MAGALU_GRAPHQL_ENDPOINT", "https://federation.magazineluiza.com.br/graphql")
     payload_text = json.dumps(payload, ensure_ascii=False)
@@ -399,8 +428,7 @@ def fetch_html(url, timeout=None):
     page = _page_for_use("fetch_html")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_HTML_TIMEOUT", 90)
     attempts = _env_int("SEDA_MAGALU_BROWSER_HTML_ATTEMPTS", 2)
-    if not str(page.url or "").startswith("https://www.magazineluiza.com.br"):
-        page = _warmup_page(page, "fetch_html_warmup")
+    page = _prepare_js_page(page, "fetch_html_warmup")
     script = """
 return (async () => {
   try {
@@ -443,13 +471,16 @@ return (async () => {
 
     if os.getenv("SEDA_MAGALU_PDP_NAV_FALLBACK", "1").lower() not in {"0", "false", "no", "n"}:
         try:
-            page.get(url)
+            nav_timeout = _env_float("SEDA_MAGALU_PDP_NAV_TIMEOUT", min(timeout, 30))
+            page.get(url, timeout=nav_timeout)
+            _stop_loading(page)
             nav_wait_seconds = _env_float("SEDA_MAGALU_PDP_NAV_WAIT_SECONDS", 5)
             time.sleep(nav_wait_seconds)
             if _trace_oom(trace, len(trace) + 1, page):
                 _restart_page("fetch_html_navigation_oom")
                 page = _page_for_use("fetch_html_navigation_retry")
-                page.get(url)
+                page.get(url, timeout=nav_timeout)
+                _stop_loading(page)
                 time.sleep(nav_wait_seconds)
             text = page.html or ""
             trace.append(
@@ -469,6 +500,7 @@ return (async () => {
                 "trace": trace,
             }
         except Exception as exc:
+            _stop_loading(page)
             trace.append(
                 {
                     "attempt": len(trace) + 1,

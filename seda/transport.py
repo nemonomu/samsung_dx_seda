@@ -2,6 +2,7 @@
 import re
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def fetch_attempts(mode):
     elif mode in {"auto", "uc_first"} or mode.endswith("_uc_first"):
         attempts = ["uc", "graphql", "requests", "zenrows"]
     elif mode == "magalu_graphql_first":
-        attempts = ["graphql", "browser", "uc", "requests", "zenrows"]
+        attempts = _split_attempts(os.getenv("SEDA_MAGALU_GRAPHQL_FIRST_ATTEMPTS", "graphql,browser"))
     elif mode == "graphql_first" or mode.endswith("_graphql_first"):
         attempts = ["graphql", "uc", "requests", "zenrows"]
     elif mode == "requests_first" or mode.endswith("_requests_first"):
@@ -85,6 +86,11 @@ def fetch_attempts(mode):
     if os.getenv("SEDA_ALLOW_ZENROWS", "0").lower() not in {"1", "true", "yes", "y"}:
         attempts = [attempt for attempt in attempts if attempt != "zenrows"]
     return attempts
+
+
+def _split_attempts(value):
+    attempts = [item.strip().lower() for item in str(value or "").split(",") if item.strip()]
+    return attempts or ["graphql", "browser"]
 
 
 def _fetch_browser(url, timeout):
@@ -108,7 +114,7 @@ def _fetch_browser(url, timeout):
 
 
 def is_blocked_html(text, status_code=0):
-    haystack = (text or "").lower()
+    haystack = _ascii_lower(text or "")
     if "__next_data__" in haystack and "pageprops" in haystack:
         return False
     if status_code in {401, 403, 429}:
@@ -118,12 +124,21 @@ def is_blocked_html(text, status_code=0):
         "customdeny",
         "error-code\">403",
         "ops! algo deu errado",
+        "oops",
+        "nao e possivel acessar a pagina",
+        "alguma coisa deu errado",
+        "erro 403",
         "access denied",
         "captcha",
         "bot detection",
         "robot",
     ]
     return any(marker in haystack for marker in blocked_markers)
+
+
+def _ascii_lower(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii").lower()
 
 
 def _fetch_requests(url, timeout):

@@ -161,7 +161,9 @@ def fetch_search_listing(url, timeout=None):
     if "magazineluiza.com.br" not in parsed.netloc or "/busca/" not in parsed.path:
         return {"success": False, "error": "not_magalu_search_url", "text": "", "trace": []}
 
-    timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    requested_timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
+    timeout_cap = _env_int("SEDA_MAGALU_SEARCH_TIMEOUT_CAP", 30)
+    timeout = min(requested_timeout, timeout_cap) if timeout_cap > 0 else requested_timeout
     retries = int(os.getenv("SEDA_MAGALU_SEARCH_RETRIES", "2"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_RETRY_SLEEP_SECONDS", "3.0"))
     page_sizes = _page_sizes()
@@ -250,7 +252,8 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
         )
         return {"success": False, "error": "browser_graphql_unavailable", "text": "", "trace": trace}
 
-    attempts = int(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS", "2") or "2")
+    attempts = max(1, _env_int("SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS", 2))
+    browser_timeout = max(1, _env_int("SEDA_MAGALU_SEARCH_BROWSER_GRAPHQL_TIMEOUT", 20))
     session = ensure_magalu_session("search_browser_graphql")
     trace.extend(session.get("trace") or [])
     if not session.get("success"):
@@ -259,7 +262,7 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
     for page_size in page_sizes:
         payload = _payload(url, page_size)
         for attempt in range(1, attempts + 1):
-            result = graphql_post(payload, timeout=timeout)
+            result = graphql_post(payload, timeout=min(timeout, browser_timeout))
             data = result.get("data") or {}
             search = (data.get("data") or {}).get("search") or {}
             products = search.get("products") or []
@@ -332,6 +335,13 @@ def _term_from_path(path):
 def _first(query, key):
     values = query.get(key) or []
     return values[0] if values else None
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _headers(url):
