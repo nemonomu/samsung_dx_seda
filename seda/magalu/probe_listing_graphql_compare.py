@@ -76,9 +76,13 @@ def main():
             "warmup_html": "",
         }
         if not args.no_browser and browser_available:
+            if args.restart_browser_per_page:
+                _close_browser_page()
             browser = _fetch_browser(url, payload, args.timeout, args.browser_warmup_seconds)
             if browser.get("error", "").startswith("browser_import_"):
                 browser_available = False
+            if args.restart_browser_per_page:
+                _close_browser_page()
 
         result = _summarize(args.run_id, args.product_line, page, url, args.page_size, direct, browser)
         results.append(result)
@@ -94,12 +98,7 @@ def main():
             flush=True,
         )
 
-    try:
-        from seda.magalu.browser_session import close_page
-
-        close_page(force=True)
-    except Exception:
-        pass
+    _close_browser_page()
 
     print(f"[magalu_listing_compare] wrote {json_path}")
     print(f"[magalu_listing_compare] wrote {csv_path}")
@@ -122,6 +121,14 @@ def parse_args():
     parser.add_argument("--postal-code", default=os.getenv("SEDA_POSTAL_CODE", "01001-001"))
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--no-browser", action="store_true", help="Only run direct GraphQL.")
+    parser.add_argument(
+        "--reuse-browser",
+        dest="restart_browser_per_page",
+        action="store_false",
+        default=os.getenv("SEDA_MAGALU_PROBE_RESTART_BROWSER_PER_PAGE", "1").lower()
+        not in {"0", "false", "no", "n"},
+        help="Reuse the same browser session across pages. Default restarts the browser page per page.",
+    )
     return parser.parse_args()
 
 
@@ -343,6 +350,15 @@ def _write_csv(path, rows):
 def _write_outputs(json_path, csv_path, rows):
     json_path.write_text(json.dumps({"results": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(csv_path, rows)
+
+
+def _close_browser_page():
+    try:
+        from seda.magalu.browser_session import close_page
+
+        close_page(force=True)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
