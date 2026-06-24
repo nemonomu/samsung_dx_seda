@@ -37,5 +37,5 @@ if not defined PAGES set "PAGES=1,2,3"
 :args_done
 
 echo [SEDA] Magalu listing GraphQL compare probe product=%PRODUCT_LINE% pages=%PAGES%
-python -m seda.magalu.probe_listing_graphql_compare --product-line %PRODUCT_LINE% --run-id main --pages %PAGES% --timeout 8 --browser-ready-timeout %SEDA_MAGALU_PROBE_READY_TIMEOUT% --browser-settle-seconds %SEDA_MAGALU_PROBE_SETTLE_SECONDS%
+python -m seda.magalu.probe_listing_graphql_compare --product-line "%PRODUCT_LINE%" --run-id main --pages "%PAGES%" --timeout 8 --browser-ready-timeout %SEDA_MAGALU_PROBE_READY_TIMEOUT% --browser-settle-seconds %SEDA_MAGALU_PROBE_SETTLE_SECONDS%
 exit /b %ERRORLEVEL%
