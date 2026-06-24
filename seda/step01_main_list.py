@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .parsers import extract_next_data, magalu_next_search_is_null, parse_listing
+from .parsers import extract_next_data, magalu_next_search_is_null, parse_listing, _magalu_is_relevant_product
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, page_url, product_identity, run_root, selected_retailers, write_csv
 from .transport import fetch_url, is_blocked_html
 
@@ -105,6 +105,39 @@ def _magalu_next_search_pagination(html_text):
     return pagination if isinstance(pagination, dict) else {}, product_count
 
 
+def _magalu_next_listing_stats(html_text, parsed_count=0):
+    data = extract_next_data(html_text)
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    search = page_data.get("search") if isinstance(page_data, dict) else {}
+    products = search.get("products", []) if isinstance(search, dict) else []
+    pagination = search.get("pagination") if isinstance(search, dict) else {}
+    if not isinstance(products, list):
+        products = []
+    kept_count = sum(1 for product in products if isinstance(product, dict) and _magalu_is_relevant_product(product))
+    return {
+        "raw_products": len(products),
+        "kept_products": kept_count,
+        "dropped_products": max(0, len(products) - kept_count),
+        "parsed_rows": parsed_count,
+        "pagination_page": _safe_int((pagination or {}).get("page"), 0) if isinstance(pagination, dict) else 0,
+        "pagination_size": _safe_int((pagination or {}).get("size"), 0) if isinstance(pagination, dict) else 0,
+    }
+
+
+def _format_magalu_listing_stats(stats):
+    if not stats:
+        return ""
+    return (
+        f"raw_products={stats.get('raw_products', 0)} "
+        f"kept_products={stats.get('kept_products', 0)} "
+        f"dropped_products={stats.get('dropped_products', 0)} "
+        f"pagination_page={stats.get('pagination_page', 0)} "
+        f"pagination_size={stats.get('pagination_size', 0)} "
+    )
+
+
 def _magalu_browser_fill_payload_ok(url, html_text, parsed_count):
     pagination, product_count = _magalu_next_search_pagination(html_text)
     if not pagination:
@@ -155,6 +188,7 @@ def main():
     root = run_root() / run_id
     rows = []
     failures = []
+    listing_stats = []
     rank_offsets = {}
     attempted_pages = []
     target = unique_target(run_id)
@@ -195,6 +229,7 @@ def main():
                 )
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
+            magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
             if _should_magalu_browser_fill(config.name, method, parsed, text, url):
                 fill_parsed, fill_result, fill_attempts, fill_error = _magalu_browser_fill(
                     url,
@@ -217,6 +252,7 @@ def main():
                     text = fill_result.text
                     method = _append_method(method, fill_result.method)
                     parsed = fill_parsed
+                    magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
                     raw_path.write_text(text, encoding="utf-8", errors="ignore")
             rank_field = "bsr_rank" if run_id == "bsr" else "main_rank"
             for local_index, item in enumerate(parsed, start=1):
@@ -235,9 +271,21 @@ def main():
                 no_growth_pages = 0
             print(
                 f"[seda] {run_id} {config.name} page={page} rows={len(parsed)} "
+                f"{_format_magalu_listing_stats(magalu_stats)}"
                 f"unique={unique_count} method={method}",
                 flush=True,
             )
+            if magalu_stats:
+                listing_stats.append(
+                    {
+                        "retailer": config.name,
+                        "page": page,
+                        "url": url,
+                        "method": method,
+                        "unique": unique_count,
+                        **magalu_stats,
+                    }
+                )
             if target and unique_count >= target:
                 print(f"[seda] {run_id} {config.name} reached unique target {target}", flush=True)
                 break
@@ -258,6 +306,7 @@ def main():
         "pages": attempted_pages,
         "unique_target": target,
         "fetch_mode": os.getenv("SEDA_FETCH_MODE", "uc_first"),
+        "listing_stats": listing_stats,
     }
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[seda] wrote {parsed_dir / 'main_occurrences.csv'} rows={len(rows)}")

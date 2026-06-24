@@ -3,6 +3,7 @@ import json
 import os
 import time
 import unicodedata
+from urllib.parse import parse_qs, urlparse
 
 from ..parsers import extract_next_data, magalu_next_search_is_null
 
@@ -204,14 +205,12 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
     search_recycle_attempts = _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1)
     should_validate_search = validate_search_payload and _is_magalu_search_url(url)
     if should_validate_search:
-        wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS", 1)
-        attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS", 1))
-        nav_timeout = _env_float("SEDA_MAGALU_SEARCH_BROWSER_NAV_TIMEOUT", 8)
-    else:
-        wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
-        attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3))
-        nav_timeout = _env_float("SEDA_MAGALU_BROWSER_NAV_TIMEOUT", 20)
-    max_cycles = 1 + search_recycle_attempts if should_validate_search else 1
+        return _fetch_search_page_html(url, wait_seconds=wait_seconds, attempts=attempts, recycle_attempts=search_recycle_attempts)
+
+    wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
+    attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3))
+    nav_timeout = _env_float("SEDA_MAGALU_BROWSER_NAV_TIMEOUT", 20)
+    max_cycles = 1
     page = _page_for_use("fetch_page_html")
     trace = []
     last_error = ""
@@ -252,6 +251,180 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
                 time.sleep(wait_seconds)
 
     return {"success": False, "text": "", "error": last_error or "browser_fetch_failed", "trace": trace}
+
+
+def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attempts=None):
+    wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS", 0.25)
+    attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS", 3))
+    recycle_attempts = max(0, int(recycle_attempts) if recycle_attempts is not None else _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1))
+    ready_timeout = _env_float("SEDA_MAGALU_SEARCH_BROWSER_READY_TIMEOUT", 5)
+    poll_seconds = _env_float("SEDA_MAGALU_SEARCH_BROWSER_POLL_SECONDS", 0.25)
+    max_cycles = 1 + recycle_attempts
+    page = _page_for_use("fetch_search_page_html")
+    trace = []
+    last_error = ""
+    last_html = ""
+
+    for cycle in range(1, max_cycles + 1):
+        if cycle > 1:
+            trace.append({"cycle": cycle, "method": "restart", "previous_error": last_error})
+            _restart_page("fetch_search_page_payload_error")
+            page = _page_for_use("fetch_search_page_retry")
+
+        for attempt in range(1, attempts + 1):
+            method, nav_error = _trigger_search_navigation(page, url, refresh=attempt > 1)
+
+            wait_result = _wait_for_magalu_search_payload(page, url, ready_timeout, poll_seconds)
+            html = wait_result.get("html", "")
+            state = wait_result.get("state", {})
+            last_html = html
+            last_error = wait_result.get("error", "") or nav_error or "browser_html_search_payload_failed"
+            trace_item = {
+                "cycle": cycle,
+                "attempt": attempt,
+                "method": method,
+                "navigation_error": nav_error,
+                "url": state.get("url", ""),
+                "length": len(html),
+                "error": wait_result.get("error", ""),
+                "has_next_data": bool(state.get("has_next_data")),
+                "products": state.get("products", 0),
+                "pagination_page": state.get("pagination_page", 0),
+                "pagination_size": state.get("pagination_size", 0),
+            }
+            trace.append(trace_item)
+            if wait_result.get("success"):
+                _stop_loading(page)
+                return {"success": True, "text": html, "trace": trace, "url": state.get("url", "")}
+
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            if _trace_oom(trace, attempt, page):
+                last_error = "chrome_oom_or_crash_page"
+                break
+
+        _stop_loading(page)
+
+    return {"success": False, "text": last_html, "error": last_error or "browser_fetch_failed", "trace": trace}
+
+
+def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_seconds):
+    deadline = time.perf_counter() + max(0.5, float(timeout_seconds or 0))
+    poll_seconds = max(0.05, float(poll_seconds or 0.25))
+    last_state = {}
+    last_html = ""
+    last_error = ""
+    while time.perf_counter() <= deadline:
+        try:
+            actual_url, html = _page_state(page)
+        except Exception as exc:
+            actual_url = ""
+            html = ""
+            last_error = f"{type(exc).__name__}: {exc}"
+        last_html = html or ""
+        state = _magalu_search_payload_state(expected_url, actual_url, last_html)
+        last_state = state
+        if state.get("valid"):
+            return {"success": True, "html": last_html, "state": state, "error": ""}
+        last_error = state.get("error") or last_error
+        if state.get("blocked") or state.get("too_large"):
+            break
+        time.sleep(poll_seconds)
+    return {"success": False, "html": last_html, "state": last_state, "error": last_error or "browser_html_search_payload_failed"}
+
+
+def _magalu_search_payload_state(expected_url, actual_url, html):
+    state = {
+        "valid": False,
+        "error": "",
+        "url": actual_url or "",
+        "has_next_data": "__NEXT_DATA__" in (html or ""),
+        "products": 0,
+        "pagination_page": 0,
+        "pagination_size": 0,
+        "blocked": False,
+        "too_large": False,
+    }
+    data = extract_next_data(html)
+    if not data:
+        if _is_bad_browser_state(actual_url, html):
+            state["blocked"] = True
+            state["error"] = "browser_html_blocked_or_error_page"
+            return state
+        state["error"] = "browser_html_missing_next_data"
+        return state
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    if isinstance(page_data, dict) and "search" in page_data and page_data.get("search") is None:
+        state["error"] = "browser_html_search_null"
+        return state
+    search = page_data.get("search") if isinstance(page_data, dict) else {}
+    if not isinstance(search, dict):
+        if _is_bad_browser_state(actual_url, html):
+            state["blocked"] = True
+            state["error"] = "browser_html_blocked_or_error_page"
+            return state
+        state["error"] = "browser_html_search_missing"
+        return state
+    products = search.get("products")
+    if not isinstance(products, list) or not products:
+        state["error"] = "browser_html_products_missing"
+        return state
+    pagination = search.get("pagination") if isinstance(search.get("pagination"), dict) else {}
+    payload_page = _safe_int(pagination.get("page"), 0)
+    payload_size = _safe_int(pagination.get("size"), 0)
+    state["products"] = len(products)
+    state["pagination_page"] = payload_page
+    state["pagination_size"] = payload_size
+    requested_page = _requested_search_page(expected_url)
+    if payload_page != requested_page:
+        state["error"] = f"browser_html_page_mismatch:{payload_page}!={requested_page}"
+        return state
+    max_products = _env_int("SEDA_MAGALU_SEARCH_BROWSER_MAX_PRODUCTS", 120)
+    if max_products > 0 and (len(products) > max_products or payload_size > max_products):
+        state["too_large"] = True
+        state["error"] = f"browser_html_too_many_products:{max(len(products), payload_size)}"
+        return state
+    state["valid"] = True
+    return state
+
+
+def _trigger_search_navigation(page, url, refresh=False):
+    if refresh:
+        try:
+            page.run_cdp("Page.reload", ignoreCache=True)
+            return "cdp_reload", ""
+        except Exception as exc:
+            reload_error = f"{type(exc).__name__}: {exc}"
+    else:
+        reload_error = ""
+
+    try:
+        page.run_cdp("Page.navigate", url=url)
+        return "cdp_navigate", reload_error
+    except Exception as exc:
+        cdp_error = f"{type(exc).__name__}: {exc}"
+
+    try:
+        page.get(url, retry=0, interval=0, timeout=_env_float("SEDA_MAGALU_SEARCH_BROWSER_NAV_TIMEOUT", 6))
+        return "get", reload_error or cdp_error
+    except Exception as exc:
+        get_error = f"{type(exc).__name__}: {exc}"
+        return "navigation_failed", "; ".join(item for item in (reload_error, cdp_error, get_error) if item)
+
+
+def _requested_search_page(url):
+    query = parse_qs(urlparse(str(url or "")).query)
+    raw = (query.get("page") or ["1"])[0]
+    return _safe_int(raw, 1)
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _env_int(name, default):
