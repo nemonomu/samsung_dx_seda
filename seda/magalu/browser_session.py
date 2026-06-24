@@ -1,4 +1,5 @@
 import atexit
+import html as html_module
 import json
 import os
 import time
@@ -291,6 +292,10 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 "products": state.get("products", 0),
                 "pagination_page": state.get("pagination_page", 0),
                 "pagination_size": state.get("pagination_size", 0),
+                "source": state.get("source", ""),
+                "ready_state": state.get("ready_state", ""),
+                "next_data_length": state.get("next_data_length", 0),
+                "js_error": state.get("js_error", ""),
             }
             trace.append(trace_item)
             if wait_result.get("success"):
@@ -315,25 +320,81 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
     last_html = ""
     last_error = ""
     while time.perf_counter() <= deadline:
-        try:
-            actual_url, html = _page_state(page)
-        except Exception as exc:
-            actual_url = ""
-            html = ""
-            last_error = f"{type(exc).__name__}: {exc}"
-        last_html = html or ""
-        state = _magalu_search_payload_state(expected_url, actual_url, last_html)
+        snapshot = _read_search_next_data_snapshot(page)
+        last_html = snapshot.get("html", "")
+        state = _magalu_search_payload_state(
+            expected_url,
+            snapshot.get("url", ""),
+            last_html,
+            browser_text=snapshot.get("browser_text", ""),
+        )
+        state["source"] = snapshot.get("source", "")
+        state["ready_state"] = snapshot.get("ready_state", "")
+        state["title"] = snapshot.get("title", "")
+        state["next_data_length"] = snapshot.get("next_data_length", 0)
+        if snapshot.get("error"):
+            state["js_error"] = snapshot["error"]
         last_state = state
         if state.get("valid"):
             return {"success": True, "html": last_html, "state": state, "error": ""}
-        last_error = state.get("error") or last_error
+        last_error = state.get("error") or snapshot.get("error") or last_error
         if state.get("blocked") or state.get("too_large"):
             break
         time.sleep(poll_seconds)
     return {"success": False, "html": last_html, "state": last_state, "error": last_error or "browser_html_search_payload_failed"}
 
 
-def _magalu_search_payload_state(expected_url, actual_url, html):
+def _read_search_next_data_snapshot(page):
+    script = """
+return (() => {
+  try {
+    const node = document.querySelector('script#__NEXT_DATA__');
+    const body = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+    return JSON.stringify({
+      href: location.href || '',
+      title: document.title || '',
+      readyState: document.readyState || '',
+      nextData: node ? (node.textContent || '') : '',
+      bodyText: body.slice(0, 3000)
+    });
+  } catch (error) {
+    return JSON.stringify({error: String(error), href: location.href || '', title: document.title || '', readyState: document.readyState || '', nextData: '', bodyText: ''});
+  }
+})()
+"""
+    try:
+        raw = page.run_js(script, timeout=_env_float("SEDA_MAGALU_SEARCH_NEXTDATA_JS_TIMEOUT", 2))
+        payload = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+    except Exception as exc:
+        payload = {"error": f"{type(exc).__name__}: {exc}"}
+    next_data = payload.get("nextData") if isinstance(payload, dict) else ""
+    if not isinstance(next_data, str):
+        next_data = ""
+    html = _next_data_text_to_html(next_data) if next_data.strip() else ""
+    browser_text = "\n".join(
+        str(payload.get(key, "") or "") for key in ("title", "href", "bodyText", "error") if isinstance(payload, dict)
+    )
+    return {
+        "url": str(payload.get("href", "") or "") if isinstance(payload, dict) else "",
+        "title": str(payload.get("title", "") or "") if isinstance(payload, dict) else "",
+        "ready_state": str(payload.get("readyState", "") or "") if isinstance(payload, dict) else "",
+        "html": html,
+        "browser_text": browser_text,
+        "next_data_length": len(next_data),
+        "source": "script_text" if next_data.strip() else "script_text_missing",
+        "error": str(payload.get("error", "") or "") if isinstance(payload, dict) else "",
+    }
+
+
+def _next_data_text_to_html(next_data_text):
+    return (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + html_module.escape(str(next_data_text or ""), quote=False)
+        + "</script>"
+    )
+
+
+def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""):
     state = {
         "valid": False,
         "error": "",
@@ -347,7 +408,7 @@ def _magalu_search_payload_state(expected_url, actual_url, html):
     }
     data = extract_next_data(html)
     if not data:
-        if _is_bad_browser_state(actual_url, html):
+        if _is_bad_browser_state(actual_url, f"{browser_text}\n{html}"):
             state["blocked"] = True
             state["error"] = "browser_html_blocked_or_error_page"
             return state
@@ -361,7 +422,7 @@ def _magalu_search_payload_state(expected_url, actual_url, html):
         return state
     search = page_data.get("search") if isinstance(page_data, dict) else {}
     if not isinstance(search, dict):
-        if _is_bad_browser_state(actual_url, html):
+        if _is_bad_browser_state(actual_url, f"{browser_text}\n{html}"):
             state["blocked"] = True
             state["error"] = "browser_html_blocked_or_error_page"
             return state
