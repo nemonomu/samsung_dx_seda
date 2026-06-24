@@ -165,10 +165,17 @@ def _translate_pickup(text):
 
 
 def _translate_recommendation(text):
-    match = re.search(r"(\d+(?:[.,]\d+)?%)\s+dos\s+clientes\s+recomendam", _normalize(text), re.I)
+    match = re.search(r"(\d+(?:[.,]\d+)?)%\s+dos\s+clientes\s+recomendam", _normalize(text), re.I)
     if match:
-        return f"{match.group(1)} recommend this product"
+        return f"{_integer_percent(match.group(1))}% recommend this product"
     return text
+
+
+def _integer_percent(value):
+    try:
+        return str(int(float(str(value).replace(",", "."))))
+    except ValueError:
+        return str(value)
 
 
 def _translate_ref_refrigerator_type(text):

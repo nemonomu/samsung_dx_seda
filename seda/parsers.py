@@ -188,6 +188,13 @@ def extract_next_data(html_text):
     except ValueError:
         return {}
 
+def magalu_next_search_is_null(html_text):
+    data = extract_next_data(html_text)
+    props = data.get("props") if isinstance(data, dict) else {}
+    page_props = props.get("pageProps") if isinstance(props, dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+    return isinstance(page_data, dict) and "search" in page_data and page_data.get("search") is None
+
 def _price_fields(text):
     prices = BRL_RE.findall(text)
     original = prices[0] if prices else ""

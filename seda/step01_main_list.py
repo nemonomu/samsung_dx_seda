@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from .parsers import parse_listing
+from .parsers import magalu_next_search_is_null, parse_listing
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, page_url, product_identity, run_root, selected_retailers, write_csv
 from .transport import fetch_url, is_blocked_html
 
@@ -64,6 +64,38 @@ def _append_method(current, extra):
     return current if extra in parts else f"{current}+{extra}"
 
 
+def _magalu_browser_fill_search_null_retries():
+    raw = os.getenv("SEDA_MAGALU_BROWSER_FILL_SEARCH_NULL_RETRIES", "1")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
+
+
+def _magalu_browser_fill(url, config, run_id, base_count):
+    attempts = []
+    max_attempts = _magalu_browser_fill_search_null_retries() + 1
+    for attempt in range(1, max_attempts + 1):
+        result = fetch_url(url, mode="browser")
+        attempts.extend(result.attempts)
+        blocked = is_blocked_html(result.text, result.status_code)
+        if not result.text or result.error or blocked:
+            return [], result, attempts, "blocked_or_error"
+        parsed = parse_listing(result.text, config.name, config.base_url, url, run_id=run_id)
+        if magalu_next_search_is_null(result.text):
+            if attempt < max_attempts:
+                print(
+                    f"[seda] {run_id} {config.name} browser fill search=null; retry {attempt}/{max_attempts - 1}",
+                    flush=True,
+                )
+                continue
+            return parsed, result, attempts, "search_null"
+        if len(parsed) <= base_count:
+            return parsed, result, attempts, "no_growth"
+        return parsed, result, attempts, ""
+    return [], None, attempts, "search_null"
+
+
 def main():
     run_id = os.getenv("SEDA_RUN_ID", "main").strip().lower()
     root = run_root() / run_id
@@ -110,16 +142,28 @@ def main():
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
             if _should_magalu_browser_fill(config.name, method, parsed):
-                fill_result = fetch_url(url, mode="browser")
-                fill_blocked = is_blocked_html(fill_result.text, fill_result.status_code)
-                if fill_result.text and not fill_result.error and not fill_blocked:
-                    fill_parsed = parse_listing(fill_result.text, config.name, config.base_url, url, run_id=run_id)
-                    if len(fill_parsed) > len(parsed):
-                        text = fill_result.text
-                        method = _append_method(method, fill_result.method)
-                        attempts = attempts + fill_result.attempts
-                        parsed = fill_parsed
-                        raw_path.write_text(text, encoding="utf-8", errors="ignore")
+                fill_parsed, fill_result, fill_attempts, fill_error = _magalu_browser_fill(
+                    url,
+                    config,
+                    run_id,
+                    len(parsed),
+                )
+                attempts = attempts + fill_attempts
+                if fill_error in {"blocked_or_error", "search_null"}:
+                    failures.append(
+                        {
+                            "retailer": config.name,
+                            "page": page,
+                            "url": url,
+                            "error": f"browser_fill_{fill_error}",
+                            "attempts": fill_attempts,
+                        }
+                    )
+                if not fill_error and fill_result and len(fill_parsed) > len(parsed):
+                    text = fill_result.text
+                    method = _append_method(method, fill_result.method)
+                    parsed = fill_parsed
+                    raw_path.write_text(text, encoding="utf-8", errors="ignore")
             rank_field = "bsr_rank" if run_id == "bsr" else "main_rank"
             for local_index, item in enumerate(parsed, start=1):
                 item["fetch_method"] = method
@@ -169,4 +213,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
