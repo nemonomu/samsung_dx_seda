@@ -252,7 +252,7 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
 
     warmup_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_SECONDS", os.getenv("SEDA_MAGALU_BROWSER_WARMUP_SECONDS", "5")))
     attempts = int(os.getenv("SEDA_MAGALU_SEARCH_BROWSER_ATTEMPTS", "2"))
-    fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1)
+    fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1, validate_search_payload=False)
     last_error = "browser_graphql_failed"
     for page_size in page_sizes:
         payload = _payload(url, page_size)
@@ -282,7 +282,7 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
                 }
             last_error = trace_item["error"] or "empty_products"
             if attempt < attempts:
-                fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1)
+                fetch_page_html(url, wait_seconds=warmup_seconds, attempts=1, validate_search_payload=False)
     return {"success": False, "error": last_error, "text": "", "trace": trace}
 
 

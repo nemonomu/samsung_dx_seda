@@ -119,11 +119,12 @@ def _warmup_page(page, reason):
         return _page_for_use(f"{reason}_retry")
 
 
-def fetch_page_html(url, wait_seconds=None, attempts=None):
+def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_payload=True):
     wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
     attempts = int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_BROWSER_ATTEMPTS", 3)
     search_recycle_attempts = _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1)
-    max_cycles = 1 + search_recycle_attempts if _is_magalu_search_url(url) else 1
+    should_validate_search = validate_search_payload and _is_magalu_search_url(url)
+    max_cycles = 1 + search_recycle_attempts if should_validate_search else 1
     page = _page_for_use("fetch_page_html")
     trace = []
     last_error = ""
@@ -147,7 +148,7 @@ def fetch_page_html(url, wait_seconds=None, attempts=None):
                 trace_item = {"cycle": cycle, "attempt": attempt, "length": len(html), "url": page.url}
                 trace.append(trace_item)
                 if "__NEXT_DATA__" in html or len(html) > 100000:
-                    search_error = _magalu_search_payload_error(url, html)
+                    search_error = _magalu_search_payload_error(url, html) if should_validate_search else ""
                     if search_error:
                         last_error = search_error
                         trace_item["error"] = search_error
