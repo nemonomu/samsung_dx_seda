@@ -1,0 +1,79 @@
+@echo off
+setlocal
+
+cd /d "%~dp0"
+
+if not exist "%~dp0seda\magalu\log" mkdir "%~dp0seda\magalu\log"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
+if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\magalu\log\magalu_tv_ref_ldy_drission_full_%SEDA_RUN_TIMESTAMP%.log"
+if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
+if not defined PYTHONUTF8 set PYTHONUTF8=1
+if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
+
+if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
+if not defined SEDA_TIMEOUT set SEDA_TIMEOUT=25
+if not defined SEDA_FETCH_MODE set SEDA_FETCH_MODE=magalu_graphql_first
+if not defined SEDA_MAGALU_LISTING_FETCH_MODE set SEDA_MAGALU_LISTING_FETCH_MODE=browser
+if not defined SEDA_MAGALU_LISTING_ALLOW_ZENROWS set SEDA_MAGALU_LISTING_ALLOW_ZENROWS=0
+if not defined SEDA_ALLOW_ZENROWS set SEDA_ALLOW_ZENROWS=0
+if not defined SEDA_MAGALU_BROWSER_PROFILE set SEDA_MAGALU_BROWSER_PROFILE=C:/tmp/seda_magalu_drission_profile
+if not defined SEDA_MAGALU_BROWSER_LOAD_MODE set SEDA_MAGALU_BROWSER_LOAD_MODE=eager
+if not defined SEDA_MAGALU_BROWSER_BASE_TIMEOUT set SEDA_MAGALU_BROWSER_BASE_TIMEOUT=30
+if not defined SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT set SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT=30
+if not defined SEDA_MAGALU_BROWSER_SCRIPT_TIMEOUT set SEDA_MAGALU_BROWSER_SCRIPT_TIMEOUT=30
+if not defined SEDA_MAGALU_SEARCH_BROWSER_READY_TIMEOUT set SEDA_MAGALU_SEARCH_BROWSER_READY_TIMEOUT=60
+if not defined SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS set SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS=2
+if not defined SEDA_MAGALU_SEARCH_BROWSER_POLL_SECONDS set SEDA_MAGALU_SEARCH_BROWSER_POLL_SECONDS=0.5
+if not defined SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS set SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS=1
+if not defined SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS set SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS=0.25
+if not defined SEDA_MAGALU_SEARCH_BROWSER_NAV_TIMEOUT set SEDA_MAGALU_SEARCH_BROWSER_NAV_TIMEOUT=6
+if not defined SEDA_MAGALU_SEARCH_NEXTDATA_JS_TIMEOUT set SEDA_MAGALU_SEARCH_NEXTDATA_JS_TIMEOUT=2
+if not defined SEDA_MAGALU_LISTING_FAIL_FAST set SEDA_MAGALU_LISTING_FAIL_FAST=1
+if not defined SEDA_MAGALU_DETAIL_RETRIES set SEDA_MAGALU_DETAIL_RETRIES=0
+if not defined SEDA_MAGALU_REVIEW_RETRIES set SEDA_MAGALU_REVIEW_RETRIES=0
+if not defined SEDA_MAGALU_REVIEW_INITIAL_SLEEP_SECONDS set SEDA_MAGALU_REVIEW_INITIAL_SLEEP_SECONDS=0
+if not defined SEDA_MAGALU_REVIEW_SLEEP_SECONDS set SEDA_MAGALU_REVIEW_SLEEP_SECONDS=0
+if not defined SEDA_MAGALU_REVIEW_HTML_MAX_PAGES set SEDA_MAGALU_REVIEW_HTML_MAX_PAGES=10
+if not defined SEDA_MAGALU_DETAIL_HTML_FALLBACK set SEDA_MAGALU_DETAIL_HTML_FALLBACK=0
+if not defined SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD set SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD=5
+if not defined SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD set SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD=5
+if not defined SEDA_MAGALU_BROWSER_HTML_ATTEMPTS set SEDA_MAGALU_BROWSER_HTML_ATTEMPTS=1
+if not defined SEDA_MAGALU_PDP_NAV_FALLBACK set SEDA_MAGALU_PDP_NAV_FALLBACK=0
+if not defined SEDA_MAGALU_BROWSER_MAX_USES set SEDA_MAGALU_BROWSER_MAX_USES=50
+if not defined SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS set SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS=1200
+if not defined SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS set SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS=2
+if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT=1
+set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
+
+call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
+call :log "[SEDA] Magalu TV Drission full run started"
+call python -m seda.magalu.magalu_orchestrator --product-line TV --all
+if errorlevel 1 goto :failed_tv
+
+call :log "[SEDA] Magalu REF Drission full run started"
+call python -m seda.magalu.magalu_orchestrator --product-line REF --all
+if errorlevel 1 goto :failed_ref
+
+call :log "[SEDA] Magalu LDY Drission full run started"
+call python -m seda.magalu.magalu_orchestrator --product-line LDY --all
+if errorlevel 1 goto :failed_ldy
+
+call :log "[SEDA] Magalu TV/REF/LDY Drission full run completed"
+exit /b 0
+
+:log
+echo %~1
+>> "%SEDA_RUN_LOG_FILE%" echo %~1
+exit /b 0
+
+:failed_tv
+call :log "[SEDA] Magalu TV Drission full run failed"
+exit /b 1
+
+:failed_ref
+call :log "[SEDA] Magalu REF Drission full run failed"
+exit /b 1
+
+:failed_ldy
+call :log "[SEDA] Magalu LDY Drission full run failed"
+exit /b 1
