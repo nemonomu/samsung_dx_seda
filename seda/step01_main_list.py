@@ -91,6 +91,12 @@ def _safe_int(value, default=0):
         return default
 
 
+def _magalu_listing_fail_fast_enabled(retailer_name):
+    if retailer_name != "Magalu":
+        return False
+    return os.getenv("SEDA_MAGALU_LISTING_FAIL_FAST", "0").lower() in {"1", "true", "yes", "y"}
+
+
 def _magalu_next_search_pagination(html_text):
     data = extract_next_data(html_text)
     props = data.get("props") if isinstance(data, dict) else {}
@@ -218,15 +224,18 @@ def main():
                 attempts = result.attempts
                 error = result.error
             if not text or error:
-                failures.append(
-                    {
-                        "retailer": config.name,
-                        "page": page,
-                        "url": url,
-                        "error": error,
-                        "attempts": attempts,
-                    }
-                )
+                failure = {
+                    "retailer": config.name,
+                    "page": page,
+                    "url": url,
+                    "error": error,
+                    "attempts": attempts,
+                }
+                failures.append(failure)
+                if _magalu_listing_fail_fast_enabled(config.name):
+                    raise SystemExit(
+                        f"[seda] {run_id} {config.name} page={page} listing fetch failed: {error}"
+                    )
                 continue
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
             magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
