@@ -31,6 +31,9 @@ CSV_COLUMNS = [
     "similar_count",
     "similar_names",
     "error",
+    "graphql_error",
+    "response_preview",
+    "safe_header_names",
     "pdp_url",
     "browser_url",
     "browser_html_len",
@@ -190,7 +193,8 @@ def execute_case(case, profile, timeout, pdp_url, page_state):
     content_type = ""
     error = ""
     try:
-        result = browser_fetch(case["json"], profile, timeout)
+        safe_headers = browser_settable_headers(case.get("headers") or {})
+        result = browser_fetch(case["json"], profile, timeout, safe_headers)
         status_code = int(result.get("status") or 0)
         text = result.get("text") or ""
         content_type = result.get("contentType") or ""
@@ -211,6 +215,8 @@ def execute_case(case, profile, timeout, pdp_url, page_state):
         "bytes": len(text),
         "content_type": content_type,
         "error": error,
+        "response_preview": short(text, 240),
+        "safe_header_names": ",".join(sorted(safe_headers)),
         "pdp_url": pdp_url,
         "browser_url": page_state.get("browser_url", ""),
         "browser_html_len": page_state.get("browser_html_len", 0),
@@ -218,15 +224,17 @@ def execute_case(case, profile, timeout, pdp_url, page_state):
     }
 
 
-def browser_fetch(payload, profile, timeout):
+def browser_fetch(payload, profile, timeout, safe_headers=None):
     from seda.magalu.browser_session import get_page
 
     page = get_page()
+    safe_headers = safe_headers or {}
     script = """
 return (async () => {
   try {
     const payload = arguments[0];
     const profile = arguments[1] || '';
+    const safeHeaders = arguments[2] || {};
     const operation = payload.operationName || '';
     const endpoint = 'https://federation.magazineluiza.com.br/graphql?operationName=' + encodeURIComponent(operation);
     const headers = {
@@ -238,6 +246,11 @@ return (async () => {
     if (profile.indexOf('captured_safe') >= 0) {
       headers['cache-control'] = 'no-cache';
       headers['pragma'] = 'no-cache';
+    }
+    if (profile.indexOf('captured_safe') >= 0) {
+      Object.entries(safeHeaders).forEach(([key, value]) => {
+        if (value) headers[key] = value;
+      });
     }
     const options = {
       method: 'POST',
@@ -262,7 +275,7 @@ return (async () => {
   }
 })()
 """
-    raw = page.run_js(script, payload, profile, timeout=timeout) or "{}"
+    raw = page.run_js(script, payload, profile, safe_headers, timeout=timeout) or "{}"
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
@@ -275,16 +288,23 @@ def summarize_payload(case, text, status_code, content_type):
         "similar_count": 0,
         "similar_names": "",
         "error": "",
+        "graphql_error": "",
     }
+    data = {}
+    if "json" in (content_type or "").lower() and text:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = {}
+    if isinstance(data, dict) and data.get("errors"):
+        base["graphql_error"] = " | ".join(clean_text((item or {}).get("message")) for item in data.get("errors") or [] if isinstance(item, dict))
     if status_code != 200:
         base["error"] = f"http_{status_code}" if status_code else "status_0"
         return base
     if "json" not in (content_type or "").lower():
         base["error"] = "non_json"
         return base
-    try:
-        data = json.loads(text)
-    except ValueError:
+    if not data:
         base["error"] = "invalid_json"
         return base
     if data.get("errors"):
@@ -354,6 +374,36 @@ def ascii_lower(value):
 
     normalized = unicodedata.normalize("NFKD", clean_text(value))
     return normalized.encode("ascii", "ignore").decode("ascii").lower()
+
+
+def browser_settable_headers(headers):
+    allowed = {
+        "accept",
+        "accept-language",
+        "cache-control",
+        "content-type",
+        "pragma",
+        "x-channel-id",
+        "x-channel-name",
+    }
+    blocked = {
+        "authorization",
+        "cookie",
+        "host",
+        "origin",
+        "referer",
+        "set-cookie",
+        "user-agent",
+    }
+    result = {}
+    for key, value in (headers or {}).items():
+        normalized = str(key or "").strip().lower()
+        if not normalized or normalized in blocked or normalized.startswith("sec-"):
+            continue
+        if normalized not in allowed:
+            continue
+        result[normalized] = str(value or "")
+    return result
 
 
 def short(value, limit=120):
