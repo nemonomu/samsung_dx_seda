@@ -1,4 +1,5 @@
 ﻿import json
+import csv
 import os
 import re
 
@@ -8,6 +9,45 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .parsers import BeautifulSoup, clean_text, compact_json, extract_next_data, parse_detail, sku_from_url
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, read_csv, run_root, write_csv
 from .transport import fetch_url, is_blocked_html
+
+
+SUBCALL_TRACE_COLUMNS = [
+    "row_index",
+    "retailer",
+    "item",
+    "sku",
+    "product_url",
+    "subcall",
+    "label",
+    "page",
+    "attempt",
+    "method",
+    "success",
+    "status_code",
+    "length",
+    "has_next_data",
+    "error",
+    "detail",
+]
+
+REVIEW_PAGE_TRACE_COLUMNS = [
+    "row_index",
+    "retailer",
+    "item",
+    "sku",
+    "product_url",
+    "review_url",
+    "page",
+    "method",
+    "status_code",
+    "length",
+    "has_next_data",
+    "parsed_descriptions",
+    "new_descriptions",
+    "total_reviews_after",
+    "target",
+    "error",
+]
 
 
 def _base_url(retailer):
@@ -49,6 +89,136 @@ def _metric_int(value):
         return int(float(text))
     except ValueError:
         return -1
+
+
+def _trace_enabled():
+    return os.getenv("SEDA_DETAIL_TRACE", "1").lower() not in {"0", "false", "no", "n"}
+
+
+def _trace_row_base(row, row_index, product_url):
+    return {
+        "row_index": row_index,
+        "retailer": row.get("retailer", ""),
+        "item": row.get("item", ""),
+        "sku": row.get("sku", ""),
+        "product_url": product_url or row.get("product_url", ""),
+    }
+
+
+def _compact_trace_value(value, limit=500):
+    if value in ("", None):
+        return ""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = str(value)
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _record_subcall(trace_rows, row, row_index, product_url, subcall, **values):
+    if trace_rows is None:
+        return
+    record = _trace_row_base(row, row_index, product_url)
+    record.update(
+        {
+            "subcall": subcall,
+            "label": values.get("label", ""),
+            "page": values.get("page", ""),
+            "attempt": values.get("attempt", ""),
+            "method": values.get("method", ""),
+            "success": int(bool(values.get("success"))),
+            "status_code": values.get("status_code", ""),
+            "length": values.get("length", ""),
+            "has_next_data": values.get("has_next_data", ""),
+            "error": _compact_trace_value(values.get("error", "")),
+            "detail": _compact_trace_value(values.get("detail", "")),
+        }
+    )
+    trace_rows.append(record)
+
+
+def _record_result_trace(trace_rows, row, row_index, product_url, subcall, result, success=None, detail=""):
+    if trace_rows is None:
+        return
+    result = result or {}
+    overall_success = bool(result.get("success")) if success is None else bool(success)
+    trace = result.get("trace") or []
+    if not trace:
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            subcall,
+            success=overall_success,
+            error=result.get("error", ""),
+            detail=detail,
+        )
+        return
+    for item in trace:
+        try:
+            status_code = int(item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        item_success = not item.get("error")
+        if status_code:
+            item_success = item_success and 200 <= status_code < 300
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            subcall,
+            label=item.get("label", ""),
+            page=item.get("page", ""),
+            attempt=item.get("attempt", ""),
+            method=item.get("method", ""),
+            success=item_success,
+            status_code=item.get("status_code", ""),
+            length=item.get("length", ""),
+            error=item.get("error", ""),
+            detail=item.get("errors", f"{detail}; overall_success:{int(overall_success)}" if detail else f"overall_success:{int(overall_success)}"),
+        )
+
+
+def _record_review_page_trace(trace_rows, row, row_index, product_url, review_url, item):
+    if trace_rows is None:
+        return
+    record = _trace_row_base(row, row_index, product_url)
+    record.update(
+        {
+            "review_url": review_url,
+            "page": item.get("page", ""),
+            "method": item.get("method", ""),
+            "status_code": item.get("status_code", ""),
+            "length": item.get("length", ""),
+            "has_next_data": int(bool(item.get("has_next_data"))),
+            "parsed_descriptions": item.get("descriptions", 0),
+            "new_descriptions": item.get("new_descriptions", 0),
+            "total_reviews_after": item.get("total_reviews_after", ""),
+            "target": item.get("target", ""),
+            "error": _compact_trace_value(item.get("error", "")),
+        }
+    )
+    trace_rows.append(record)
+
+
+def _write_trace_csv(path, rows, columns):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows):
+    if not _trace_enabled():
+        return
+    trace_dir = root / "detail" / "trace"
+    _write_trace_csv(trace_dir / "subcall_trace.csv", subcall_trace_rows, SUBCALL_TRACE_COLUMNS)
+    _write_trace_csv(trace_dir / "magalu_review_page_trace.csv", review_page_trace_rows, REVIEW_PAGE_TRACE_COLUMNS)
 
 
 def _magalu_review_target(row):
@@ -139,21 +309,42 @@ def _magalu_review_page_url(review_url, page):
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
-def _merge_magalu_reviews(row, product_url):
+def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return None
     if os.getenv("SEDA_MAGALU_REVIEW_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "review_graphql", success=False, error="disabled")
         return None
     existing_review_count = _review_count(row.get("detailed_review_content"))
     review_limit = int(os.getenv("SEDA_MAGALU_REVIEW_LIMIT", "20"))
     if existing_review_count >= review_limit:
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "review_graphql",
+            success=True,
+            detail=f"already_has_reviews:{existing_review_count}",
+        )
         return None
     if existing_review_count and os.getenv("SEDA_MAGALU_REVIEW_GRAPHQL_AFTER_HTML", "0").lower() not in {"1", "true", "yes", "y"}:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_html_{existing_review_count}")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "review_graphql",
+            success=False,
+            error="skipped_existing_html_reviews",
+            detail=f"existing_review_count:{existing_review_count}",
+        )
         return None
     if os.getenv("SEDA_MAGALU_SKIP_REVIEW_WITHOUT_RATING", "1").lower() not in {"0", "false", "no", "n"}:
         if not row.get("star_rating") and not row.get("count_of_star_ratings"):
             row["parse_status"] = _append_token(row.get("parse_status", ""), "reviews_skipped_no_rating")
+            _record_subcall(trace_rows, row, row_index, product_url, "review_graphql", success=False, error="skipped_no_rating")
             return None
 
     from .magalu.review_api import fetch_product_rating
@@ -168,6 +359,7 @@ def _merge_magalu_reviews(row, product_url):
     if limit <= 0:
         return None
     result = fetch_product_rating(sku_from_url(product_url) or row.get("sku"), limit=limit, context_url=product_url)
+    _record_result_trace(trace_rows, row, row_index, product_url, "review_graphql", result, detail=f"limit:{limit}")
     reviews = result.get("reviews") or []
     if reviews:
         row["detailed_review_content"] = compact_json(reviews)
@@ -314,16 +506,18 @@ def _metric_text(value):
     return f"{number:g}"
 
 
-def _magalu_graphql_detail(row, product_url):
+def _magalu_graphql_detail(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return None
     if os.getenv("SEDA_MAGALU_DETAIL_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "detail_graphql", success=False, error="disabled")
         return None
 
     from .magalu.detail_api import fetch_detail
 
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
     result = fetch_detail(item_id, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
+    _record_result_trace(trace_rows, row, row_index, product_url, "detail_graphql", result, detail=f"item_id:{item_id}")
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
@@ -333,10 +527,11 @@ def _magalu_graphql_detail(row, product_url):
     return result
 
 
-def _merge_magalu_zenrows_detail(row, product_url):
+def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return False
     if os.getenv("SEDA_MAGALU_ZENROWS_DETAIL_FALLBACK", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "zenrows_detail", success=False, error="disabled")
         return False
     try:
         from .magalu.zenrows_client import fetch_pdp_rendered_html
@@ -344,10 +539,23 @@ def _merge_magalu_zenrows_detail(row, product_url):
         result = fetch_pdp_rendered_html(product_url)
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"zenrows_detail_error:{type(exc).__name__}")
+        _record_subcall(trace_rows, row, row_index, product_url, "zenrows_detail", success=False, error=f"{type(exc).__name__}: {exc}")
         return False
     token = f"zenrows_detail:{result.profile}:{result.estimated_multiplier}"
     if result.error:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:{result.error}")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_detail",
+            method=token,
+            success=False,
+            status_code=getattr(result, "status_code", ""),
+            length=len(result.text or ""),
+            error=result.error,
+        )
         return False
     detail = parse_detail(result.text or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
     meaningful_keys = (
@@ -367,12 +575,36 @@ def _merge_magalu_zenrows_detail(row, product_url):
     )
     if not any(detail.get(key) for key in meaningful_keys):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:empty_detail")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_detail",
+            method=token,
+            success=False,
+            status_code=getattr(result, "status_code", ""),
+            length=len(result.text or ""),
+            error="empty_detail",
+        )
         return False
     _merge_non_empty(row, detail)
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
     cost = (result.headers or {}).get("X-Request-Cost", "")
     status = "zenrows_detail_html" if not cost else f"zenrows_detail_html_cost:{cost}"
     row["parse_status"] = _append_token(row.get("parse_status", ""), status)
+    _record_subcall(
+        trace_rows,
+        row,
+        row_index,
+        product_url,
+        "zenrows_detail",
+        method=token,
+        success=True,
+        status_code=getattr(result, "status_code", ""),
+        length=len(result.text or ""),
+        detail=status,
+    )
     return True
 
 def _retry_magalu_shipping_blanks(row, product_url):
@@ -448,7 +680,7 @@ def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):
     return rows
 
 
-def _merge_magalu_pdp_html(row, product_url):
+def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return
     try:
@@ -468,17 +700,33 @@ def _merge_magalu_pdp_html(row, product_url):
     needs_similar = not row.get("retailer_sku_name_similar")
     needs_specs = not row.get("screen_size") or not row.get("estimated_annual_electricity_use")
     if not needs_summary and not needs_similar and not needs_reviews and not needs_rating and not needs_specs:
+        _record_subcall(trace_rows, row, row_index, product_url, "pdp_html", success=True, error="", detail="not_needed")
         return
     if os.getenv("SEDA_MAGALU_PDP_HTML_FETCH", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "pdp_html", success=False, error="disabled")
         return
     result = _fetch_magalu_next_html(product_url, label="pdp")
+    text = result.get("text") or ""
+    _record_subcall(
+        trace_rows,
+        row,
+        row_index,
+        product_url,
+        "pdp_html",
+        label=result.get("label", ""),
+        method=result.get("method", ""),
+        success=result.get("status_code") == 200 and "__NEXT_DATA__" in text,
+        status_code=result.get("status_code", 0),
+        length=len(text),
+        has_next_data=int("__NEXT_DATA__" in text),
+        error=result.get("error", ""),
+    )
     if result.get("status_code") != 200 or "__NEXT_DATA__" not in (result.get("text") or ""):
-        text = result.get("text") or ""
         row["parse_status"] = _append_token(
             row.get("parse_status", ""),
             f"pdp_html_failed:{result.get('status_code', 0)}:len={len(text)}:next={int('__NEXT_DATA__' in text)}",
         )
-        if _merge_magalu_zenrows_pdp_html(row, product_url):
+        if _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=trace_rows, row_index=row_index):
             return
         return
     detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
@@ -499,21 +747,24 @@ def _merge_magalu_pdp_html(row, product_url):
             row[key] = detail[key]
     if _merge_magalu_exact_html_specs(row, result.get("text") or ""):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_specs")
-    if _merge_magalu_shipping_from_next_data(row, result.get("text") or "", product_url):
+    if _merge_magalu_shipping_from_next_data(row, result.get("text") or "", product_url, trace_rows=trace_rows, row_index=row_index):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_shipping")
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), f"{result.get('method') or 'unknown'}_pdp_html")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html")
 
 
-def _merge_magalu_similar(row, product_url):
+def _merge_magalu_similar(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return False
     if row.get("retailer_sku_name_similar"):
+        _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=True, detail="already_has_similar")
         return False
     if os.getenv("SEDA_MAGALU_SIMILAR_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=False, error="disabled")
         return False
     item_id = sku_from_url(product_url) or row.get("item")
     if not item_id:
+        _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=False, error="missing_item_id")
         return False
     try:
         from .magalu.detail_api import fetch_similar_names
@@ -521,7 +772,9 @@ def _merge_magalu_similar(row, product_url):
         result = fetch_similar_names(item_id, context_url=product_url)
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"similar_graphql_error:{type(exc).__name__}")
+        _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=False, error=f"{type(exc).__name__}: {exc}")
         return False
+    _record_result_trace(trace_rows, row, row_index, product_url, "similar_graphql", result, detail=f"item_id:{item_id}")
     names = result.get("names") or []
     if not names:
         row["parse_status"] = _append_token(row.get("parse_status", ""), "similar_graphql_empty")
@@ -556,15 +809,18 @@ def _magalu_exact_html_specs(html_text):
     }
 
 
-def _merge_magalu_shipping_from_next_data(row, html_text, product_url):
+def _merge_magalu_shipping_from_next_data(row, html_text, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return False
     if os.getenv("SEDA_MAGALU_SHIPPING_FROM_SSR_ITEM", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=False, error="disabled")
         return False
     if row.get("delivery_availability") and row.get("pick_up_availability"):
+        _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=True, detail="already_has_shipping")
         return False
     item = _magalu_next_item_from_html(html_text)
     if not item:
+        _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=False, error="missing_ssr_item")
         return False
     try:
         from .magalu.detail_api import fetch_shipping
@@ -572,7 +828,9 @@ def _merge_magalu_shipping_from_next_data(row, html_text, product_url):
         result = fetch_shipping(item, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"shipping_ssr_item_error:{type(exc).__name__}")
+        _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=False, error=f"{type(exc).__name__}: {exc}")
         return False
+    _record_result_trace(trace_rows, row, row_index, product_url, "shipping_ssr_item", result, detail=f"item_id:{item.get('id', '')}")
     updated = False
     if result.get("delivery") and not row.get("delivery_availability"):
         row["delivery_availability"] = result["delivery"]
@@ -641,20 +899,32 @@ def _norm_spec_label(value):
     return normalized.encode("ascii", "ignore").decode("ascii").casefold()
 
 
-def _merge_magalu_review_pages(row, product_url):
+def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return None
     if os.getenv("SEDA_MAGALU_REVIEW_HTML_PAGES", "1").lower() in {"0", "false", "no", "n"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "review_html_pages", success=False, error="disabled")
         return None
     target = _magalu_review_target(row)
     if target <= 0:
+        _record_subcall(trace_rows, row, row_index, product_url, "review_html_pages", success=True, detail=f"target:{target}")
         return {"success": True, "reviews": [], "trace": [], "method": "review_html_pages", "target": target}
     reviews = _review_values(row.get("detailed_review_content"))
     if len(reviews) >= target:
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "review_html_pages",
+            success=True,
+            detail=f"already_has_reviews:{len(reviews)}/{target}",
+        )
         return {"success": True, "reviews": reviews[:target], "trace": [], "method": "review_html_pages", "target": target}
     review_url = _magalu_review_url(product_url)
     if not review_url:
         row["parse_status"] = _append_token(row.get("parse_status", ""), "review_html_missing_url")
+        _record_subcall(trace_rows, row, row_index, product_url, "review_html_pages", success=False, error="missing_review_url")
         return {"success": False, "reviews": reviews, "trace": [], "method": "review_html_pages", "target": target, "error": "missing_review_url"}
 
     max_pages = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_MAX_PAGES", "10"))
@@ -673,6 +943,7 @@ def _merge_magalu_review_pages(row, product_url):
             "length": len(result.get("text") or ""),
             "has_next_data": "__NEXT_DATA__" in (result.get("text") or ""),
             "error": result.get("error", ""),
+            "target": target,
         }
         if result.get("status_code") == 200 and "__NEXT_DATA__" in (result.get("text") or ""):
             detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
@@ -692,7 +963,9 @@ def _merge_magalu_review_pages(row, product_url):
                 if len(reviews) >= target:
                     break
             trace_item["new_descriptions"] = added
+        trace_item["total_reviews_after"] = len(reviews)
         trace.append(trace_item)
+        _record_review_page_trace(review_page_trace_rows, row, row_index, product_url, review_url, trace_item)
         if len(reviews) >= target:
             break
 
@@ -704,13 +977,24 @@ def _merge_magalu_review_pages(row, product_url):
         last = trace[-1]
         reason = last.get("error") or "missing_product_rating"
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"review_html_pages_failed:{reason}")
-    return {"success": len(reviews) >= target, "reviews": reviews[:target], "trace": trace, "method": "review_html_pages", "target": target}
+    result = {"success": len(reviews) >= target, "reviews": reviews[:target], "trace": trace, "method": "review_html_pages", "target": target}
+    _record_result_trace(
+        trace_rows,
+        row,
+        row_index,
+        product_url,
+        "review_html_pages",
+        result,
+        detail=f"reviews:{len(reviews[:target])}/{target}",
+    )
+    return result
 
 
-def _merge_magalu_zenrows_pdp_html(row, product_url):
+def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=""):
     if row.get("retailer") != "Magalu":
         return False
     if os.getenv("SEDA_MAGALU_ZENROWS_PDP_FALLBACK", "0").lower() not in {"1", "true", "yes", "y"}:
+        _record_subcall(trace_rows, row, row_index, product_url, "zenrows_pdp_html", success=False, error="disabled")
         return False
     try:
         from .magalu.zenrows_client import fetch_next_data_html
@@ -718,13 +1002,39 @@ def _merge_magalu_zenrows_pdp_html(row, product_url):
         result = fetch_next_data_html(product_url)
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"zenrows_pdp_error:{type(exc).__name__}")
+        _record_subcall(trace_rows, row, row_index, product_url, "zenrows_pdp_html", success=False, error=f"{type(exc).__name__}: {exc}")
         return False
     token = f"zenrows_pdp:{result.profile}:{result.estimated_multiplier}"
     if result.error:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:{result.error}")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_pdp_html",
+            method=token,
+            success=False,
+            status_code=result.status_code,
+            length=len(result.text or ""),
+            error=result.error,
+        )
         return False
     if not result.success or "__NEXT_DATA__" not in (result.text or ""):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:missing_next_data")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_pdp_html",
+            method=token,
+            success=False,
+            status_code=result.status_code,
+            length=len(result.text or ""),
+            has_next_data=int("__NEXT_DATA__" in (result.text or "")),
+            error="missing_next_data",
+        )
         return False
     detail = parse_detail(result.text or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
     merged = False
@@ -737,6 +1047,18 @@ def _merge_magalu_zenrows_pdp_html(row, product_url):
         merged = True
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
     row["parse_status"] = _append_token(row.get("parse_status", ""), "zenrows_pdp_html")
+    _record_subcall(
+        trace_rows,
+        row,
+        row_index,
+        product_url,
+        "zenrows_pdp_html",
+        method=token,
+        success=True,
+        status_code=result.status_code,
+        length=len(result.text or ""),
+        has_next_data=1,
+    )
     return merged
 
 
@@ -820,6 +1142,8 @@ def main():
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
     enriched = []
+    subcall_trace_rows = []
+    review_page_trace_rows = []
     if skip:
         enriched = read_csv(output)[:skip] if os.path.exists(output) else []
         rows = rows[skip:]
@@ -836,16 +1160,18 @@ def main():
             row["seller_id"] = _magalu_seller_id(row, url)
         if not url:
             row["parse_status"] = "missing_product_url"
+            _record_subcall(subcall_trace_rows, row, index, url, "detail_row", success=False, error="missing_product_url")
             enriched.append(row)
             continue
         _clear_magalu_listing_metrics(row)
-        graph_result = _magalu_graphql_detail(row, url)
+        graph_result = _magalu_graphql_detail(row, url, trace_rows=subcall_trace_rows, row_index=index)
         detail_done = bool(graph_result and graph_result.get("success"))
         if row.get("retailer") == "Magalu" and graph_result is not None:
             if detail_done:
                 magalu_detail_blocked_streak = 0
             elif _has_blocked_graphql_trace(graph_result):
                 magalu_detail_blocked_streak += 1
+                _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
                 _abort_on_magalu_blocked_streak(
                     "detail",
                     magalu_detail_blocked_streak,
@@ -857,9 +1183,22 @@ def main():
                 magalu_detail_blocked_streak = 0
         result = None
         if not detail_done and row.get("retailer") == "Magalu":
-            detail_done = _merge_magalu_zenrows_detail(row, url)
+            detail_done = _merge_magalu_zenrows_detail(row, url, trace_rows=subcall_trace_rows, row_index=index)
         if not detail_done and _fallback_fetch_enabled_for_row(row, fallback_fetch):
             result = fetch_url(_detail_fetch_url(row, url))
+            _record_subcall(
+                subcall_trace_rows,
+                row,
+                index,
+                url,
+                "detail_fallback_fetch",
+                method=result.method,
+                success=bool(result.text and not result.error and not is_blocked_html(result.text, result.status_code)),
+                status_code=result.status_code,
+                length=len(result.text or ""),
+                has_next_data=int("__NEXT_DATA__" in (result.text or "")),
+                error=result.error,
+            )
             raw_dir = root / "detail" / "raw" / row.get("retailer", "unknown").lower().replace(" ", "_")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{index:04d}_{_safe_filename(row.get('sku') or 'sku')}.html"
@@ -874,12 +1213,14 @@ def main():
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_fetch_failed:{detail_error}")
         elif not detail_done:
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_fetch_skipped")
-        review_result = _merge_magalu_reviews(row, url)
+            _record_subcall(subcall_trace_rows, row, index, url, "detail_fallback_fetch", success=False, error="skipped")
+        review_result = _merge_magalu_reviews(row, url, trace_rows=subcall_trace_rows, row_index=index)
         if row.get("retailer") == "Magalu" and review_result is not None:
             if review_result.get("success"):
                 magalu_review_blocked_streak = 0
             elif _has_blocked_graphql_trace(review_result):
                 magalu_review_blocked_streak += 1
+                _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
                 _abort_on_magalu_blocked_streak(
                     "review",
                     magalu_review_blocked_streak,
@@ -889,9 +1230,15 @@ def main():
                 )
             else:
                 magalu_review_blocked_streak = 0
-        _merge_magalu_pdp_html(row, url)
-        _merge_magalu_similar(row, url)
-        _merge_magalu_review_pages(row, url)
+        _merge_magalu_pdp_html(row, url, trace_rows=subcall_trace_rows, row_index=index)
+        _merge_magalu_similar(row, url, trace_rows=subcall_trace_rows, row_index=index)
+        _merge_magalu_review_pages(
+            row,
+            url,
+            trace_rows=subcall_trace_rows,
+            review_page_trace_rows=review_page_trace_rows,
+            row_index=index,
+        )
         _merge_casas_bahia_apis(row)
         enriched.append(row)
         method = row.get("fetch_method") or (result.method if result else "")
@@ -903,9 +1250,11 @@ def main():
         )
         if checkpoint_every and index % checkpoint_every == 0:
             write_csv(output, enriched, columns=OUTPUT_COLUMNS)
+            _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
             print(f"[seda] checkpoint {output} rows={len(enriched)}", flush=True)
     enriched = _backfill_magalu_shipping_blanks(enriched, output, checkpoint_every=checkpoint_every)
     write_csv(output, enriched, columns=OUTPUT_COLUMNS)
+    _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
     print(f"[seda] wrote {output} rows={len(enriched)}")
 
 
