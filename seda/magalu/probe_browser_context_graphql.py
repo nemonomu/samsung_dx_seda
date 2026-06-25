@@ -229,10 +229,11 @@ def browser_fetch(payload, profile, timeout, safe_headers=None):
 
     page = get_page()
     safe_headers = safe_headers or {}
+    payload_text = json.dumps(payload, ensure_ascii=False)
     script = """
 return (async () => {
   try {
-    const payload = arguments[0];
+    const payload = JSON.parse(arguments[0]);
     const profile = arguments[1] || '';
     const safeHeaders = arguments[2] || {};
     const operation = payload.operationName || '';
@@ -275,7 +276,7 @@ return (async () => {
   }
 })()
 """
-    raw = page.run_js(script, payload, profile, safe_headers, timeout=timeout) or "{}"
+    raw = page.run_js(script, payload_text, profile, safe_headers, timeout=timeout) or "{}"
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
