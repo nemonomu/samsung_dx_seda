@@ -2,6 +2,7 @@
 setlocal
 
 cd /d "%~dp0"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 
 rem Shared defaults for stable RDP full runs.
 if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
@@ -12,6 +13,7 @@ set SEDA_RUN_ROOT=
 rem Magalu defaults.
 if not defined SEDA_MAGALU_FETCH_MODE set SEDA_MAGALU_FETCH_MODE=magalu_graphql_first
 if not defined SEDA_MAGALU_LISTING_FETCH_MODE set SEDA_MAGALU_LISTING_FETCH_MODE=browser
+if not defined SEDA_MAGALU_BROWSER_PROFILE set "SEDA_MAGALU_BROWSER_PROFILE=C:\tmp\seda_magalu_profile_%SEDA_RUN_TIMESTAMP%"
 if not defined SEDA_MAGALU_LISTING_ALLOW_ZENROWS set SEDA_MAGALU_LISTING_ALLOW_ZENROWS=0
 if not defined SEDA_ALLOW_ZENROWS set SEDA_ALLOW_ZENROWS=0
 if not defined SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN set SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN=0
@@ -67,6 +69,7 @@ exit /b 0
 
 :run_magalu
 set "SEDA_FETCH_MODE=%SEDA_MAGALU_FETCH_MODE%"
+echo [SEDA] Magalu browser profile: %SEDA_MAGALU_BROWSER_PROFILE%
 call :run_stage Magalu %~1 seda.magalu.magalu_orchestrator %~1
 exit /b %errorlevel%
 
