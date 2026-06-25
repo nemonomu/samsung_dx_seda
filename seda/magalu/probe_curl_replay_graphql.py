@@ -160,6 +160,7 @@ def parse_curl_block(block):
         payload = json.loads(raw_body)
     except ValueError:
         return None
+    normalize_graphql_payload(payload)
 
     return {
         "url": url,
@@ -303,6 +304,14 @@ def operation_from_url(url):
 def decode_windows_curl(value):
     decoded = re.sub(r"\^(.)", r"\1", str(value or ""))
     return decoded.replace('\\"', '"').rstrip("^")
+
+
+def normalize_graphql_payload(payload):
+    if not isinstance(payload, dict):
+        return
+    query = payload.get("query")
+    if isinstance(query, str):
+        payload["query"] = query.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
 
 
 def data_raw_from_block(block):
