@@ -18,9 +18,17 @@ def _diag_enabled():
     return os.getenv("SEDA_MAGALU_SEARCH_DIAG_LOG", "1").lower() not in {"0", "false", "no", "n"}
 
 
+def _diag_verbose():
+    return os.getenv("SEDA_MAGALU_SEARCH_DIAG_VERBOSE", "0").lower() in {"1", "true", "yes", "y"}
+
+
 def _diag_log(message):
-    if _diag_enabled():
-        print(f"[seda][magalu-search] {message}", flush=True)
+    if not _diag_enabled():
+        return
+    text = str(message or "")
+    if not _diag_verbose() and not text.startswith("stage="):
+        return
+    print(f"[seda][magalu-search] {text}", flush=True)
 
 
 def _short_text(value, limit=160):
@@ -284,21 +292,38 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
     trace = []
     last_error = ""
     last_html = ""
+    requested_page = _requested_search_page(url)
+    expected_sort_type, expected_sort_orientation = _expected_search_sort(url)
 
     _diag_log(
         "fetch start "
         f"attempts={attempts} recycle_attempts={recycle_attempts} "
         f"ready_timeout={ready_timeout}s poll={poll_seconds}s"
     )
+    _diag_log(
+        "stage=listing "
+        f"page={requested_page} sort={expected_sort_type}:{expected_sort_orientation} "
+        f"action=next_data status=start attempts={attempts} timeout={ready_timeout:g}s"
+    )
     for cycle in range(1, max_cycles + 1):
         if cycle > 1:
             trace.append({"cycle": cycle, "method": "restart", "previous_error": last_error})
             _diag_log(f"restart cycle={cycle} previous_error={_short_text(last_error)}")
+            _diag_log(
+                "stage=listing "
+                f"page={requested_page} action=browser_restart status=retry "
+                f"cycle={cycle}/{max_cycles} previous={_short_text(last_error, 80)}"
+            )
             _restart_page("fetch_search_page_payload_error")
             page = _page_for_use("fetch_search_page_retry")
 
         for attempt in range(1, attempts + 1):
             _diag_log(f"navigation start cycle={cycle} attempt={attempt} refresh={int(attempt > 1)}")
+            _diag_log(
+                "stage=listing "
+                f"page={requested_page} action=next_data status=trying "
+                f"attempt={attempt}/{attempts} cycle={cycle}/{max_cycles}"
+            )
             method, nav_error = _trigger_search_navigation(page, url, refresh=attempt > 1)
             _diag_log(
                 f"navigation triggered cycle={cycle} attempt={attempt} "
@@ -346,6 +371,13 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                     f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
                     f"source={state.get('source', '')}"
                 )
+                _diag_log(
+                    "stage=listing "
+                    f"page={state.get('pagination_page', requested_page)} action=next_data status=success "
+                    f"attempt={attempt}/{attempts} products={state.get('products', 0)} "
+                    f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
+                    f"source={state.get('source', '')}"
+                )
                 return {"success": True, "text": html, "trace": trace, "url": state.get("url", "")}
 
             _diag_log(
@@ -355,6 +387,13 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 f"next_len={state.get('next_data_length', 0)} products={state.get('products', 0)} "
                 f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
                 f"source={state.get('source', '')}"
+            )
+            retry_left = attempt < attempts or cycle < max_cycles
+            _diag_log(
+                "stage=listing "
+                f"page={requested_page} action=next_data status={'retry' if retry_left else 'failed'} "
+                f"attempt={attempt}/{attempts} products={state.get('products', 0)} "
+                f"error={_short_text(last_error, 100)}"
             )
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
@@ -366,6 +405,10 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
         _stop_loading(page)
 
     _diag_log(f"fetch failed final_error={_short_text(last_error)}")
+    _diag_log(
+        "stage=listing "
+        f"page={requested_page} action=next_data status=failed error={_short_text(last_error, 100)}"
+    )
     return {"success": False, "text": last_html, "error": last_error or "browser_fetch_failed", "trace": trace}
 
 

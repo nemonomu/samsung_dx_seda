@@ -26,7 +26,7 @@ def _default_pages(is_bsr):
     if retailer == "casas_bahia":
         return "15" if is_bsr else "20"
     if retailer == "magalu":
-        return "3" if is_bsr else "11"
+        return "3" if is_bsr else "10"
     return "3" if is_bsr else "9"
 
 
