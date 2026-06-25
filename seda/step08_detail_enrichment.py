@@ -1097,6 +1097,20 @@ def _has_blocked_graphql_trace(result):
     return False
 
 
+def _is_expected_magalu_item_query_block(result):
+    if not result or result.get("error") != "item_query_failed":
+        return False
+    trace = result.get("trace") or []
+    if not trace:
+        return False
+    for trace_item in trace:
+        label = str(trace_item.get("label") or "")
+        method = str(trace_item.get("method") or "")
+        if label != "item" or method != "requests":
+            return False
+    return _has_blocked_graphql_trace(result)
+
+
 def _abort_on_magalu_blocked_streak(kind, streak, threshold, output, rows):
     if threshold <= 0 or streak < threshold:
         return
@@ -1169,7 +1183,7 @@ def main():
         if row.get("retailer") == "Magalu" and graph_result is not None:
             if detail_done:
                 magalu_detail_blocked_streak = 0
-            elif _has_blocked_graphql_trace(graph_result):
+            elif _has_blocked_graphql_trace(graph_result) and not _is_expected_magalu_item_query_block(graph_result):
                 magalu_detail_blocked_streak += 1
                 _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
                 _abort_on_magalu_blocked_streak(
