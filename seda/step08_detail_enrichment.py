@@ -91,7 +91,7 @@ def _fetch_magalu_next_html(url, label="html"):
             last["error"] = f"requests_missing_next_data:{response.status_code}:len={len(response.text or '')}"
         except Exception as exc:
             last = {"status_code": 0, "text": "", "error": f"requests_error:{type(exc).__name__}: {exc}", "method": "requests", "label": label}
-    if os.getenv("SEDA_MAGALU_HTML_BROWSER_FALLBACK", "1").lower() in {"0", "false", "no", "n"}:
+    if os.getenv("SEDA_MAGALU_HTML_BROWSER_FALLBACK", "0").lower() in {"0", "false", "no", "n"}:
         return last
     try:
         from .magalu.browser_session import fetch_html
@@ -485,6 +485,9 @@ def _merge_magalu_pdp_html(row, product_url):
     for key in (
         "summarized_review_content",
         "retailer_sku_name_similar",
+        "screen_size",
+        "estimated_annual_electricity_use",
+        "model_year",
         "star_rating",
         "count_of_star_ratings",
         "count_of_reviews",
@@ -797,8 +800,6 @@ def main():
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_fetch_failed:{detail_error}")
         elif not detail_done:
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_fetch_skipped")
-        _merge_magalu_pdp_html(row, url)
-        _merge_magalu_review_pages(row, url)
         review_result = _merge_magalu_reviews(row, url)
         if row.get("retailer") == "Magalu" and review_result is not None:
             if review_result.get("success"):
@@ -814,6 +815,8 @@ def main():
                 )
             else:
                 magalu_review_blocked_streak = 0
+        _merge_magalu_pdp_html(row, url)
+        _merge_magalu_review_pages(row, url)
         _merge_casas_bahia_apis(row)
         enriched.append(row)
         method = row.get("fetch_method") or (result.method if result else "")

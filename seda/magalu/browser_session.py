@@ -361,6 +361,10 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
 
 
 def _read_search_next_data_snapshot(page):
+    return _read_next_data_snapshot(page)
+
+
+def _read_next_data_snapshot(page):
     cdp_payload, cdp_source, cdp_error = _read_search_next_data_with_cdp(page)
     cdp_has_next_data = _payload_has_next_data(cdp_payload)
     cdp_has_payload = bool(cdp_payload)
@@ -755,7 +759,14 @@ def fetch_html(url, timeout=None):
     page = _page_for_use("fetch_html")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_HTML_TIMEOUT", 90)
     attempts = _env_int("SEDA_MAGALU_BROWSER_HTML_ATTEMPTS", 2)
-    page = _prepare_js_page(page, "fetch_html_warmup")
+    trace = []
+    current_url, _ = _page_state(page)
+    nav_first = os.getenv("SEDA_MAGALU_HTML_NAV_FIRST", "1").lower() not in {"0", "false", "no", "n"}
+    if nav_first or not _same_page_path(current_url, url):
+        nav_result = _navigate_html_page(page, url, timeout, "browser_navigation_context")
+        trace.extend(nav_result.get("trace") or [])
+        if nav_result.get("text") and "__NEXT_DATA__" in nav_result.get("text", ""):
+            return nav_result
     script = """
 return (async () => {
   try {
@@ -769,7 +780,6 @@ return (async () => {
   }
 })()
 """
-    trace = []
     last = {"status_code": 0, "text": "", "error": "not_attempted"}
     for attempt in range(1, attempts + 1):
         try:
@@ -794,9 +804,10 @@ return (async () => {
         last = {"status_code": status_code, "text": text, "error": error, "trace": trace[:]}
         if status_code == 200 and has_next_data:
             return last
-        page = _warmup_page(page, "fetch_html_retry_warmup")
+        if attempt < attempts:
+            time.sleep(_env_float("SEDA_MAGALU_BROWSER_HTML_RETRY_SLEEP_SECONDS", 0.5))
 
-    if os.getenv("SEDA_MAGALU_PDP_NAV_FALLBACK", "1").lower() not in {"0", "false", "no", "n"}:
+    if os.getenv("SEDA_MAGALU_PDP_NAV_FALLBACK", "0").lower() not in {"0", "false", "no", "n"}:
         try:
             nav_timeout = _env_float("SEDA_MAGALU_PDP_NAV_TIMEOUT", min(timeout, 30))
             page.get(url, timeout=nav_timeout)
@@ -839,6 +850,88 @@ return (async () => {
             )
     last["trace"] = trace
     return last
+
+
+def _navigate_html_page(page, url, timeout, method):
+    trace = []
+    navigation_error = ""
+    try:
+        nav_timeout = _env_float("SEDA_MAGALU_PDP_NAV_TIMEOUT", min(timeout, 30))
+        page.get(url, timeout=nav_timeout)
+    except Exception as exc:
+        navigation_error = f"{type(exc).__name__}: {exc}"
+        _stop_loading(page)
+        trace.append(
+            {
+                "attempt": 1,
+                "method": method,
+                "status_code": 0,
+                "length": 0,
+                "error": navigation_error,
+            }
+        )
+
+    ready_timeout = _env_float("SEDA_MAGALU_PDP_NEXTDATA_READY_TIMEOUT", max(5, min(timeout, 30)))
+    poll_seconds = max(0.05, _env_float("SEDA_MAGALU_PDP_NEXTDATA_POLL_SECONDS", 0.25))
+    deadline = time.perf_counter() + ready_timeout
+    last_snapshot = {}
+    last_error = navigation_error
+    attempt = 1
+    while time.perf_counter() <= deadline:
+        snapshot = _read_next_data_snapshot(page)
+        last_snapshot = snapshot
+        text = snapshot.get("html", "")
+        has_next_data = "__NEXT_DATA__" in text
+        browser_text = snapshot.get("browser_text", "")
+        actual_url = snapshot.get("url", "") or getattr(page, "url", "")
+        blocked = _is_bad_browser_state(actual_url, f"{browser_text}\n{text}")
+        trace_item = {
+            "attempt": attempt,
+            "method": method,
+            "status_code": 200 if text else 0,
+            "length": len(text),
+            "has_next_data": has_next_data,
+            "url": actual_url,
+            "source": snapshot.get("source", ""),
+            "ready_state": snapshot.get("ready_state", ""),
+            "next_data_length": snapshot.get("next_data_length", 0),
+            "cdp_success": snapshot.get("cdp_success", 0),
+            "fallback_used": snapshot.get("fallback_used", 0),
+            "fallback_success": snapshot.get("fallback_success", 0),
+            "error": snapshot.get("error", "") or last_error,
+        }
+        trace.append(trace_item)
+        if has_next_data and not blocked:
+            _stop_loading(page)
+            return {"status_code": 200, "text": text, "error": "", "trace": trace}
+        if blocked:
+            last_error = "browser_html_blocked_or_error_page"
+            break
+        last_error = snapshot.get("error", "") or "navigation_missing_next_data"
+        attempt += 1
+        time.sleep(poll_seconds)
+    _stop_loading(page)
+    text = last_snapshot.get("html", "") if isinstance(last_snapshot, dict) else ""
+    return {
+        "status_code": 200 if text else 0,
+        "text": text,
+        "error": last_error or "navigation_missing_next_data",
+        "trace": trace,
+    }
+
+
+def _same_page_path(left, right):
+    try:
+        left_parsed = urlparse(str(left or ""))
+        right_parsed = urlparse(str(right or ""))
+    except Exception:
+        return False
+    if not left_parsed.netloc or not right_parsed.netloc:
+        return False
+    return (
+        left_parsed.netloc.lower() == right_parsed.netloc.lower()
+        and left_parsed.path.rstrip("/") == right_parsed.path.rstrip("/")
+    )
 
 
 def close_page(force=False):

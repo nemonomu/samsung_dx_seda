@@ -232,9 +232,14 @@ def fetch_search_listing(url, timeout=None):
             return result
 
     if best_direct_result:
-        best_direct_result["trace"] = trace
-        best_direct_result["method"] = "direct_graphql_search_insufficient"
-        return best_direct_result
+        return {
+            "success": False,
+            "error": "invalid_direct_pagination",
+            "text": "",
+            "trace": trace,
+            "products": best_direct_result.get("products", 0),
+            "method": "direct_graphql_search_invalid",
+        }
     return {"success": False, "error": "magalu_search_graphql_failed", "text": "", "trace": trace}
 
 

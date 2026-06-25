@@ -28,6 +28,10 @@ def compact_json(value):
         return ""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+def remove_accents(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii")
+
 def absolute_url(base_url, href):
     if not href:
         return ""

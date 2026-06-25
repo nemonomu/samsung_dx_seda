@@ -179,7 +179,47 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None)
 
 def _request_product_rating(session, variation_id, page, page_size, timeout, retries, retry_sleep_seconds, trace):
     payload = _payload(variation_id, page, page_size)
-    if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(retry_sleep_seconds * attempt)
+        try:
+            response = session.post(GRAPHQL_URL, json=payload, headers=_headers(), timeout=timeout)
+        except Exception as exc:
+            trace.append(
+                {
+                    "page": page,
+                    "attempt": attempt + 1,
+                    "method": "requests",
+                    "status_code": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+
+        trace_item = {
+            "page": page,
+            "attempt": attempt + 1,
+            "method": "requests",
+            "status_code": response.status_code,
+            "length": len(response.text or ""),
+        }
+        trace.append(trace_item)
+        if response.status_code != 200 or "application/json" not in response.headers.get("content-type", ""):
+            trace_item["error"] = "non_json_or_blocked"
+            continue
+
+        try:
+            parsed = response.json()
+        except ValueError:
+            trace_item["error"] = "invalid_json"
+            continue
+
+        product_rating = (parsed.get("data") or {}).get("productRating") or {}
+        if product_rating:
+            return product_rating
+        trace_item["error"] = "missing_product_rating"
+
+    if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}:
         try:
             from .browser_session import graphql_post
 
@@ -208,46 +248,6 @@ def _request_product_rating(session, variation_id, page, page_size, timeout, ret
             if result.get("status_code") == 200 and product_rating:
                 return product_rating
             trace_item["error"] = result.get("error") or ("graphql_errors" if parsed.get("errors") else "missing_product_rating")
-        if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_STRICT", "1").lower() not in {"0", "false", "no", "n"}:
-            return {}
-
-    for attempt in range(retries + 1):
-        if attempt:
-            time.sleep(retry_sleep_seconds * attempt)
-        try:
-            response = session.post(GRAPHQL_URL, json=payload, headers=_headers(), timeout=timeout)
-        except Exception as exc:
-            trace.append(
-                {
-                    "page": page,
-                    "attempt": attempt + 1,
-                    "status_code": 0,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            continue
-
-        trace_item = {
-            "page": page,
-            "attempt": attempt + 1,
-            "status_code": response.status_code,
-            "length": len(response.text or ""),
-        }
-        trace.append(trace_item)
-        if response.status_code != 200 or "application/json" not in response.headers.get("content-type", ""):
-            trace_item["error"] = "non_json_or_blocked"
-            continue
-
-        try:
-            parsed = response.json()
-        except ValueError:
-            trace_item["error"] = "invalid_json"
-            continue
-
-        product_rating = (parsed.get("data") or {}).get("productRating") or {}
-        if product_rating:
-            return product_rating
-        trace_item["error"] = "missing_product_rating"
     return {}
 
 

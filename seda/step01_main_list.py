@@ -55,8 +55,7 @@ def _should_magalu_browser_fill(retailer_name, method, parsed, html_text="", sou
         if payload_ok:
             return False
         return True
-    minimum = _safe_int(os.getenv("SEDA_MAGALU_LISTING_DIRECT_MIN_PARSED_ROWS", "0"), 0)
-    return minimum > 0 and len(parsed) < minimum
+    return False
 
 
 def _append_method(current, extra):
@@ -226,10 +225,28 @@ def _magalu_browser_fill(url, config, run_id, base_count):
         payload_ok, payload_error = _magalu_browser_fill_payload_ok(url, result.text, len(parsed))
         if not payload_ok:
             return parsed, result, attempts, payload_error
-        if len(parsed) <= base_count:
-            return parsed, result, attempts, "no_growth"
         return parsed, result, attempts, ""
     return [], None, attempts, "search_null"
+
+
+def _write_magalu_raw_result(raw_path, root, retailer_key, page, url, result):
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    if result.text and not result.error:
+        raw_path.write_text(result.text, encoding="utf-8", errors="ignore")
+        return
+    failed_dir = root / "raw_failed" / retailer_key
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    diagnostic = {
+        "url": url,
+        "page": page,
+        "method": result.method,
+        "status_code": result.status_code,
+        "error": result.error,
+        "attempts": result.attempts,
+        "text": (result.text or "")[:200000],
+    }
+    failed_path = failed_dir / f"page_{page:03d}.json"
+    failed_path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main():
@@ -260,8 +277,11 @@ def main():
                 error = ""
             else:
                 result = fetch_url(url)
-                raw_path.parent.mkdir(parents=True, exist_ok=True)
-                raw_path.write_text(result.text or result.error, encoding="utf-8", errors="ignore")
+                if config.name == "Magalu":
+                    _write_magalu_raw_result(raw_path, root, retailer_key, page, url, result)
+                else:
+                    raw_path.parent.mkdir(parents=True, exist_ok=True)
+                    raw_path.write_text(result.text or result.error, encoding="utf-8", errors="ignore")
                 text = result.text
                 method = result.method
                 attempts = result.attempts
@@ -291,17 +311,22 @@ def main():
                     len(parsed),
                 )
                 attempts = attempts + fill_attempts
-                if fill_error in {"blocked_or_error", "search_null"}:
-                    failures.append(
-                        {
-                            "retailer": config.name,
-                            "page": page,
-                            "url": url,
-                            "error": f"browser_fill_{fill_error}",
-                            "attempts": fill_attempts,
-                        }
-                    )
-                if not fill_error and fill_result and len(fill_parsed) > len(parsed):
+                if fill_error or not fill_result or not fill_parsed:
+                    failure = {
+                        "retailer": config.name,
+                        "page": page,
+                        "url": url,
+                        "error": f"browser_fill_{fill_error or 'empty'}",
+                        "attempts": fill_attempts,
+                    }
+                    failures.append(failure)
+                    if _magalu_listing_fail_fast_enabled(config.name):
+                        raise SystemExit(
+                            f"[seda] {run_id} {config.name} page={page} listing browser fill failed: "
+                            f"{failure['error']}"
+                        )
+                    continue
+                if not fill_error and fill_result:
                     text = fill_result.text
                     method = _append_method(method, fill_result.method)
                     parsed = fill_parsed

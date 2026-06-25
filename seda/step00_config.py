@@ -19,7 +19,7 @@ DEFAULT_OUTPUT_TABLE = "tv_retail_com_seda"
 MAGALU_URLS_BY_PRODUCT_LINE = {
     "TV": {
         "main": "https://www.magazineluiza.com.br/busca/tv/",
-        "bsr": "https://www.magazineluiza.com.br/busca/tv/?sortType=soldQuantity&sortOrientation=desc",
+        "bsr": "https://www.magazineluiza.com.br/busca/tv/?page=1&sortOrientation=desc&sortType=soldQuantity",
     },
     "REF": {
         "main": "https://www.magazineluiza.com.br/busca/geladeira/",
@@ -118,7 +118,7 @@ RETAILERS = {
         main_url=os.getenv("SEDA_MAGALU_MAIN_URL", "https://www.magazineluiza.com.br/busca/tv/"),
         bsr_url=os.getenv(
             "SEDA_MAGALU_BSR_URL",
-            "https://www.magazineluiza.com.br/busca/tv/?sortType=soldQuantity&sortOrientation=desc",
+            "https://www.magazineluiza.com.br/busca/tv/?page=1&sortOrientation=desc&sortType=soldQuantity",
         ),
     ),
     "casas_bahia": RetailerConfig(

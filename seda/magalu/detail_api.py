@@ -348,7 +348,40 @@ def _request_item(item_id, timeout, trace):
     return (data.get("data") or {}).get("item") or {}
 
 def _post(payload, timeout, trace, label):
-    if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
+    retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "2"))
+    sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(sleep_seconds * attempt)
+        try:
+            response = requests.post(GRAPHQL_URL, json=payload, headers=_headers(), timeout=timeout)
+        except Exception as exc:
+            trace.append({"label": label, "attempt": attempt + 1, "method": "requests", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        trace_item = {
+            "label": label,
+            "attempt": attempt + 1,
+            "method": "requests",
+            "status_code": response.status_code,
+            "length": len(response.text or ""),
+        }
+        trace.append(trace_item)
+        if response.status_code != 200 or "application/json" not in response.headers.get("content-type", ""):
+            trace_item["error"] = "non_json_or_blocked"
+            continue
+        try:
+            data = response.json()
+        except ValueError:
+            trace_item["error"] = "invalid_json"
+            continue
+        if data.get("errors"):
+            trace_item["error"] = "graphql_errors"
+            trace_item["errors"] = data.get("errors")
+            continue
+        return data
+
+    browser_graphql = os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
+    if browser_graphql:
         try:
             from .browser_session import graphql_post
 
@@ -370,34 +403,6 @@ def _post(payload, timeout, trace, label):
             trace_item["error"] = result.get("error") or ("graphql_errors" if data.get("errors") else "non_json_or_blocked")
             if data.get("errors"):
                 trace_item["errors"] = data.get("errors")
-        if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_STRICT", "1").lower() not in {"0", "false", "no", "n"}:
-            return {}
-
-    retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "2"))
-    sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
-    for attempt in range(retries + 1):
-        if attempt:
-            time.sleep(sleep_seconds * attempt)
-        try:
-            response = requests.post(GRAPHQL_URL, json=payload, headers=_headers(), timeout=timeout)
-        except Exception as exc:
-            trace.append({"label": label, "attempt": attempt + 1, "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        trace_item = {"label": label, "attempt": attempt + 1, "status_code": response.status_code, "length": len(response.text or "")}
-        trace.append(trace_item)
-        if response.status_code != 200 or "application/json" not in response.headers.get("content-type", ""):
-            trace_item["error"] = "non_json_or_blocked"
-            continue
-        try:
-            data = response.json()
-        except ValueError:
-            trace_item["error"] = "invalid_json"
-            continue
-        if data.get("errors"):
-            trace_item["error"] = "graphql_errors"
-            trace_item["errors"] = data.get("errors")
-            continue
-        return data
     return {}
 
 def _detail_from_item(item, seller_id=None):
