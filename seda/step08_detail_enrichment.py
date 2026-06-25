@@ -167,7 +167,7 @@ def _merge_magalu_reviews(row, product_url):
         limit = min(limit, review_count)
     if limit <= 0:
         return None
-    result = fetch_product_rating(sku_from_url(product_url) or row.get("sku"), limit=limit)
+    result = fetch_product_rating(sku_from_url(product_url) or row.get("sku"), limit=limit, context_url=product_url)
     reviews = result.get("reviews") or []
     if reviews:
         row["detailed_review_content"] = compact_json(reviews)
@@ -323,7 +323,7 @@ def _magalu_graphql_detail(row, product_url):
     from .magalu.detail_api import fetch_detail
 
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
-    result = fetch_detail(item_id, seller_id=_magalu_seller_id(row, product_url))
+    result = fetch_detail(item_id, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
@@ -388,7 +388,7 @@ def _retry_magalu_shipping_blanks(row, product_url):
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
     attempts = int(os.getenv("SEDA_MAGALU_SHIPPING_BLANK_RETRY_ATTEMPTS", "1"))
     for attempt in range(1, attempts + 1):
-        result = fetch_shipping_for_item_id(item_id, seller_id=_magalu_seller_id(row, product_url))
+        result = fetch_shipping_for_item_id(item_id, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
         if result.get("delivery") and not row.get("delivery_availability"):
             row["delivery_availability"] = result["delivery"]
         if result.get("pickup") and not row.get("pick_up_availability"):

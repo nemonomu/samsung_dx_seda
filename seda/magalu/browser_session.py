@@ -14,6 +14,20 @@ _PAGE_CREATED_AT = 0.0
 _PAGE_USE_COUNT = 0
 
 
+def _diag_enabled():
+    return os.getenv("SEDA_MAGALU_SEARCH_DIAG_LOG", "1").lower() not in {"0", "false", "no", "n"}
+
+
+def _diag_log(message):
+    if _diag_enabled():
+        print(f"[seda][magalu-search] {message}", flush=True)
+
+
+def _short_text(value, limit=160):
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def get_page():
     global _PAGE, _PAGE_CREATED_AT
     if _PAGE is not None:
@@ -123,12 +137,14 @@ def _restart_page(reason=""):
         time.sleep(sleep_seconds)
 
 
-def _prepare_js_page(page, reason):
+def _prepare_js_page(page, reason, context_url=None):
     _stop_loading(page)
     url, html = _page_state(page)
+    if context_url and not _same_page_path(url, context_url):
+        return _warmup_page(page, reason, warmup_url=context_url)
     if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
         return page
-    return _warmup_page(page, reason)
+    return _warmup_page(page, reason, warmup_url=context_url)
 
 
 def _is_oom_state(url, html):
@@ -159,8 +175,9 @@ def _trace_oom(trace, attempt, page):
     return False
 
 
-def _warmup_page(page, reason):
-    warmup_url = os.getenv("SEDA_MAGALU_BROWSER_WARMUP_URL", "https://www.magazineluiza.com.br/busca/tv/")
+def _warmup_page(page, reason, warmup_url=None):
+    warmup_url = warmup_url or os.getenv("SEDA_MAGALU_BROWSER_WARMUP_URL", "https://www.magazineluiza.com.br/busca/tv/")
+    _diag_log(f"warmup start reason={reason} target={'search' if _is_magalu_search_url(warmup_url) else 'context'}")
     if str(reason or "").startswith("search_browser_graphql"):
         warmup_seconds = _env_float("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_SECONDS", 1)
         nav_timeout = _env_float("SEDA_MAGALU_SEARCH_BROWSER_WARMUP_NAV_TIMEOUT", 4)
@@ -266,14 +283,25 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
     last_error = ""
     last_html = ""
 
+    _diag_log(
+        "fetch start "
+        f"attempts={attempts} recycle_attempts={recycle_attempts} "
+        f"ready_timeout={ready_timeout}s poll={poll_seconds}s"
+    )
     for cycle in range(1, max_cycles + 1):
         if cycle > 1:
             trace.append({"cycle": cycle, "method": "restart", "previous_error": last_error})
+            _diag_log(f"restart cycle={cycle} previous_error={_short_text(last_error)}")
             _restart_page("fetch_search_page_payload_error")
             page = _page_for_use("fetch_search_page_retry")
 
         for attempt in range(1, attempts + 1):
+            _diag_log(f"navigation start cycle={cycle} attempt={attempt} refresh={int(attempt > 1)}")
             method, nav_error = _trigger_search_navigation(page, url, refresh=attempt > 1)
+            _diag_log(
+                f"navigation triggered cycle={cycle} attempt={attempt} "
+                f"method={method} nav_error={_short_text(nav_error)}"
+            )
 
             wait_result = _wait_for_magalu_search_payload(page, url, ready_timeout, poll_seconds)
             html = wait_result.get("html", "")
@@ -307,25 +335,44 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
             trace.append(trace_item)
             if wait_result.get("success"):
                 _stop_loading(page)
+                _diag_log(
+                    "fetch success "
+                    f"cycle={cycle} attempt={attempt} products={state.get('products', 0)} "
+                    f"page={state.get('pagination_page', 0)} source={state.get('source', '')}"
+                )
                 return {"success": True, "text": html, "trace": trace, "url": state.get("url", "")}
 
+            _diag_log(
+                "attempt failed "
+                f"cycle={cycle} attempt={attempt} error={_short_text(last_error)} "
+                f"url={_short_text(state.get('url', ''))} ready={state.get('ready_state', '')} "
+                f"next_len={state.get('next_data_length', 0)} products={state.get('products', 0)} "
+                f"source={state.get('source', '')}"
+            )
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
             if _trace_oom(trace, attempt, page):
                 last_error = "chrome_oom_or_crash_page"
+                _diag_log(f"oom/crash detected cycle={cycle} attempt={attempt}")
                 break
 
         _stop_loading(page)
 
+    _diag_log(f"fetch failed final_error={_short_text(last_error)}")
     return {"success": False, "text": last_html, "error": last_error or "browser_fetch_failed", "trace": trace}
 
 
 def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_seconds):
-    deadline = time.perf_counter() + max(0.5, float(timeout_seconds or 0))
+    timeout_seconds = max(0.5, float(timeout_seconds or 0))
+    deadline = time.perf_counter() + timeout_seconds
     poll_seconds = max(0.05, float(poll_seconds or 0.25))
+    started = time.perf_counter()
+    heartbeat_seconds = max(1.0, _env_float("SEDA_MAGALU_SEARCH_DIAG_HEARTBEAT_SECONDS", 5))
+    next_heartbeat = started
     last_state = {}
     last_html = ""
     last_error = ""
+    _diag_log(f"wait start timeout={timeout_seconds}s poll={poll_seconds}s")
     while time.perf_counter() <= deadline:
         snapshot = _read_search_next_data_snapshot(page)
         last_html = snapshot.get("html", "")
@@ -351,12 +398,32 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
         if snapshot.get("error"):
             state["js_error"] = snapshot["error"]
         last_state = state
+        now = time.perf_counter()
+        if now >= next_heartbeat:
+            elapsed = now - started
+            _diag_log(
+                "wait heartbeat "
+                f"elapsed={elapsed:.1f}s/{timeout_seconds:.1f}s "
+                f"url={_short_text(state.get('url', ''))} title={_short_text(state.get('title', ''))} "
+                f"ready={state.get('ready_state', '')} next_len={state.get('next_data_length', 0)} "
+                f"products={state.get('products', 0)} source={state.get('source', '')} "
+                f"error={_short_text(state.get('error') or snapshot.get('error') or '')} "
+                f"cdp_success={state.get('cdp_success', 0)} fallback_success={state.get('fallback_success', 0)}"
+            )
+            next_heartbeat = now + heartbeat_seconds
         if state.get("valid"):
+            _diag_log(
+                "wait success "
+                f"elapsed={time.perf_counter() - started:.1f}s products={state.get('products', 0)} "
+                f"page={state.get('pagination_page', 0)} next_len={state.get('next_data_length', 0)}"
+            )
             return {"success": True, "html": last_html, "state": state, "error": ""}
         last_error = state.get("error") or snapshot.get("error") or last_error
         if state.get("blocked") or state.get("too_large"):
+            _diag_log(f"wait break error={_short_text(last_error)}")
             break
         time.sleep(poll_seconds)
+    _diag_log(f"wait end error={_short_text(last_error)}")
     return {"success": False, "html": last_html, "state": last_state, "error": last_error or "browser_html_search_payload_failed"}
 
 
@@ -443,6 +510,9 @@ def _next_data_reader_script():
 
 
 def _read_search_next_data_with_cdp(page):
+    verbose = os.getenv("SEDA_MAGALU_SEARCH_DIAG_VERBOSE", "0").lower() in {"1", "true", "yes", "y"}
+    if verbose:
+        _diag_log("cdp read start")
     try:
         result = page.run_cdp(
             "Runtime.evaluate",
@@ -452,12 +522,19 @@ def _read_search_next_data_with_cdp(page):
         )
         raw = ((result or {}).get("result") or {}).get("value") or ""
         payload = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+        if verbose:
+            _diag_log(f"cdp read end next_len={len(str(payload.get('nextData') or ''))} error={_short_text(payload.get('error', ''))}")
         return payload, "script_text_cdp", str(payload.get("error", "") or "")
     except Exception as exc:
+        if verbose:
+            _diag_log(f"cdp read error {type(exc).__name__}: {_short_text(exc)}")
         return {}, "script_text_cdp", f"{type(exc).__name__}: {exc}"
 
 
 def _read_search_next_data_with_run_js(page):
+    verbose = os.getenv("SEDA_MAGALU_SEARCH_DIAG_VERBOSE", "0").lower() in {"1", "true", "yes", "y"}
+    if verbose:
+        _diag_log("js read start")
     script = """
 return (() => {
   try {
@@ -478,8 +555,12 @@ return (() => {
     try:
         raw = page.run_js(script, timeout=_env_float("SEDA_MAGALU_SEARCH_NEXTDATA_JS_TIMEOUT", 2))
         payload = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+        if verbose:
+            _diag_log(f"js read end next_len={len(str(payload.get('nextData') or ''))} error={_short_text(payload.get('error', ''))}")
         return payload, "script_text_js", str(payload.get("error", "") or "")
     except Exception as exc:
+        if verbose:
+            _diag_log(f"js read error {type(exc).__name__}: {_short_text(exc)}")
         return {}, "script_text_js", f"{type(exc).__name__}: {exc}"
 
 
@@ -621,10 +702,10 @@ def _magalu_search_payload_error(url, html):
     return ""
 
 
-def graphql_post(payload, timeout=None):
+def graphql_post(payload, timeout=None, context_url=None):
     page = _page_for_use("graphql_post")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    page = _prepare_js_page(page, "graphql_post_warmup")
+    page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url)
 
     operation = payload.get("operationName") or ""
     attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
@@ -686,7 +767,7 @@ return (async () => {
         if not blocked and last["status_code"] == 200:
             return last
         if attempt < attempts:
-            page = _prepare_js_page(page, "graphql_post_warmup")
+            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url)
     return last
 
 

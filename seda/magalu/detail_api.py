@@ -256,31 +256,31 @@ query showcaseQuery(
 }
 """
 
-def fetch_detail(item_id, timeout=None, seller_id=None):
+def fetch_detail(item_id, timeout=None, seller_id=None, context_url=None):
     item_id = clean_text(item_id)
     if not item_id:
         return {"success": False, "error": "missing_item_id", "detail": {}, "trace": []}
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
-    item = _request_item(item_id, timeout, trace)
+    item = _request_item(item_id, timeout, trace, context_url=context_url)
     if not item:
         return {"success": False, "error": "item_query_failed", "detail": {}, "trace": trace}
     detail = _detail_from_item(item, seller_id=seller_id)
     if os.getenv("SEDA_MAGALU_SHIPPING_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
-        shipping = fetch_shipping(item, timeout=timeout, seller_id=seller_id)
+        shipping = fetch_shipping(item, timeout=timeout, seller_id=seller_id, context_url=context_url)
         if shipping.get("delivery"):
             detail["delivery_availability"] = shipping["delivery"]
         if shipping.get("pickup"):
             detail["pick_up_availability"] = shipping["pickup"]
         trace.extend(shipping.get("trace") or [])
     if os.getenv("SEDA_MAGALU_SIMILAR_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
-        similar = fetch_similar_names(item_id, timeout=timeout)
+        similar = fetch_similar_names(item_id, timeout=timeout, context_url=context_url)
         if similar.get("names"):
             detail["retailer_sku_name_similar"] = compact_json(similar["names"])
         trace.extend(similar.get("trace") or [])
     return {"success": True, "detail": detail, "trace": trace}
 
-def fetch_shipping(item, timeout=None, seller_id=None):
+def fetch_shipping(item, timeout=None, seller_id=None, context_url=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
     payload = {
@@ -288,26 +288,26 @@ def fetch_shipping(item, timeout=None, seller_id=None):
         "variables": {"shippingRequest": _shipping_request(item, seller_id=seller_id)},
         "query": SHIPPING_QUERY,
     }
-    data = _post(payload, timeout, trace, label="shipping")
+    data = _post(payload, timeout, trace, label="shipping", context_url=context_url)
     shipping = (data.get("data") or {}).get("shipping") or {}
     delivery, pickup = _shipping_texts(shipping)
     return {"success": bool(delivery or pickup), "delivery": delivery, "pickup": pickup, "trace": trace}
 
-def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None):
+def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None, context_url=None):
     item_id = clean_text(item_id)
     if not item_id:
         return {"success": False, "error": "missing_item_id", "delivery": "", "pickup": "", "trace": []}
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
-    item = _request_item(item_id, timeout, trace)
+    item = _request_item(item_id, timeout, trace, context_url=context_url)
     if not item:
         return {"success": False, "error": "item_query_failed", "delivery": "", "pickup": "", "trace": trace}
-    result = fetch_shipping(item, timeout=timeout, seller_id=seller_id)
+    result = fetch_shipping(item, timeout=timeout, seller_id=seller_id, context_url=context_url)
     trace.extend(result.get("trace") or [])
     result["trace"] = trace
     return result
 
-def fetch_similar_names(item_id, timeout=None):
+def fetch_similar_names(item_id, timeout=None, context_url=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
     for place_id in _similar_place_ids():
@@ -326,7 +326,7 @@ def fetch_similar_names(item_id, timeout=None):
             },
             "query": SHOWCASE_QUERY,
         }
-        response = _post(payload, timeout, trace, label=f"showcase:{place_id}")
+        response = _post(payload, timeout, trace, label=f"showcase:{place_id}", context_url=context_url)
         dynamic = (response.get("data") or {}).get("recommendation", {}).get("dynamic")
         for showcase in dynamic or []:
             title = clean_text(showcase.get("title"))
@@ -338,16 +338,16 @@ def fetch_similar_names(item_id, timeout=None):
                 return {"success": True, "names": names[:20], "trace": trace}
     return {"success": False, "names": [], "trace": trace}
 
-def _request_item(item_id, timeout, trace):
+def _request_item(item_id, timeout, trace, context_url=None):
     payload = {
         "operationName": "itemQuery",
         "variables": {"itemId": item_id, "zipcode": os.getenv("SEDA_POSTAL_CODE", os.getenv("SEDA_MAGALU_ZIP_CODE", "01001-001"))},
         "query": ITEM_QUERY,
     }
-    data = _post(payload, timeout, trace, label="item")
+    data = _post(payload, timeout, trace, label="item", context_url=context_url)
     return (data.get("data") or {}).get("item") or {}
 
-def _post(payload, timeout, trace, label):
+def _post(payload, timeout, trace, label, context_url=None):
     retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "2"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
     for attempt in range(retries + 1):
@@ -385,7 +385,7 @@ def _post(payload, timeout, trace, label):
         try:
             from .browser_session import graphql_post
 
-            result = graphql_post(payload, timeout=timeout)
+            result = graphql_post(payload, timeout=timeout, context_url=context_url)
         except Exception as exc:
             trace.append({"label": label, "attempt": 1, "method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
         else:

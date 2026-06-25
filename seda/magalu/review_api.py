@@ -81,7 +81,7 @@ query ProductRating(
 """
 
 
-def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None):
+def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None, context_url=None):
     variation_id = clean_text(variation_id)
     if not variation_id:
         return {"success": False, "error": "missing_variation_id", "reviews": [], "trace": []}
@@ -128,6 +128,7 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None)
             retries,
             retry_sleep_seconds,
             trace,
+            context_url=context_url,
         )
         if not product_rating:
             break
@@ -177,7 +178,7 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None)
     return merged
 
 
-def _request_product_rating(session, variation_id, page, page_size, timeout, retries, retry_sleep_seconds, trace):
+def _request_product_rating(session, variation_id, page, page_size, timeout, retries, retry_sleep_seconds, trace, context_url=None):
     payload = _payload(variation_id, page, page_size)
     for attempt in range(retries + 1):
         if attempt:
@@ -223,7 +224,7 @@ def _request_product_rating(session, variation_id, page, page_size, timeout, ret
         try:
             from .browser_session import graphql_post
 
-            result = graphql_post(payload, timeout=timeout)
+            result = graphql_post(payload, timeout=timeout, context_url=context_url)
         except Exception as exc:
             trace.append(
                 {
