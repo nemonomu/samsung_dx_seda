@@ -6,7 +6,6 @@ cd /d "%~dp0"
 if not exist "%~dp0seda\magalu\log" mkdir "%~dp0seda\magalu\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\magalu\log\magalu_tv_ref_ldy_drission_full_%SEDA_RUN_TIMESTAMP%.log"
-if not defined SEDA_MAGALU_BROWSER_PROFILE set "SEDA_MAGALU_BROWSER_PROFILE=C:\tmp\seda_magalu_profile_%SEDA_RUN_TIMESTAMP%"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONUTF8 set PYTHONUTF8=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
@@ -28,6 +27,7 @@ set SEDA_MAGALU_HTML_BROWSER_FALLBACK=0
 set SEDA_MAGALU_PDP_NAV_FALLBACK=0
 set SEDA_MAGALU_ZENROWS_DETAIL_FALLBACK=0
 set SEDA_MAGALU_ZENROWS_PDP_FALLBACK=0
+if not defined SEDA_MAGALU_BROWSER_PROFILE set SEDA_MAGALU_BROWSER_PROFILE=C:/tmp/seda_magalu_drission_profile
 if not defined SEDA_MAGALU_BROWSER_LOAD_MODE set SEDA_MAGALU_BROWSER_LOAD_MODE=eager
 if not defined SEDA_MAGALU_BROWSER_BASE_TIMEOUT set SEDA_MAGALU_BROWSER_BASE_TIMEOUT=30
 if not defined SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT set SEDA_MAGALU_BROWSER_PAGE_LOAD_TIMEOUT=30
@@ -56,7 +56,6 @@ if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_O
 set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
-call :log "[SEDA] browser profile: %SEDA_MAGALU_BROWSER_PROFILE%"
 call :log "[SEDA] Magalu TV Drission full run started"
 call python -m seda.magalu.magalu_orchestrator --product-line TV --all
 if errorlevel 1 goto :failed_tv
