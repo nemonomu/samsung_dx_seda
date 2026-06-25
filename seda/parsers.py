@@ -1289,7 +1289,7 @@ def _summary_review_content(html_text):
 
 def _parse_magalu_next_detail(html_text, base_url, product_url):
     data = extract_next_data(html_text)
-    page_data = data.get("props", {}).get("pageProps", {}).get("data", {})
+    page_data = _magalu_next_page_data(data)
     item = page_data.get("item") if isinstance(page_data.get("item"), dict) else {}
     if not item:
         return {}
@@ -1350,6 +1350,19 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
             }
         )
     return detail
+
+def _magalu_next_page_data(data):
+    if not isinstance(data, dict):
+        return {}
+    props = data.get("props") if isinstance(data.get("props"), dict) else {}
+    page_props = props.get("pageProps") if isinstance(props.get("pageProps"), dict) else {}
+    nested_data = page_props.get("data") if isinstance(page_props.get("data"), dict) else {}
+    if nested_data:
+        return nested_data
+    root_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+    if root_data and (isinstance(root_data.get("item"), dict) or isinstance(root_data.get("productRating"), dict)):
+        return root_data
+    return {}
 
 def _magalu_energy_use(item):
     allowed_keys = {

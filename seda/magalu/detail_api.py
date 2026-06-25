@@ -181,14 +181,23 @@ fragment estimate on EstimateResponse {
     __typename
   }
   closenessGroups {
+    customerCost
+    disclaimer
     id
+    items {
+      seller {
+        id
+        sku
+        __typename
+      }
+      __typename
+    }
     name
-    __typename
-  }
-  shippingAddress {
-    city
-    state
-    zipCode
+    operationCost
+    slug
+    shortPolicy
+    target
+    targetRemaining
     __typename
   }
   status
@@ -216,6 +225,8 @@ query showcaseQuery(
   $storeId: String
   $productId: String
   $filters: [FilterInput]
+  $includePagination: Boolean = true
+  $toggleWishlist: Boolean = true
   $zipcode: String
   $isSourceProductAds: Boolean = false
 ) {
@@ -241,15 +252,32 @@ query showcaseQuery(
       designTokenId
       products {
         id
+        adsSellerId
+        variationId
         title
+        description
+        image
+        available
+        url
         path
+        reference
+        offerTags
+        restrictions
         rating {
           count
           score
         }
+        isOnWishlist @include(if: $toggleWishlist)
+        shippingTag {
+          cost
+          time
+          complement
+        }
       }
       pagination {
-        __typename
+        cursor @include(if: $includePagination)
+        next @include(if: $includePagination)
+        previous @include(if: $includePagination)
       }
     }
   }
@@ -315,14 +343,14 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
             "operationName": "showcaseQuery",
             "variables": {
                 "includePagination": False,
-                "toggleWishlist": False,
+                "toggleWishlist": True,
                 "isSourceProductAds": False,
                 "customerId": os.getenv("SEDA_MAGALU_CUSTOMER_ID", "temp_fff62ce7-702a-448f-bd1f-e9341b5cfe15"),
                 "filters": [],
                 "pageId": "mAmrPHGlhj",
                 "placeId": place_id,
                 "productId": item_id,
-                "zipcode": os.getenv("SEDA_MAGALU_SIMILAR_ZIP_CODE", ""),
+                "zipcode": _zipcode_for_graphql("SEDA_MAGALU_SIMILAR_ZIP_CODE"),
             },
             "query": SHOWCASE_QUERY,
         }
@@ -330,7 +358,7 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
         dynamic = (response.get("data") or {}).get("recommendation", {}).get("dynamic")
         for showcase in dynamic or []:
             title = clean_text(showcase.get("title"))
-            if "tambem viu" not in _ascii_lower(title) and "também viu" not in title.lower():
+            if not _is_similar_showcase_title(title):
                 continue
             names = [clean_text(product.get("title")) for product in showcase.get("products") or []]
             names = [name for name in names if name]
@@ -341,7 +369,7 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
 def _request_item(item_id, timeout, trace, context_url=None):
     payload = {
         "operationName": "itemQuery",
-        "variables": {"itemId": item_id, "zipcode": os.getenv("SEDA_POSTAL_CODE", os.getenv("SEDA_MAGALU_ZIP_CODE", "01001-001"))},
+        "variables": {"itemId": item_id, "zipcode": _zipcode_for_graphql("SEDA_MAGALU_ZIP_CODE")},
         "query": ITEM_QUERY,
     }
     data = _post(payload, timeout, trace, label="item", context_url=context_url)
@@ -545,7 +573,7 @@ def _shipping_request(item, seller_id=None):
             "quantity": int(os.getenv("SEDA_MAGALU_SHIPPING_QUANTITY", "1")),
             "type": "product",
         },
-        "zipcode": os.getenv("SEDA_MAGALU_SHIPPING_ZIP_CODE", os.getenv("SEDA_POSTAL_CODE", "01001-001")),
+        "zipcode": _zipcode_for_graphql("SEDA_MAGALU_SHIPPING_ZIP_CODE"),
     }
 
 def _price_number(offer):
@@ -616,6 +644,18 @@ def _fact_value(fact):
 def _similar_place_ids():
     raw = os.getenv("SEDA_MAGALU_SIMILAR_PLACE_IDS", "RYmKwYF0uh,RiGQ7RdPP0,qugQi55lh4,dnhhGeeru9,jupMXmS6EV")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+def _is_similar_showcase_title(title):
+    normalized = _ascii_lower(title)
+    raw = clean_text(title).lower()
+    if "quem viu" in normalized and "tamb" in normalized and "viu" in normalized:
+        return True
+    return "quem viu" in raw and "tamb" in raw and "viu" in raw
+
+def _zipcode_for_graphql(env_name):
+    raw = os.getenv(env_name) or os.getenv("SEDA_POSTAL_CODE") or "01001-001"
+    digits = re.sub(r"\D+", "", str(raw))
+    return digits or "01001001"
 
 def _ascii_lower(value):
     import unicodedata

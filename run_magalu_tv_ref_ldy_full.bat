@@ -7,6 +7,7 @@ if not exist "%~dp0seda\magalu\log" mkdir "%~dp0seda\magalu\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\magalu\log\magalu_tv_ref_ldy_full_%SEDA_RUN_TIMESTAMP%.log"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
+if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
 
 if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
 if not defined SEDA_TIMEOUT set SEDA_TIMEOUT=25

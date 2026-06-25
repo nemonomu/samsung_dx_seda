@@ -25,6 +25,8 @@ def _default_pages(is_bsr):
     retailer = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().lower()
     if retailer == "casas_bahia":
         return "15" if is_bsr else "20"
+    if retailer == "magalu":
+        return "3" if is_bsr else "11"
     return "3" if is_bsr else "9"
 
 
@@ -121,6 +123,7 @@ def _magalu_next_listing_stats(html_text, parsed_count=0):
     if not isinstance(products, list):
         products = []
     kept_count = sum(1 for product in products if isinstance(product, dict) and _magalu_is_relevant_product(product))
+    selected_sort = _magalu_selected_sort(search)
     return {
         "raw_products": len(products),
         "kept_products": kept_count,
@@ -128,19 +131,57 @@ def _magalu_next_listing_stats(html_text, parsed_count=0):
         "parsed_rows": parsed_count,
         "pagination_page": _safe_int((pagination or {}).get("page"), 0) if isinstance(pagination, dict) else 0,
         "pagination_size": _safe_int((pagination or {}).get("size"), 0) if isinstance(pagination, dict) else 0,
+        "selected_sort_type": selected_sort.get("type", ""),
+        "selected_sort_orientation": selected_sort.get("orientation", ""),
     }
 
 
 def _format_magalu_listing_stats(stats):
     if not stats:
         return ""
+    selected_sort = ":".join(
+        item for item in (stats.get("selected_sort_type", ""), stats.get("selected_sort_orientation", "")) if item
+    )
     return (
         f"raw_products={stats.get('raw_products', 0)} "
         f"kept_products={stats.get('kept_products', 0)} "
         f"dropped_products={stats.get('dropped_products', 0)} "
         f"pagination_page={stats.get('pagination_page', 0)} "
         f"pagination_size={stats.get('pagination_size', 0)} "
+        f"selected_sort={selected_sort or 'missing'} "
     )
+
+
+def _magalu_selected_sort(search):
+    sorts = search.get("sorts") if isinstance(search, dict) else []
+    if not isinstance(sorts, list):
+        return {}
+    for item in sorts:
+        if isinstance(item, dict) and item.get("selected"):
+            return {
+                "type": clean_sort_value(item.get("type")),
+                "orientation": clean_sort_value(item.get("orientation")),
+            }
+    return {}
+
+
+def clean_sort_value(value):
+    return str(value or "").strip()
+
+
+def _magalu_expected_sort(run_id):
+    if (run_id or "").lower() == "bsr":
+        return "soldQuantity", "desc"
+    return "score", "desc"
+
+
+def _magalu_sort_error(run_id, stats):
+    expected_type, expected_orientation = _magalu_expected_sort(run_id)
+    actual_type = stats.get("selected_sort_type", "")
+    actual_orientation = stats.get("selected_sort_orientation", "")
+    if actual_type == expected_type and actual_orientation == expected_orientation:
+        return ""
+    return f"selected_sort_mismatch:{actual_type or 'missing'}:{actual_orientation or 'missing'}!={expected_type}:{expected_orientation}"
 
 
 def _magalu_transport_trace_stats(attempts):
@@ -303,6 +344,22 @@ def main():
             parsed = parse_listing(text, config.name, config.base_url, url, run_id=run_id)
             magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
             magalu_trace_stats = _magalu_transport_trace_stats(attempts) if config.name == "Magalu" else {}
+            magalu_sort_error = _magalu_sort_error(run_id, magalu_stats) if magalu_stats else ""
+            if magalu_sort_error:
+                failure = {
+                    "retailer": config.name,
+                    "page": page,
+                    "url": url,
+                    "error": magalu_sort_error,
+                    "attempts": attempts,
+                }
+                failures.append(failure)
+                if _magalu_listing_fail_fast_enabled(config.name):
+                    raise SystemExit(
+                        f"[seda] {run_id} {config.name} page={page} listing sort validation failed: "
+                        f"{magalu_sort_error}"
+                    )
+                continue
             if _should_magalu_browser_fill(config.name, method, parsed, text, url):
                 fill_parsed, fill_result, fill_attempts, fill_error = _magalu_browser_fill(
                     url,
@@ -332,6 +389,22 @@ def main():
                     parsed = fill_parsed
                     magalu_stats = _magalu_next_listing_stats(text, len(parsed)) if config.name == "Magalu" else {}
                     magalu_trace_stats = _magalu_transport_trace_stats(attempts) if config.name == "Magalu" else {}
+                    magalu_sort_error = _magalu_sort_error(run_id, magalu_stats) if magalu_stats else ""
+                    if magalu_sort_error:
+                        failure = {
+                            "retailer": config.name,
+                            "page": page,
+                            "url": url,
+                            "error": magalu_sort_error,
+                            "attempts": attempts,
+                        }
+                        failures.append(failure)
+                        if _magalu_listing_fail_fast_enabled(config.name):
+                            raise SystemExit(
+                                f"[seda] {run_id} {config.name} page={page} listing sort validation failed: "
+                                f"{magalu_sort_error}"
+                            )
+                        continue
                     raw_path.write_text(text, encoding="utf-8", errors="ignore")
             rank_field = "bsr_rank" if run_id == "bsr" else "main_rank"
             for local_index, item in enumerate(parsed, start=1):

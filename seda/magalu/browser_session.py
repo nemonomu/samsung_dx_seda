@@ -320,6 +320,8 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 "products": state.get("products", 0),
                 "pagination_page": state.get("pagination_page", 0),
                 "pagination_size": state.get("pagination_size", 0),
+                "selected_sort_type": state.get("selected_sort_type", ""),
+                "selected_sort_orientation": state.get("selected_sort_orientation", ""),
                 "source": state.get("source", ""),
                 "ready_state": state.get("ready_state", ""),
                 "next_data_length": state.get("next_data_length", 0),
@@ -338,7 +340,9 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 _diag_log(
                     "fetch success "
                     f"cycle={cycle} attempt={attempt} products={state.get('products', 0)} "
-                    f"page={state.get('pagination_page', 0)} source={state.get('source', '')}"
+                    f"page={state.get('pagination_page', 0)} "
+                    f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
+                    f"source={state.get('source', '')}"
                 )
                 return {"success": True, "text": html, "trace": trace, "url": state.get("url", "")}
 
@@ -347,6 +351,7 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 f"cycle={cycle} attempt={attempt} error={_short_text(last_error)} "
                 f"url={_short_text(state.get('url', ''))} ready={state.get('ready_state', '')} "
                 f"next_len={state.get('next_data_length', 0)} products={state.get('products', 0)} "
+                f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
                 f"source={state.get('source', '')}"
             )
             if wait_seconds > 0:
@@ -581,6 +586,8 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
         "products": 0,
         "pagination_page": 0,
         "pagination_size": 0,
+        "selected_sort_type": "",
+        "selected_sort_orientation": "",
         "blocked": False,
         "too_large": False,
     }
@@ -616,9 +623,20 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
     state["products"] = len(products)
     state["pagination_page"] = payload_page
     state["pagination_size"] = payload_size
+    selected_sort = _selected_search_sort(search)
+    state["selected_sort_type"] = selected_sort.get("type", "")
+    state["selected_sort_orientation"] = selected_sort.get("orientation", "")
     requested_page = _requested_search_page(expected_url)
     if payload_page != requested_page:
         state["error"] = f"browser_html_page_mismatch:{payload_page}!={requested_page}"
+        return state
+    expected_type, expected_orientation = _expected_search_sort(expected_url)
+    if state["selected_sort_type"] != expected_type or state["selected_sort_orientation"] != expected_orientation:
+        state["error"] = (
+            "browser_html_sort_mismatch:"
+            f"{state['selected_sort_type'] or 'missing'}:{state['selected_sort_orientation'] or 'missing'}"
+            f"!={expected_type}:{expected_orientation}"
+        )
         return state
     max_products = _env_int("SEDA_MAGALU_SEARCH_BROWSER_MAX_PRODUCTS", 120)
     if max_products > 0 and (len(products) > max_products or payload_size > max_products):
@@ -657,6 +675,26 @@ def _requested_search_page(url):
     query = parse_qs(urlparse(str(url or "")).query)
     raw = (query.get("page") or ["1"])[0]
     return _safe_int(raw, 1)
+
+
+def _expected_search_sort(url):
+    query = parse_qs(urlparse(str(url or "")).query)
+    sort_type = (query.get("sortType") or ["score"])[0] or "score"
+    orientation = (query.get("sortOrientation") or ["desc"])[0] or "desc"
+    return str(sort_type).strip(), str(orientation).strip()
+
+
+def _selected_search_sort(search):
+    sorts = search.get("sorts") if isinstance(search, dict) else []
+    if not isinstance(sorts, list):
+        return {}
+    for item in sorts:
+        if isinstance(item, dict) and item.get("selected"):
+            return {
+                "type": str(item.get("type") or "").strip(),
+                "orientation": str(item.get("orientation") or "").strip(),
+            }
+    return {}
 
 
 def _safe_int(value, default=0):

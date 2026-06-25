@@ -5,7 +5,7 @@ import re
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .parsers import BeautifulSoup, clean_text, compact_json, parse_detail, sku_from_url
+from .parsers import BeautifulSoup, clean_text, compact_json, extract_next_data, parse_detail, sku_from_url
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, read_csv, run_root, write_csv
 from .transport import fetch_url, is_blocked_html
 
@@ -482,6 +482,8 @@ def _merge_magalu_pdp_html(row, product_url):
             return
         return
     detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+    if detail.get("sku"):
+        row["sku"] = detail["sku"]
     for key in (
         "summarized_review_content",
         "retailer_sku_name_similar",
@@ -497,8 +499,37 @@ def _merge_magalu_pdp_html(row, product_url):
             row[key] = detail[key]
     if _merge_magalu_exact_html_specs(row, result.get("text") or ""):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_specs")
+    if _merge_magalu_shipping_from_next_data(row, result.get("text") or "", product_url):
+        row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_shipping")
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), f"{result.get('method') or 'unknown'}_pdp_html")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html")
+
+
+def _merge_magalu_similar(row, product_url):
+    if row.get("retailer") != "Magalu":
+        return False
+    if row.get("retailer_sku_name_similar"):
+        return False
+    if os.getenv("SEDA_MAGALU_SIMILAR_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
+        return False
+    item_id = sku_from_url(product_url) or row.get("item")
+    if not item_id:
+        return False
+    try:
+        from .magalu.detail_api import fetch_similar_names
+
+        result = fetch_similar_names(item_id, context_url=product_url)
+    except Exception as exc:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"similar_graphql_error:{type(exc).__name__}")
+        return False
+    names = result.get("names") or []
+    if not names:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), "similar_graphql_empty")
+        return False
+    row["retailer_sku_name_similar"] = compact_json(names)
+    row["fetch_method"] = _append_token(row.get("fetch_method", ""), "graphql_similar")
+    row["parse_status"] = _append_token(row.get("parse_status", ""), f"similar_graphql_{len(names)}")
+    return True
 
 
 def _merge_magalu_exact_html_specs(row, html_text):
@@ -523,6 +554,49 @@ def _magalu_exact_html_specs(html_text):
             "Consumo Aproximado de Energia",
         ),
     }
+
+
+def _merge_magalu_shipping_from_next_data(row, html_text, product_url):
+    if row.get("retailer") != "Magalu":
+        return False
+    if os.getenv("SEDA_MAGALU_SHIPPING_FROM_SSR_ITEM", "1").lower() in {"0", "false", "no", "n"}:
+        return False
+    if row.get("delivery_availability") and row.get("pick_up_availability"):
+        return False
+    item = _magalu_next_item_from_html(html_text)
+    if not item:
+        return False
+    try:
+        from .magalu.detail_api import fetch_shipping
+
+        result = fetch_shipping(item, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
+    except Exception as exc:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"shipping_ssr_item_error:{type(exc).__name__}")
+        return False
+    updated = False
+    if result.get("delivery") and not row.get("delivery_availability"):
+        row["delivery_availability"] = result["delivery"]
+        updated = True
+    if result.get("pickup") and not row.get("pick_up_availability"):
+        row["pick_up_availability"] = result["pickup"]
+        updated = True
+    if updated:
+        row["fetch_method"] = _append_token(row.get("fetch_method", ""), "graphql_shipping_ssr_item")
+        return True
+    row["parse_status"] = _append_token(row.get("parse_status", ""), f"shipping_ssr_item_failed:{result.get('error', 'empty_shipping')}")
+    return False
+
+
+def _magalu_next_item_from_html(html_text):
+    data = extract_next_data(html_text)
+    if not isinstance(data, dict):
+        return {}
+    props = data.get("props") if isinstance(data.get("props"), dict) else {}
+    page_props = props.get("pageProps") if isinstance(props.get("pageProps"), dict) else {}
+    page_data = page_props.get("data") if isinstance(page_props.get("data"), dict) else {}
+    if not page_data:
+        page_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return page_data.get("item") if isinstance(page_data.get("item"), dict) else {}
 
 
 def _magalu_exact_html_spec_value(html_text, label):
@@ -816,6 +890,7 @@ def main():
             else:
                 magalu_review_blocked_streak = 0
         _merge_magalu_pdp_html(row, url)
+        _merge_magalu_similar(row, url)
         _merge_magalu_review_pages(row, url)
         _merge_casas_bahia_apis(row)
         enriched.append(row)
