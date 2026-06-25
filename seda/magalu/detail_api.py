@@ -376,7 +376,13 @@ def _request_item(item_id, timeout, trace, context_url=None):
     return (data.get("data") or {}).get("item") or {}
 
 def _post(payload, timeout, trace, label, context_url=None):
-    retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "2"))
+    if _browser_context_label(label):
+        data = _post_browser_graphql(payload, timeout, trace, label)
+        if data is not None:
+            return data
+        return {}
+
+    retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "0"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
     for attempt in range(retries + 1):
         if attempt:
@@ -407,31 +413,36 @@ def _post(payload, timeout, trace, label, context_url=None):
             trace_item["errors"] = data.get("errors")
             continue
         return data
-
-    browser_graphql = os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
-    if browser_graphql:
-        try:
-            from .browser_session import graphql_post
-
-            result = graphql_post(payload, timeout=timeout, context_url=context_url)
-        except Exception as exc:
-            trace.append({"label": label, "attempt": 1, "method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
-        else:
-            trace_item = {
-                "label": label,
-                "attempt": 1,
-                "method": "browser_graphql",
-                "status_code": result.get("status_code", 0),
-                "length": len(result.get("text") or ""),
-            }
-            trace.append(trace_item)
-            data = result.get("data") or {}
-            if result.get("status_code") == 200 and data and not data.get("errors"):
-                return data
-            trace_item["error"] = result.get("error") or ("graphql_errors" if data.get("errors") else "non_json_or_blocked")
-            if data.get("errors"):
-                trace_item["errors"] = data.get("errors")
     return {}
+
+def _post_browser_graphql(payload, timeout, trace, label):
+    try:
+        from .browser_session import graphql_post
+
+        result = graphql_post(payload, timeout=timeout)
+    except Exception as exc:
+        trace.append({"label": label, "attempt": 1, "method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
+        return None
+
+    trace_item = {
+        "label": label,
+        "attempt": 1,
+        "method": "browser_graphql",
+        "status_code": result.get("status_code", 0),
+        "length": len(result.get("text") or ""),
+    }
+    trace.append(trace_item)
+    data = result.get("data") or {}
+    if result.get("status_code") == 200 and data and not data.get("errors"):
+        return data
+    trace_item["error"] = result.get("error") or ("graphql_errors" if data.get("errors") else "non_json_or_blocked")
+    if data.get("errors"):
+        trace_item["errors"] = data.get("errors")
+    return None
+
+def _browser_context_label(label):
+    label = str(label or "")
+    return label == "shipping" or label.startswith("showcase:")
 
 def _detail_from_item(item, seller_id=None):
     offer = _select_offer(item, seller_id=seller_id)

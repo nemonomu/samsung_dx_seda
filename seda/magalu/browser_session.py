@@ -137,12 +137,14 @@ def _restart_page(reason=""):
         time.sleep(sleep_seconds)
 
 
-def _prepare_js_page(page, reason, context_url=None):
+def _prepare_js_page(page, reason, context_url=None, allow_default_warmup=True):
     _stop_loading(page)
     url, html = _page_state(page)
     if context_url and not _same_page_path(url, context_url):
         return _warmup_page(page, reason, warmup_url=context_url)
     if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
+        return page
+    if not allow_default_warmup:
         return page
     return _warmup_page(page, reason, warmup_url=context_url)
 
@@ -743,19 +745,23 @@ def _magalu_search_payload_error(url, html):
 def graphql_post(payload, timeout=None, context_url=None):
     page = _page_for_use("graphql_post")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url)
+    page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=False)
 
     operation = payload.get("operationName") or ""
+    payload_text = json.dumps(payload, ensure_ascii=False)
     attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
     script = """
 return (async () => {
   try {
-    const payload = arguments[0];
+    const payload = JSON.parse(arguments[0]);
     const operation = payload.operationName || '';
     const response = await fetch(
       'https://federation.magazineluiza.com.br/graphql?operationName=' + encodeURIComponent(operation),
       {
         method: 'POST',
+        mode: 'cors',
+        cache: 'no-cache',
+        credentials: 'include',
         headers: {
           'accept': 'application/json',
           'content-type': 'application/json',
@@ -774,7 +780,7 @@ return (async () => {
     last = {}
     for attempt in range(1, attempts + 1):
         try:
-            raw_result = page.run_js(script, payload, timeout=timeout) or "{}"
+            raw_result = page.run_js(script, payload_text, timeout=timeout) or "{}"
         except Exception as exc:
             if _trace_oom([], attempt, page):
                 _restart_page("graphql_post_run_js_oom")
@@ -805,7 +811,7 @@ return (async () => {
         if not blocked and last["status_code"] == 200:
             return last
         if attempt < attempts:
-            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url)
+            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=False)
     return last
 
 
@@ -820,7 +826,7 @@ def _graphql_result_blocked(result):
 def graphql_post_raw(payload, timeout=None, endpoint=None):
     page = _page_for_use("graphql_post_raw")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    page = _prepare_js_page(page, "graphql_post_raw_warmup")
+    page = _prepare_js_page(page, "graphql_post_raw_warmup", allow_default_warmup=False)
 
     endpoint = endpoint or os.getenv("SEDA_MAGALU_GRAPHQL_ENDPOINT", "https://federation.magazineluiza.com.br/graphql")
     payload_text = json.dumps(payload, ensure_ascii=False)
