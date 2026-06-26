@@ -377,7 +377,7 @@ def _request_item(item_id, timeout, trace, context_url=None):
 
 def _post(payload, timeout, trace, label, context_url=None):
     if _browser_context_label(label):
-        data = _post_browser_graphql(payload, timeout, trace, label)
+        data = _post_browser_graphql(payload, timeout, trace, label, context_url=context_url)
         if data is not None:
             return data
         return {}
@@ -413,13 +413,17 @@ def _post(payload, timeout, trace, label, context_url=None):
             trace_item["errors"] = data.get("errors")
             continue
         return data
+    if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}:
+        data = _post_browser_graphql(payload, timeout, trace, label, context_url=context_url)
+        if data is not None:
+            return data
     return {}
 
-def _post_browser_graphql(payload, timeout, trace, label):
+def _post_browser_graphql(payload, timeout, trace, label, context_url=None):
     try:
         from .browser_session import graphql_post
 
-        result = graphql_post(payload, timeout=timeout)
+        result = graphql_post(payload, timeout=timeout, context_url=context_url)
     except Exception as exc:
         trace.append({"label": label, "attempt": 1, "method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
         return None

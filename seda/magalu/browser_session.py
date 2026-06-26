@@ -2,6 +2,7 @@ import atexit
 import html as html_module
 import json
 import os
+import re
 import time
 import unicodedata
 from urllib.parse import parse_qs, urlparse
@@ -127,15 +128,15 @@ def _is_bad_browser_state(url, html):
         "ops!",
         "alguma coisa deu errado",
         "access denied",
-        "akamai",
         "captcha",
         "customdeny",
         "bot detection",
-        "robot",
         "chrome-error://",
         "chromewebdata",
     )
-    return any(marker in haystack for marker in markers)
+    if any(marker in haystack for marker in markers):
+        return True
+    return re.search(r"\brobot\b", haystack) is not None
 
 
 def _restart_page(reason=""):
@@ -638,7 +639,7 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
     }
     data = extract_next_data(html)
     if not data:
-        if _is_bad_browser_state(actual_url, f"{browser_text}\n{html}"):
+        if _is_bad_browser_state(actual_url, browser_text):
             state["blocked"] = True
             state["error"] = "browser_html_blocked_or_error_page"
             return state
@@ -652,7 +653,7 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
         return state
     search = page_data.get("search") if isinstance(page_data, dict) else {}
     if not isinstance(search, dict):
-        if _is_bad_browser_state(actual_url, f"{browser_text}\n{html}"):
+        if _is_bad_browser_state(actual_url, browser_text):
             state["blocked"] = True
             state["error"] = "browser_html_blocked_or_error_page"
             return state
