@@ -8,6 +8,7 @@ from ..parsers import (
     clean_text,
     compact_json,
     format_brl,
+    ldy_color_from_text,
 )
 from ..step00_config import product_line
 
@@ -488,9 +489,12 @@ def _detail_from_item(item, seller_id=None):
                         "tipo de abertura eletrodomestico",
                         "tipo de abertura eletrodoméstico",
                         "tipo de abertura electrodomestico",
+                        "tipo de abertura do eletrodomestico",
+                        "abertura da tampa",
                     ],
                 ),
                 "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"]),
+                "ldy_color": _factsheet_value(item, ["cor", "cor do produto"]) or ldy_color_from_text(item.get("title")),
             }
         )
     return detail
@@ -514,9 +518,11 @@ def _energy_use(item):
 def _ref_refrigerator_type(item):
     for fact in _iter_facts(item.get("factsheet") or []):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
-        if key != "porta":
+        if key not in {"porta", "tipo"}:
             continue
-        return _clean_ref_refrigerator_type(_fact_value(fact))
+        cleaned = _clean_ref_refrigerator_type(_fact_value(fact))
+        if cleaned:
+            return cleaned
     return ""
 
 def _clean_ref_refrigerator_type(value):

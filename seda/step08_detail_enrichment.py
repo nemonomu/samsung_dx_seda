@@ -374,6 +374,32 @@ def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
             row["count_of_reviews"] = general.get("commentCount")
         elif (result.get("page") or {}).get("totalItems") is not None:
             row["count_of_reviews"] = (result.get("page") or {}).get("totalItems")
+
+    # summarized_review_content via reviewSummaryQuery on the browser GraphQL channel
+    # (PDP HTML is Akamai-403 on every product; this needs no PDP HTML / ZenRows).
+    # Gated off by default until the captured query shape is verified.
+    if (
+        not row.get("summarized_review_content")
+        and os.getenv("SEDA_MAGALU_REVIEW_SUMMARY_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
+    ):
+        from .magalu.review_api import fetch_review_summary
+
+        summary_result = fetch_review_summary(
+            product_id=result.get("product_id"),
+            variation_id=sku_from_url(product_url) or row.get("sku"),
+            context_url=product_url,
+        )
+        _record_result_trace(trace_rows, row, row_index, product_url, "review_summary_graphql", summary_result)
+        if summary_result.get("success"):
+            row["summarized_review_content"] = summary_result["summary"]
+            row["fetch_method"] = _append_token(
+                row.get("fetch_method", ""), summary_result.get("method", "graphql_review_summary")
+            )
+            row["parse_status"] = _append_token(row.get("parse_status", ""), "review_summary_graphql")
+        else:
+            row["parse_status"] = _append_token(
+                row.get("parse_status", ""), f"review_summary_failed:{summary_result.get('error', 'unknown')}"
+            )
     return result
 
 
@@ -738,6 +764,11 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
         "screen_size",
         "estimated_annual_electricity_use",
         "model_year",
+        "ref_refrigerator_type",
+        "ref_capacity",
+        "ldy_loading_type",
+        "ldy_capacity",
+        "ldy_color",
         "star_rating",
         "count_of_star_ratings",
         "count_of_reviews",

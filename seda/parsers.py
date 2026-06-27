@@ -1344,9 +1344,13 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
                         "tipo de abertura eletrodomestico",
                         "tipo de abertura eletrodoméstico",
                         "tipo de abertura electrodomestico",
+                        "tipo de abertura do eletrodomestico",
+                        "abertura da tampa",
                     ],
                 ),
                 "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"]),
+                "ldy_color": _magalu_factsheet_value(item, ["cor", "cor do produto"])
+                or ldy_color_from_text(item.get("title")),
             }
         )
     return detail
@@ -1383,9 +1387,11 @@ def _magalu_energy_use(item):
 def _magalu_ref_refrigerator_type(item):
     for fact in _iter_magalu_facts(item.get("factsheet") or []):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
-        if key != "porta":
+        if key not in {"porta", "tipo"}:
             continue
-        return _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
+        cleaned = _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
+        if cleaned:
+            return cleaned
     return ""
 
 def _clean_magalu_ref_refrigerator_type(value):
