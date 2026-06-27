@@ -299,24 +299,20 @@ def _merge_rating_summary(target, product_rating):
 # ---------------------------------------------------------------------------
 # Review summary (summarized_review_content) — GraphQL via browser channel.
 #
-# Rationale: the PDP HTML __NEXT_DATA__ (only legacy source for this field)
-# returns Akamai 403 on every product, and plain `requests` to the GraphQL
-# endpoint is blocked too (even the control itemQuery 403s — see
-# probe_review_summary_graphql.py). The page itself runs a GraphQL operation
-# named `reviewSummaryQuery` (visible as a key in __NEXT_DATA__), so the same
-# browser GraphQL channel that already carries itemQuery / ProductRating can
-# fetch the summary with no PDP HTML and no ZenRows.
+# The AI review summary lives ONLY in the PDP (Akamai-403 to plain requests),
+# but the underlying GraphQL field is reachable via the browser GraphQL channel
+# (same transport as itemQuery / ProductRating) with no PDP HTML and no ZenRows.
 #
-# TODO(capture): the query text, operationName, and variable name/type below
-# are best-effort guesses copied from probe_review_summary_graphql.py. Replace
-# them with the ground-truth payload captured from a live PDP's reviewSummaryQuery
-# request (browser devtools / __NEXT_DATA__) before enabling in production.
-# Gated behind SEDA_MAGALU_REVIEW_SUMMARY_GRAPHQL (default off) until verified.
+# Verified against the live federation endpoint (introspection is disabled, so
+# this was found by error-message probing): the field is `reviewSummary`, takes
+# productId: String! (the /p/<id> item id), and returns { summary, tags }.
+# NOTE: the __NEXT_DATA__ cache key is "reviewSummaryQuery", but that is the
+# page's operation/cache name, NOT the schema field — the field is reviewSummary.
+# reviewSummary returns null for products without a generated summary.
 # ---------------------------------------------------------------------------
 REVIEW_SUMMARY_QUERY = """
-query reviewSummaryQuery($productId: String!) {
-  reviewSummaryQuery(productId: $productId) {
-    productId
+query reviewSummary($productId: String!) {
+  reviewSummary(productId: $productId) {
     summary
     tags
   }
@@ -338,7 +334,7 @@ def fetch_review_summary(product_id=None, variation_id=None, timeout=None, conte
     trace = []
     payload = _summary_payload(identifier)
     data = _post_summary_browser(payload, timeout, trace, context_url=context_url)
-    node = (data.get("data") or {}).get("reviewSummaryQuery") or {}
+    node = (data.get("data") or {}).get("reviewSummary") or {}
     summary = clean_text(node.get("summary"))
     return {
         "success": bool(summary),
@@ -351,8 +347,8 @@ def fetch_review_summary(product_id=None, variation_id=None, timeout=None, conte
 
 def _summary_payload(identifier):
     return {
-        "operationName": "reviewSummaryQuery",
-        "variables": {"productId": identifier},  # TODO(capture): confirm variable name/type
+        "operationName": "reviewSummary",
+        "variables": {"productId": identifier},
         "query": REVIEW_SUMMARY_QUERY,
     }
 

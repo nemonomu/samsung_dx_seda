@@ -380,13 +380,14 @@ def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
     # Gated off by default until the captured query shape is verified.
     if (
         not row.get("summarized_review_content")
-        and os.getenv("SEDA_MAGALU_REVIEW_SUMMARY_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
+        and os.getenv("SEDA_MAGALU_REVIEW_SUMMARY_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}
     ):
         from .magalu.review_api import fetch_review_summary
 
+        # reviewSummary(productId:) keys on the /p/<id> item id, not productRating.productId
         summary_result = fetch_review_summary(
-            product_id=result.get("product_id"),
-            variation_id=sku_from_url(product_url) or row.get("sku"),
+            product_id=sku_from_url(product_url) or row.get("item") or row.get("sku"),
+            variation_id=result.get("product_id"),
             context_url=product_url,
         )
         _record_result_trace(trace_rows, row, row_index, product_url, "review_summary_graphql", summary_result)
