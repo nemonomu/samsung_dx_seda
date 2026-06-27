@@ -480,7 +480,7 @@ def main():
     parser.add_argument("--cdp-start-timeout", type=int, default=20)
     parser.add_argument("--no-auto-start-cdp", action="store_true")
     parser.add_argument("--warmup-url", default=DEFAULT_WARMUP_URL)
-    parser.add_argument("--zipcode", default="01010-010")
+    parser.add_argument("--zipcode", default=os.getenv("SEDA_POSTAL_CODE", "01001-001"))
     parser.add_argument("--input", default=default_input())
     parser.add_argument("--output", default=default_output())
     parser.add_argument("--limit", type=int, default=0)

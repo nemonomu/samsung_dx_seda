@@ -3,6 +3,8 @@ import uuid
 
 import requests
 
+from ._net import request_with_retry
+
 
 REVIEWS_URL = "https://pdp-api.casasbahia.com.br/api/v3/reviews/product/{product_id}/source/CB"
 
@@ -21,11 +23,14 @@ def fetch_reviews(product_id, limit=None, timeout=None):
     session.trust_env = os.getenv("SEDA_CASAS_BAHIA_TRUST_ENV_PROXY", "0").lower() in {"1", "true", "yes", "y"}
     while len(collected) < limit:
         try:
-            response = session.get(
-                REVIEWS_URL.format(product_id=product_id),
-                params={"page": page, "size": page_size, "orderBy": "MOST_USEFUL"},
-                headers=_headers(),
-                timeout=timeout,
+            response = request_with_retry(
+                lambda: session.get(
+                    REVIEWS_URL.format(product_id=product_id),
+                    params={"page": page, "size": page_size, "orderBy": "MOST_USEFUL"},
+                    headers=_headers(),
+                    timeout=timeout,
+                ),
+                throttle_host="cb_pdp",
             )
         except Exception as exc:
             return {"success": False, "error": f"{type(exc).__name__}: {exc}", "reviews": collected, "general": general}

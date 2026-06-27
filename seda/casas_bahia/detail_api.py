@@ -8,6 +8,7 @@ from pathlib import Path
 
 import requests
 
+from ._net import is_retryable_exc, request_with_retry, retry_after_seconds, sleep_backoff, throttle
 from ..parsers import (
     appliance_model_number_from_text,
     clean_text,
@@ -337,25 +338,40 @@ def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None, referer_url=Non
     headers = _headers(zipcode=zipcode, include_cvip=True)
     if referer_url:
         headers["referer"] = str(referer_url)
+    retries = _int_env("SEDA_CASAS_BAHIA_FREIGHT_RETRIES", _int_env("SEDA_CASAS_BAHIA_API_RETRIES", 3))
     last_error = "not_attempted"
-    for transport in _freight_transports():
-        try:
-            response = _freight_get(transport, url, params, headers, timeout)
-        except Exception as exc:
-            last_error = f"{transport}_{type(exc).__name__}: {exc}"
+    # pdp-api rate-limits (429) when hit back-to-back and occasionally drops the
+    # TLS handshake; pace per host and back off on rate-limit / transient errors.
+    for attempt in range(retries + 1):
+        retry_after = None
+        retryable = False
+        for transport in _freight_transports():
+            throttle(host="cb_pdp")
+            try:
+                response = _freight_get(transport, url, params, headers, timeout)
+            except Exception as exc:
+                last_error = f"{transport}_{type(exc).__name__}: {exc}"
+                retryable = retryable or is_retryable_exc(exc)
+                continue
+            if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+                content_type = response.headers.get("content-type", "")[:60]
+                body_len = len(response.text or "")
+                prefix = "blocked" if _blocked_response(response.text, response.status_code) else "status"
+                last_error = f"{transport}_{prefix}_{response.status_code}:ct={content_type}:len={body_len}"
+                if response.status_code in (429, 500, 502, 503, 504):
+                    retryable = True
+                    retry_after = retry_after or retry_after_seconds(response)
+                continue
+            try:
+                data = response.json()
+            except ValueError:
+                last_error = "invalid_json"
+                continue
+            return {"success": True, "detail": _freight_detail(data), "method": f"{transport}_freight_api"}
+        if attempt < retries and retryable:
+            sleep_backoff(attempt, retry_after=retry_after)
             continue
-        if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
-            content_type = response.headers.get("content-type", "")[:60]
-            body_len = len(response.text or "")
-            prefix = "blocked" if _blocked_response(response.text, response.status_code) else "status"
-            last_error = f"{transport}_{prefix}_{response.status_code}:ct={content_type}:len={body_len}"
-            continue
-        try:
-            data = response.json()
-        except ValueError:
-            last_error = "invalid_json"
-            continue
-        return {"success": True, "detail": _freight_detail(data), "method": f"{transport}_freight_api"}
+        break
     if _freight_zenrows_enabled() and referer_url:
         fallback = _fetch_freight_zenrows_pdp(referer_url, sku_id, seller_id, zipcode=zipcode, timeout=timeout)
         if fallback.get("success"):
@@ -543,7 +559,10 @@ def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=N
     session = requests.Session()
     session.trust_env = os.getenv("SEDA_CASAS_BAHIA_TRUST_ENV_PROXY", "0").lower() in {"1", "true", "yes", "y"}
     try:
-        response = session.post(RECS_API, json=body, headers=_headers(), timeout=timeout)
+        response = request_with_retry(
+            lambda: session.post(RECS_API, json=body, headers=_headers(), timeout=timeout),
+            throttle_host="cb_recs",
+        )
     except Exception as exc:
         return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
     if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
@@ -572,7 +591,10 @@ def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
         "idLojista": seller_id,
     }
     try:
-        response = requests.get(PICKUP_API, params=params, headers=_pickup_headers(), timeout=timeout)
+        response = request_with_retry(
+            lambda: requests.get(PICKUP_API, params=params, headers=_pickup_headers(), timeout=timeout),
+            throttle_host="cb_pickup",
+        )
     except Exception as exc:
         return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
     if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
