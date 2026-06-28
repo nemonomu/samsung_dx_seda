@@ -982,6 +982,14 @@ def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_tr
             for key in ("star_rating", "count_of_star_ratings", "count_of_reviews"):
                 if detail.get(key) and not row.get(key):
                     row[key] = detail[key]
+            if _metric_int(row.get("count_of_reviews")) == 0:
+                # page confirms zero comments -> stop; do not collect anything
+                trace_item["descriptions"] = 0
+                trace_item["total_reviews_after"] = len(reviews)
+                trace.append(trace_item)
+                _record_review_page_trace(review_page_trace_rows, row, row_index, product_url, review_url, trace_item)
+                _record_subcall(trace_rows, row, row_index, product_url, "review_html_pages", success=True, detail="count_zero")
+                return {"success": True, "reviews": reviews[:target], "trace": trace, "method": "review_html_pages", "target": target}
             page_reviews = _review_values(detail.get("detailed_review_content"))
             trace_item["descriptions"] = len(page_reviews)
             added = 0

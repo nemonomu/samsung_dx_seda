@@ -1059,6 +1059,11 @@ def parse_detail(html_text, retailer, base_url, product_url):
         row["screen_size"] = ""
         row["estimated_annual_electricity_use"] = ""
         row["model_year"] = ""
+        # Magalu reviews/recommendation come only from NEXT_DATA; drop the generic
+        # visible-text scrape so page chrome (sort/filter UI) never leaks in as a
+        # "review" when the structured review list is empty.
+        row["detailed_review_content"] = ""
+        row["recommendation_intent"] = ""
         magalu_detail = _parse_magalu_next_detail(html_text, base_url, product_url)
         row.update({key: value for key, value in magalu_detail.items() if value not in ("", None, [], {})})
     if retailer == "Casas Bahia":
