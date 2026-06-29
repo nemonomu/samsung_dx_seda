@@ -1320,7 +1320,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "screen_size": _magalu_attribute_value(item, ["polegadas", "tamanho da tela"])
         or _magalu_factsheet_value(item, ["polegadas", "tamanho da tela"]),
         "estimated_annual_electricity_use": _magalu_energy_use(item),
-        "model_year": _magalu_factsheet_value(item, ["ano de lancamento"]),
+        "model_year": _magalu_factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
+        or _magalu_model_year_from_description(item),
         "summarized_review_content": html_summary or clean_text(review_summary.get("summary")),
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "star_rating": clean_text(general.get("rating")),
@@ -1336,7 +1337,9 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
                 "ref_capacity": _magalu_factsheet_value(
                     item,
                     ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
-                ),
+                )
+                or _magalu_factsheet_value(item, ["capacidade"])
+                or _magalu_capacity_from_description(item),
             }
         )
     if line == "LDY":
@@ -1387,6 +1390,33 @@ def _magalu_energy_use(item):
             continue
         value = clean_text(_magalu_fact_value(fact))
         if value:
+            return value
+    return _magalu_energy_from_description(item)
+
+def _magalu_description_text(item):
+    return re.sub(r"<[^>]+>", "\n", str(item.get("description") or ""))
+
+def _magalu_energy_from_description(item):
+    # Fallback: free-text "Descrição e ficha técnica" block, e.g. "Consumo (máximo): 130 W".
+    # Accept energy units (W / kWh) only; skip water consumption ("Consumo ... de Água").
+    for m in re.finditer(r"Consumo[^:<\n]{0,40}:\s*([^<;\n|]+)", _magalu_description_text(item), re.I):
+        if "agua" in remove_accents(m.group(0)).lower():
+            continue
+        value = clean_text(m.group(1))
+        if re.search(r"\d[\d.,]*\s*(?:k?wh|w)\b", value, re.I):
+            return value
+    return ""
+
+def _magalu_model_year_from_description(item):
+    # Fallback: free-text description block, e.g. "Ano: 2025".
+    m = re.search(r"\bAno\b[^<\n]{0,20}?\b((?:19|20)\d{2})\b", _magalu_description_text(item), re.I)
+    return m.group(1) if m else ""
+
+def _magalu_capacity_from_description(item):
+    # Fallback: free-text description block, e.g. "Capacidade: 394 litros" (liters only).
+    for m in re.finditer(r"Capacidade[^:<\n]{0,40}:\s*([^<;\n|]+)", _magalu_description_text(item), re.I):
+        value = clean_text(m.group(1))
+        if re.search(r"\d[\d.,]*\s*(?:l\b|litros?)", value, re.I):
             return value
     return ""
 

@@ -464,7 +464,8 @@ def _detail_from_item(item, seller_id=None):
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
         "screen_size": _attribute_value(item, ["polegadas", "tamanho da tela"]) or _factsheet_value(item, ["polegadas", "tamanho da tela"]),
         "estimated_annual_electricity_use": _energy_use(item),
-        "model_year": _factsheet_value(item, ["ano de lancamento", "ano de lançamento"]),
+        "model_year": _factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
+        or _model_year_from_description(item),
         "star_rating": clean_text(rating.get("score")),
         "count_of_star_ratings": clean_text(rating.get("count")),
         "parse_status": "detail_item_graphql",
@@ -476,7 +477,9 @@ def _detail_from_item(item, seller_id=None):
                 "ref_capacity": _factsheet_value(
                     item,
                     ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
-                ),
+                )
+                or _factsheet_value(item, ["capacidade"])
+                or _capacity_from_description(item),
             }
         )
     if line == "LDY":
@@ -512,6 +515,33 @@ def _energy_use(item):
             continue
         value = clean_text(_fact_value(fact))
         if value:
+            return value
+    return _energy_from_description(item)
+
+def _description_text(item):
+    return re.sub(r"<[^>]+>", "\n", str(item.get("description") or ""))
+
+def _energy_from_description(item):
+    # Fallback: free-text "Descrição e ficha técnica" block, e.g. "Consumo (máximo): 130 W".
+    # Accept energy units (W / kWh) only; skip water consumption ("Consumo ... de Água").
+    for m in re.finditer(r"Consumo[^:<\n]{0,40}:\s*([^<;\n|]+)", _description_text(item), re.I):
+        if "agua" in _ascii_lower(m.group(0)):
+            continue
+        value = clean_text(m.group(1))
+        if re.search(r"\d[\d.,]*\s*(?:k?wh|w)\b", value, re.I):
+            return value
+    return ""
+
+def _model_year_from_description(item):
+    # Fallback: free-text description block, e.g. "Ano: 2025".
+    m = re.search(r"\bAno\b[^<\n]{0,20}?\b((?:19|20)\d{2})\b", _description_text(item), re.I)
+    return m.group(1) if m else ""
+
+def _capacity_from_description(item):
+    # Fallback: free-text description block, e.g. "Capacidade: 394 litros" (liters only).
+    for m in re.finditer(r"Capacidade[^:<\n]{0,40}:\s*([^<;\n|]+)", _description_text(item), re.I):
+        value = clean_text(m.group(1))
+        if re.search(r"\d[\d.,]*\s*(?:l\b|litros?)", value, re.I):
             return value
     return ""
 
