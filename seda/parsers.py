@@ -1418,10 +1418,7 @@ def _clean_magalu_ref_refrigerator_type(value):
     return text if valid else ""
 
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):
-    fallback = clean_text(item.get("offerId") or item.get("id")) or sku_from_url(product_url)
-    if line in {"REF", "LDY"}:
-        return reference or model
-    return model
+    return reference or model
 
 def _magalu_first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
