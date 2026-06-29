@@ -197,9 +197,9 @@ def _product_source_detail(data):
                     _first_group_spec(
                         grouped_specs,
                         ["especificacoes tecnicas"],
-                        ["capacidade de armazenagem total (l)", "capacidade de armazenagem total"],
+                        ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"],
                     )
-                    or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total"])
+                    or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"])
                 ),
                 "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
             }
