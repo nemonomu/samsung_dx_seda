@@ -1353,7 +1353,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
                         "abertura da tampa",
                     ],
                 ),
-                "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"]),
+                "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"])
+                or _magalu_factsheet_value(item, ["capacidade"]),
                 "ldy_color": _magalu_factsheet_value(item, ["cor", "cor do produto"])
                 or ldy_color_from_text(item.get("title")),
             }

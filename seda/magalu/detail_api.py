@@ -493,7 +493,7 @@ def _detail_from_item(item, seller_id=None):
                         "abertura da tampa",
                     ],
                 ),
-                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"]),
+                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"]) or _factsheet_value(item, ["capacidade"]),
                 "ldy_color": _factsheet_value(item, ["cor", "cor do produto"]) or ldy_color_from_text(item.get("title")),
             }
         )
