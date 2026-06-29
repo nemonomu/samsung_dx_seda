@@ -12,6 +12,7 @@ from ._net import is_retryable_exc, request_with_retry, retry_after_seconds, sle
 from ..parsers import (
     appliance_model_number_from_text,
     clean_text,
+    ldy_color_from_text,
     ldy_sku_from_text,
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
@@ -205,29 +206,83 @@ def _product_source_detail(data):
             }
         )
     if line == "LDY":
+        description = _description_text(data)
         detail.update(
             {
                 "ldy_loading_type": _known_text(
                     _first_group_spec(grouped_specs, ["caracteristicas"], ["acesso ao cesto"])
                     or _first_spec(spec_values, ["acesso ao cesto"])
+                    or _freetext_label_value(description, ["acesso ao cesto"])
                 ),
                 "ldy_color": _known_text(
                     _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
                     or _first_spec(spec_values, ["cor"])
+                    or _freetext_label_value(description, ["cor"])
+                    or ldy_color_from_text(name)
                 ),
                 "ldy_capacity": _known_text(
                     _first_group_spec(
                         grouped_specs,
                         ["caracteristicas"],
-                        ["capacidade kg de roupas", "capacidade"],
+                        ["capacidade total", "capacidade kg de roupas", "capacidade"],
                     )
-                    or _first_spec(spec_values, ["capacidade kg de roupas", "capacidade"])
+                    or _first_spec(spec_values, ["capacidade total", "capacidade kg de roupas", "capacidade"])
+                    or _ldy_capacity_freetext(description)
                 ),
                 "sku_short_version": ldy_sku_short_version_from_text(name),
                 "sku": ldy_sku_from_text(name),
             }
         )
     return detail
+
+
+def _description_text(data):
+    product = data.get("product") if isinstance(data.get("product"), dict) else {}
+    raw = product.get("description") or product.get("rawDescription") or ""
+    if not raw:
+        return ""
+    # The product-source description is HTML; drop tags so "Label: value;"
+    # spec lines in the free text become searchable plain text.
+    return clean_text(re.sub(r"<[^>]+>", " ", str(raw)))
+
+
+def _freetext_label_value(text, labels):
+    """Pull "Label: value" out of the free-text description (value up to ';')."""
+    if not text:
+        return ""
+    for label in labels:
+        words = [re.escape(word) for word in str(label).split()]
+        if not words:
+            continue
+        pattern = r"\b" + r"\s+".join(words) + r"\s*:\s*([^;\n\r]+)"
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            value = _known_text(match.group(1))
+            if value:
+                return value
+    return ""
+
+
+def _ldy_capacity_freetext(text):
+    """Free-text capacity fallback; "Capacidade total" wins, then variants."""
+    if not text:
+        return ""
+    patterns = (
+        r"capacidade\s+total\s*:\s*([^;\n\r]+)",
+        r"capacidade\s*:\s*([^;\n\r]+)",
+        r"capacidade\s*\(\s*kg\s*\)\s*:\s*([^;\n\r]+)",
+        r"capacidade\s*-\s*kg\s*-?\s*:\s*([^;\n\r]+)",
+        r"capacidade\s+kg\s+de\s+roupas\s*:\s*([^;\n\r]+)",
+        r"capacidade\s+de\s+roupas\s*:\s*([^;\n\r]+)",
+        r"capacidade\s+da\s+m[aá]quina\s+de\s+lavar\s*:\s*([^;\n\r]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            value = _known_text(match.group(1))
+            if value:
+                return value
+    return ""
 
 def _spec_values(groups):
     specs = {}
