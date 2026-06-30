@@ -789,7 +789,13 @@ def _magalu_search_payload_error(url, html):
 def graphql_post(payload, timeout=None, context_url=None):
     page = _page_for_use("graphql_post")
     timeout = int(timeout) if timeout is not None else _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT", 60)
-    page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=False)
+    # The federation GraphQL fetch only needs a warm magalu origin (cookies/CORS), not
+    # the specific product page. Reuse the current warm page instead of navigating to
+    # context_url per product (each nav costs a page load + warmup sleep). context_url
+    # is kept only as a recovery target for retries after a blocked/failed attempt.
+    reuse_warm_page = os.getenv("SEDA_MAGALU_GRAPHQL_REUSE_PAGE", "1").lower() not in {"0", "false", "no", "n"}
+    initial_context = None if reuse_warm_page else context_url
+    page = _prepare_js_page(page, "graphql_post_warmup", context_url=initial_context, allow_default_warmup=True)
 
     operation = payload.get("operationName") or ""
     payload_text = json.dumps(payload, ensure_ascii=False)
@@ -855,7 +861,9 @@ return (async () => {
         if not blocked and last["status_code"] == 200:
             return last
         if attempt < attempts:
-            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=False)
+            # recovery: on a blocked/failed attempt, escalate to navigating to the
+            # product page (context_url) before retrying.
+            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
     return last
 
 

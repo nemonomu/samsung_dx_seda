@@ -1327,6 +1327,7 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "star_rating": clean_text(general.get("rating")),
         "count_of_star_ratings": clean_text(general.get("reviewCount")),
         "count_of_reviews": clean_text(general.get("commentCount") if general.get("commentCount") is not None else review_page.get("totalItems")),
+        "total_review_pages": clean_text(review_page.get("totalPages")),
         "detailed_review_content": compact_json(_magalu_review_descriptions(product_rating, limit=20)),
         "parse_status": "detail_next_data",
     }

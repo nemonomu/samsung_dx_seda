@@ -960,11 +960,20 @@ def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_tr
         return {"success": False, "reviews": reviews, "trace": [], "method": "review_html_pages", "target": target, "error": "missing_review_url"}
 
     max_pages = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_MAX_PAGES", "10"))
+    # stop after this many consecutive pages that add no new review text; beyond the
+    # real page count Magalu still returns a 200 page with empty userReviews.items,
+    # so without this guard the loop downloads up to max_pages of empty ~0.5MB HTML.
+    empty_streak_limit = int(os.getenv("SEDA_MAGALU_REVIEW_HTML_EMPTY_STREAK", "2"))
     start_page = 1 if not reviews else 2
     seen = {review.casefold() for review in reviews}
     trace = []
     methods = []
+    empty_streak = 0
+    total_pages = 0  # real page count from userReviews.page.totalPages, once known
     for page in range(start_page, max_pages + 1):
+        if total_pages and page > total_pages:
+            # never fetch past the last real review page
+            break
         page_url = _magalu_review_page_url(review_url, page)
         result = _fetch_magalu_next_html(page_url, label=f"review_page_{page}")
         methods.append(result.get("method") or "unknown")
@@ -982,6 +991,9 @@ def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_tr
             for key in ("star_rating", "count_of_star_ratings", "count_of_reviews"):
                 if detail.get(key) and not row.get(key):
                     row[key] = detail[key]
+            parsed_total_pages = _metric_int(detail.get("total_review_pages"))
+            if parsed_total_pages > 0:
+                total_pages = parsed_total_pages
             if _metric_int(row.get("count_of_reviews")) == 0:
                 # page confirms zero comments -> stop; do not collect anything
                 trace_item["descriptions"] = 0
@@ -1003,10 +1015,17 @@ def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_tr
                 if len(reviews) >= target:
                     break
             trace_item["new_descriptions"] = added
+            empty_streak = 0 if added else empty_streak + 1
+        else:
+            # non-200 / missing __NEXT_DATA__ yields nothing either
+            empty_streak += 1
         trace_item["total_reviews_after"] = len(reviews)
         trace.append(trace_item)
         _record_review_page_trace(review_page_trace_rows, row, row_index, product_url, review_url, trace_item)
         if len(reviews) >= target:
+            break
+        if empty_streak >= empty_streak_limit:
+            # review text exhausted (or pages blocked) -> further pages won't help
             break
 
     if reviews:
