@@ -287,7 +287,10 @@ def _is_magalu_row(row):
 def _account_name_for_output(row):
     if _is_magalu_row(row):
         return "Magalu"
-    return row.get("retailer") or row.get("account_name", "")
+    retailer = row.get("retailer") or row.get("account_name", "")
+    if str(retailer).strip().lower() in {"casas bahia", "casasbahia"}:
+        return "CasasBahia"
+    return retailer
 
 def _page_type(row):
     if row.get("main_rank"):
