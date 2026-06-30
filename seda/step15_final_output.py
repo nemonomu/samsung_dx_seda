@@ -307,6 +307,7 @@ def _star_rating_for_output(value):
         number = float(text.replace(",", "."))
     except ValueError:
         return text
+    number = round(number, 1)  # ratings are reported to one decimal place
     if number == 0:
         return "0"
     if number.is_integer():
