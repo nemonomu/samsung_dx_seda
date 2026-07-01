@@ -71,13 +71,19 @@ def get_page():
 
 def _page_for_use(reason=""):
     global _PAGE_USE_COUNT
-    page = get_page()
-    _PAGE_USE_COUNT += 1
-    if _should_recycle_page(page):
-        _restart_page(reason or "recycle")
+    try:
         page = get_page()
+        _PAGE_USE_COUNT += 1
+        if _should_recycle_page(page):
+            _restart_page(reason or "recycle")
+            page = get_page()
+            _PAGE_USE_COUNT = 1
+        return page
+    except Exception:
+        # getting or probing the page failed (dead/detached driver) -> relaunch clean
+        _restart_page(reason or "page_for_use_error")
         _PAGE_USE_COUNT = 1
-    return page
+        return get_page()
 
 
 def _should_recycle_page(page):
@@ -171,6 +177,23 @@ def _is_oom_state(url, html):
         "chromewebdata",
     )
     return any(marker in haystack for marker in markers)
+
+
+def _is_dead_page_error(exc):
+    """True when an exception means the browser tab/driver is gone and the page
+    object must be fully relaunched (not just re-navigated). Covers the DrissionPage
+    'Not attached to an active page' CDP error and similar disconnects that used to
+    hang the run instead of recovering."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    markers = (
+        "not attached", "active page", "target closed", "no target",
+        "target crashed", "disconnected", "browser has been closed",
+        "browser is closed", "browser already closed", "cdperror",
+        "chrome-error", "page crash", "tab crash", "cannot access",
+        "connection refused", "connection aborted", "connection reset",
+        "websocket", "closed by",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _trace_oom(trace, attempt, page):
@@ -795,7 +818,12 @@ def graphql_post(payload, timeout=None, context_url=None):
     # is kept only as a recovery target for retries after a blocked/failed attempt.
     reuse_warm_page = os.getenv("SEDA_MAGALU_GRAPHQL_REUSE_PAGE", "1").lower() not in {"0", "false", "no", "n"}
     initial_context = None if reuse_warm_page else context_url
-    page = _prepare_js_page(page, "graphql_post_warmup", context_url=initial_context, allow_default_warmup=True)
+    try:
+        page = _prepare_js_page(page, "graphql_post_warmup", context_url=initial_context, allow_default_warmup=True)
+    except Exception:
+        _restart_page("graphql_post_prepare_failed")
+        page = _page_for_use("graphql_post_prepare_retry")
+        page = _prepare_js_page(page, "graphql_post_warmup", context_url=None, allow_default_warmup=True)
 
     operation = payload.get("operationName") or ""
     payload_text = json.dumps(payload, ensure_ascii=False)
@@ -832,9 +860,15 @@ return (async () => {
         try:
             raw_result = page.run_js(script, payload_text, timeout=timeout) or "{}"
         except Exception as exc:
-            if _trace_oom([], attempt, page):
-                _restart_page("graphql_post_run_js_oom")
+            if _trace_oom([], attempt, page) or _is_dead_page_error(exc):
+                # dead/crashed tab: fully relaunch and re-warm so the next attempt
+                # (and the next product) runs on a live page instead of hanging.
+                _restart_page("graphql_post_dead_page")
                 page = _page_for_use("graphql_post_retry")
+                try:
+                    page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
+                except Exception:
+                    pass
             result = {"status": 0, "error": f"{type(exc).__name__}: {exc}", "text": ""}
         else:
             try:
@@ -863,7 +897,11 @@ return (async () => {
         if attempt < attempts:
             # recovery: on a blocked/failed attempt, escalate to navigating to the
             # product page (context_url) before retrying.
-            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
+            try:
+                page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
+            except Exception:
+                _restart_page("graphql_post_retry_prepare_failed")
+                page = _page_for_use("graphql_post_retry")
     return last
 
 
