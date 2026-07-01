@@ -47,10 +47,15 @@ if not defined SEDA_MAGALU_DETAIL_HTML_FALLBACK set SEDA_MAGALU_DETAIL_HTML_FALL
 if not defined SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD set SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD=5
 if not defined SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD set SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD=5
 if not defined SEDA_MAGALU_BROWSER_HTML_ATTEMPTS set SEDA_MAGALU_BROWSER_HTML_ATTEMPTS=1
-REM lowered from 50: recycle the browser sooner to reduce tab-crash odds (dead-page
-REM crashes are now auto-recovered, but fresher pages crash less often)
-if not defined SEDA_MAGALU_BROWSER_MAX_USES set SEDA_MAGALU_BROWSER_MAX_USES=30
-if not defined SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS set SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS=1200
+REM DrissionPage 4.1.1.2 can crash its CDP listener on page navigation
+REM (_onDomContentEventFired -> Page.stopLoading -> "Not attached"). With GraphQL
+REM page-reuse on, the browser stays on one warm page and only navigates when it
+REM recycles -- so disable count-based recycling and stretch the age limit to make
+REM navigations (and the crash) rare. GraphQL timeout lowered so the rare crash
+REM self-recovers fast instead of stalling on 60s hangs.
+if not defined SEDA_MAGALU_BROWSER_MAX_USES set SEDA_MAGALU_BROWSER_MAX_USES=0
+if not defined SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS set SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS=3600
+if not defined SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT set SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT=25
 if not defined SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS set SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS=2
 if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT=1
 set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
