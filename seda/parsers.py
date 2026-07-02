@@ -1385,7 +1385,7 @@ def _magalu_energy_use(item):
         "consumo mensal de energia",
         "consumo energetico",
     }
-    for fact in _iter_magalu_facts(item.get("factsheet") or []):
+    for fact in _iter_magalu_facts(_magalu_item_facts(item)):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
         if key not in allowed_keys:
             continue
@@ -1467,9 +1467,28 @@ def _magalu_attribute_value(item, labels):
             return clean_text(attribute.get("current"))
     return ""
 
+def _magalu_item_facts(item):
+    """Factsheet entries for an item, falling back to bundled sub-products.
+
+    Bundle/combo listings (e.g. TV + soundbar) leave item.factsheet empty and carry
+    the real specs under item.bundles[*].factsheet, so read those when the item's own
+    factsheet is missing.
+    """
+    if not isinstance(item, dict):
+        return []
+    facts = item.get("factsheet")
+    if facts:
+        return facts
+    merged = []
+    for bundle in item.get("bundles") or []:
+        if isinstance(bundle, dict) and bundle.get("factsheet"):
+            merged.extend(bundle["factsheet"])
+    return merged
+
+
 def _magalu_factsheet_value(item, labels):
     wanted = {_normalize_key(label) for label in labels}
-    for fact in _iter_magalu_facts(item.get("factsheet") or []):
+    for fact in _iter_magalu_facts(_magalu_item_facts(item)):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
         if key in wanted:
             return _magalu_fact_value(fact)
