@@ -384,6 +384,14 @@ def _post(payload, timeout, trace, label, context_url=None):
             return data
         return {}
 
+    browser_enabled = os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
+    if browser_enabled:
+        # federation blocks plain requests.post when browser mode is on; go straight to
+        # the browser channel instead of wasting an always-blocked requests attempt.
+        data = _post_browser_graphql(payload, timeout, trace, label, context_url=context_url)
+        if data is not None:
+            return data
+
     retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "0"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
     for attempt in range(retries + 1):
@@ -415,10 +423,6 @@ def _post(payload, timeout, trace, label, context_url=None):
             trace_item["errors"] = data.get("errors")
             continue
         return data
-    if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}:
-        data = _post_browser_graphql(payload, timeout, trace, label, context_url=context_url)
-        if data is not None:
-            return data
     return {}
 
 def _post_browser_graphql(payload, timeout, trace, label, context_url=None):

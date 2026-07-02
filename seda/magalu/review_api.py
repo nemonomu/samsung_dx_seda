@@ -180,7 +180,12 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None,
 
 def _request_product_rating(session, variation_id, page, page_size, timeout, retries, retry_sleep_seconds, trace, context_url=None):
     payload = _payload(variation_id, page, page_size)
+    browser_enabled = os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL", "0").lower() not in {"0", "false", "no", "n"}
     for attempt in range(retries + 1):
+        if browser_enabled:
+            # federation blocks plain requests.post when browser mode is on; skip the
+            # always-blocked requests attempt and use the browser channel below.
+            break
         if attempt:
             time.sleep(retry_sleep_seconds * attempt)
         try:
