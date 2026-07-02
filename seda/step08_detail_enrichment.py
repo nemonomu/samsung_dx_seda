@@ -1274,9 +1274,11 @@ def main():
         return
     workers = int(os.getenv("SEDA_MAGALU_DETAIL_WORKERS", "1") or "1")
     is_magalu = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().lower() == "magalu"
-    if is_magalu and workers > 1 and not os.getenv("SEDA_DETAIL_WORKER_ID"):
+    is_worker = bool(os.getenv("SEDA_DETAIL_WORKER_ID"))
+    is_resume = bool(os.getenv("SEDA_DETAIL_SKIP", "").strip())
+    if is_magalu and workers > 1 and not is_worker and not is_resume:
         # fan out across N child processes (each its own browser), then merge.
-        # Magalu-only: _run_parallel spawns seda.magalu.step08 workers.
+        # Magalu-only; skipped when resuming (SEDA_DETAIL_SKIP) so resume stays serial.
         _run_parallel(workers, rows, output)
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
