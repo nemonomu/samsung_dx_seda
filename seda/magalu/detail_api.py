@@ -5,6 +5,7 @@ import time
 import requests
 
 from ..parsers import (
+    appliance_model_number_from_text,
     clean_text,
     compact_json,
     format_brl,
@@ -573,7 +574,9 @@ def _clean_ref_refrigerator_type(value):
     return text if valid else ""
 
 def _sku_for_product_line(line, reference, model, item):
-    return reference or model
+    # Some listings return an empty factsheet (no referencia/modelo) even on a BR IP;
+    # the model is still present in the title, so fall back to extracting it there.
+    return reference or model or appliance_model_number_from_text(item.get("title"))
 
 def _first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []

@@ -1449,7 +1449,9 @@ def _clean_magalu_ref_refrigerator_type(value):
     return text if valid else ""
 
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):
-    return reference or model
+    # factsheet can be empty (no referencia/modelo) for some listings; fall back to
+    # the model embedded in the title.
+    return reference or model or appliance_model_number_from_text(item.get("title"))
 
 def _magalu_first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
