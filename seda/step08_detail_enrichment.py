@@ -1,7 +1,11 @@
 ﻿import json
 import csv
+import math
 import os
 import re
+import subprocess
+import sys
+import time
 
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -1199,6 +1203,61 @@ def _safe_filename(value):
     return text[:120] or "sku"
 
 
+def _run_parallel(workers, rows, output):
+    """Fan step08 out across N child processes, each with its own browser, then merge.
+
+    Detail is dominated by serial browser GraphQL round-trips; a single browser page
+    processes them one at a time. Splitting the targets across N separate processes
+    (distinct browser port + profile each) gives ~N x throughput. Merge preserves
+    target order because the slices are contiguous.
+    """
+    total = len(rows)
+    if total == 0:
+        write_csv(output, [], columns=OUTPUT_COLUMNS)
+        print(f"[seda] wrote {output} rows=0")
+        return
+    workers = max(1, min(workers, total))
+    slice_size = math.ceil(total / workers)
+    base_port = int(os.getenv("SEDA_MAGALU_BROWSER_BASE_PORT", "9350"))
+    profile_base = os.getenv("SEDA_MAGALU_BROWSER_PROFILE", "C:/tmp/seda_magalu_drission_profile")
+    stagger = float(os.getenv("SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS", "4"))
+    out_dir = os.path.dirname(output) or "."
+    parts, procs = [], []
+    for i in range(workers):
+        start = i * slice_size
+        end = min(total, start + slice_size)
+        if start >= end:
+            continue
+        part = os.path.join(out_dir, f"_detail_part_{i}.csv")
+        env = dict(os.environ)
+        env["SEDA_DETAIL_WORKER_ID"] = str(i)
+        env["SEDA_MAGALU_DETAIL_WORKERS"] = "1"  # child stays serial (also guarded by WORKER_ID)
+        env["SEDA_DETAIL_SKIP"] = str(start)
+        env["SEDA_DETAIL_LIMIT"] = str(end)
+        env["SEDA_DETAIL_OUTPUT_CSV"] = part
+        env["SEDA_MAGALU_BROWSER_LOCAL_PORT"] = str(base_port + i)
+        env["SEDA_MAGALU_BROWSER_PROFILE"] = f"{profile_base}_w{i}"
+        env["SEDA_DETAIL_TRACE"] = "0"  # workers share run_root; avoid clobbering trace files
+        env.pop("SEDA_MAGALU_BROWSER_ADDRESS", None)  # each worker launches its own browser
+        parts.append((i, start, end, part))
+        print(f"[seda] detail worker {i}: rows [{start}:{end}) port={base_port + i} -> {part}", flush=True)
+        procs.append(subprocess.Popen([sys.executable, "-m", "seda.magalu.step08_detail_enrichment"], env=env))
+        if stagger > 0 and i < workers - 1:
+            time.sleep(stagger)  # stagger browser launches to avoid startup contention
+    failed = []
+    for (i, _s, _e, _p), proc in zip(parts, procs):
+        if proc.wait() != 0:
+            failed.append(i)
+    merged = []
+    for (i, start, end, part) in parts:
+        if os.path.exists(part):
+            merged.extend(read_csv(part))
+        else:
+            print(f"[seda] WARNING detail worker {i} produced no output ({part})", flush=True)
+    write_csv(output, merged, columns=OUTPUT_COLUMNS)
+    print(f"[seda] wrote {output} rows={len(merged)}/{total} (parallel workers={workers}, failed={failed})", flush=True)
+
+
 def main():
     root = run_root()
     input_csv = os.getenv("SEDA_DETAIL_TARGET_CSV", str(root / "output" / "seda_final_targets.csv"))
@@ -1212,6 +1271,13 @@ def main():
         rows = _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=checkpoint_every)
         write_csv(output, rows, columns=OUTPUT_COLUMNS)
         print(f"[seda] wrote {output} rows={len(rows)}")
+        return
+    workers = int(os.getenv("SEDA_MAGALU_DETAIL_WORKERS", "1") or "1")
+    is_magalu = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().lower() == "magalu"
+    if is_magalu and workers > 1 and not os.getenv("SEDA_DETAIL_WORKER_ID"):
+        # fan out across N child processes (each its own browser), then merge.
+        # Magalu-only: _run_parallel spawns seda.magalu.step08 workers.
+        _run_parallel(workers, rows, output)
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
     enriched = []

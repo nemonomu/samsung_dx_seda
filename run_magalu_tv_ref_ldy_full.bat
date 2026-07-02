@@ -50,6 +50,9 @@ REM crash), stretch age, and shorten graphql timeout for fast self-recovery
 if not defined SEDA_MAGALU_BROWSER_MAX_USES set SEDA_MAGALU_BROWSER_MAX_USES=0
 if not defined SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS set SEDA_MAGALU_BROWSER_MAX_AGE_SECONDS=3600
 if not defined SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT set SEDA_MAGALU_BROWSER_GRAPHQL_TIMEOUT=25
+REM parallel detail: N worker processes, each its own browser (port+profile). ~Nx
+REM throughput. Lower to 2 if blocks/crashes increase; set 1 to disable.
+if not defined SEDA_MAGALU_DETAIL_WORKERS set SEDA_MAGALU_DETAIL_WORKERS=3
 if not defined SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS set SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS=2
 if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT=1
 set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
