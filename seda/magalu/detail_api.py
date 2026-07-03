@@ -42,6 +42,25 @@ query itemQuery($itemId: ID!, $zipcode: String) {
       weight
       width
     }
+    bundles {
+      factsheet {
+        displayName
+        position
+        slug
+        elements {
+          keyName
+          position
+          slug
+          elements {
+            isHtml
+            keyName
+            position
+            slug
+            value
+          }
+        }
+      }
+    }
     factsheet {
       displayName
       position
@@ -514,7 +533,7 @@ def _energy_use(item):
         "consumo mensal de energia",
         "consumo energetico",
     }
-    for fact in _iter_facts(item.get("factsheet") or []):
+    for fact in _iter_facts(_item_facts(item)):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
         if key not in allowed_keys:
             continue
@@ -551,7 +570,7 @@ def _capacity_from_description(item):
     return ""
 
 def _ref_refrigerator_type(item):
-    for fact in _iter_facts(item.get("factsheet") or []):
+    for fact in _iter_facts(_item_facts(item)):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
         if key not in {"porta", "tipo"}:
             continue
@@ -675,11 +694,25 @@ def _attribute_value(item, labels):
 
 def _factsheet_value(item, labels):
     wanted = [_ascii_lower(label) for label in labels]
-    for fact in _iter_facts(item.get("factsheet") or []):
+    for fact in _iter_facts(_item_facts(item)):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
         if key in wanted:
             return _fact_value(fact)
     return ""
+
+def _item_facts(item):
+    """Factsheet for an item, falling back to bundled sub-products (TV + soundbar/
+    remote combos leave item.factsheet empty and carry specs under bundles[].factsheet)."""
+    if not isinstance(item, dict):
+        return []
+    facts = item.get("factsheet")
+    if facts:
+        return facts
+    merged = []
+    for bundle in item.get("bundles") or []:
+        if isinstance(bundle, dict) and bundle.get("factsheet"):
+            merged.extend(bundle["factsheet"])
+    return merged
 
 def _iter_facts(facts):
     if not isinstance(facts, list):
