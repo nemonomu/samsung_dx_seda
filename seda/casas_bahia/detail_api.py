@@ -194,14 +194,14 @@ def _product_source_detail(data):
                     _first_group_spec(grouped_specs, ["caracteristicas"], ["modelo"])
                     or _first_spec(spec_values, ["modelo"])
                 ),
-                "ref_capacity": _known_text(
+                "ref_capacity": _commaize_duplicates(_known_text(
                     _first_group_spec(
                         grouped_specs,
                         ["especificacoes tecnicas"],
                         ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"],
                     )
                     or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"])
-                ),
+                )),
                 "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
             }
         )
@@ -214,13 +214,13 @@ def _product_source_detail(data):
                     or _first_spec(spec_values, ["acesso ao cesto"])
                     or _freetext_label_value(description, ["acesso ao cesto"])
                 ),
-                "ldy_color": _known_text(
+                "ldy_color": _commaize_duplicates(_known_text(
                     _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
                     or _first_spec(spec_values, ["cor"])
-                    or _freetext_label_value(description, ["cor"])
+                    or ldy_color_from_text(_freetext_label_value(description, ["cor"]))
                     or ldy_color_from_text(name)
-                ),
-                "ldy_capacity": _known_text(
+                )),
+                "ldy_capacity": _commaize_duplicates(_known_text(
                     _first_group_spec(
                         grouped_specs,
                         ["caracteristicas"],
@@ -228,7 +228,7 @@ def _product_source_detail(data):
                     )
                     or _first_spec(spec_values, ["capacidade total", "capacidade kg de roupas", "capacidade"])
                     or _ldy_capacity_freetext(description)
-                ),
+                )),
                 "sku_short_version": ldy_sku_short_version_from_text(name),
                 "sku": ldy_sku_from_text(name),
             }
@@ -247,7 +247,9 @@ def _description_text(data):
 
 
 def _freetext_label_value(text, labels):
-    """Pull "Label: value" out of the free-text description (value up to ';')."""
+    """Pull "Label: value" out of the free-text description. The value ends at
+    ';', a newline, or a " -" bullet (descriptions use both) and is length
+    capped, so a bullet-delimited spec sheet can't leak in wholesale."""
     if not text:
         return ""
     for label in labels:
@@ -257,14 +259,43 @@ def _freetext_label_value(text, labels):
         pattern = r"\b" + r"\s+".join(words) + r"\s*:\s*([^;\n\r]+)"
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            value = _known_text(match.group(1))
+            segment = re.split(r"\s+-", match.group(1))[0]
+            value = _known_text(segment)[:60].strip()
             if value:
                 return value
     return ""
 
 
+# A leading capacity-looking token: "8Kg", "14 Kg", "1,2 kg", "67 L",
+# or a "De 11 a 15kg" range. Used to trim free-text captures to just the value.
+_LDY_CAPACITY_TOKEN_RE = re.compile(
+    r"^\s*(de\s+\d+\s+a\s+\d+\s*kg|\d+(?:[.,]\d+)?\s*(?:kgs?|kg\.|litros?|l)?)",
+    re.IGNORECASE,
+)
+
+
+def _capacity_token(value):
+    match = _LDY_CAPACITY_TOKEN_RE.match(str(value or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _commaize_duplicates(value):
+    """Some catalog specs duplicate a value joined by a hyphen ("14-14",
+    "Preto-Preto"). Keep the duplication but use a comma so it matches the
+    product page. Non-duplicate hyphens (ranges "8-12", "Auto-limpeza") stay."""
+    text = str(value or "").strip()
+    if "-" not in text:
+        return text
+    parts = [part.strip() for part in re.split(r"\s*-\s*", text)]
+    if len(parts) >= 2 and all(parts) and len(set(parts)) == 1:
+        return ",".join(parts)
+    return text
+
+
 def _ldy_capacity_freetext(text):
-    """Free-text capacity fallback; "Capacidade total" wins, then variants."""
+    """Free-text capacity fallback; "Capacidade total" wins, then variants.
+    Only the leading capacity token is kept (descriptions run spec lines
+    together without ';', so the raw match can be a whole spec sheet)."""
     if not text:
         return ""
     patterns = (
@@ -279,7 +310,7 @@ def _ldy_capacity_freetext(text):
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            value = _known_text(match.group(1))
+            value = _capacity_token(match.group(1))
             if value:
                 return value
     return ""
