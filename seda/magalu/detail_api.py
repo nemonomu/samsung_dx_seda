@@ -518,9 +518,12 @@ def _detail_from_item(item, seller_id=None):
                         "tipo de abertura electrodomestico",
                         "tipo de abertura do eletrodomestico",
                         "abertura da tampa",
+                        "tipo de carga",
                     ],
                 ),
-                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"]) or _factsheet_value(item, ["capacidade"]),
+                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"])
+                or _factsheet_value(item, ["capacidade da maquina de lavar", "capacidade da máquina de lavar"])
+                or _factsheet_value(item, ["capacidade"]),
                 "ldy_color": _factsheet_value(item, ["cor", "cor do produto"]) or ldy_color_from_text(item.get("title")),
             }
         )

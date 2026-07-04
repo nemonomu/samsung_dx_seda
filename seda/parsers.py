@@ -1355,9 +1355,11 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
                         "tipo de abertura electrodomestico",
                         "tipo de abertura do eletrodomestico",
                         "abertura da tampa",
+                        "tipo de carga",
                     ],
                 ),
                 "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"])
+                or _magalu_factsheet_value(item, ["capacidade da maquina de lavar", "capacidade da máquina de lavar"])
                 or _magalu_factsheet_value(item, ["capacidade"]),
                 "ldy_color": _magalu_factsheet_value(item, ["cor", "cor do produto"])
                 or ldy_color_from_text(item.get("title")),
