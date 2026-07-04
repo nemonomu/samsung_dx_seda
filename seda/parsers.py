@@ -1431,6 +1431,12 @@ def _magalu_ref_refrigerator_type(item):
         cleaned = _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
         if cleaned:
             return cleaned
+    # no valid door format (e.g. "Porta"="Inverter" is compressor tech) -> infer from
+    # door count. Only 2 -> Duplex; other counts are ambiguous so left blank.
+    doors = _magalu_factsheet_value(item, ["quantidade de portas", "numero de portas", "número de portas"])
+    match = re.search(r"\d+", doors or "")
+    if match and int(match.group()) == 2:
+        return "Duplex"
     return ""
 
 def _clean_magalu_ref_refrigerator_type(value):
