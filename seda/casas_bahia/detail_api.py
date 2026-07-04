@@ -192,9 +192,9 @@ def _product_source_detail(data):
         detail.update(
             {
                 "ref_refrigerator_type": _known_text(
-                    _first_group_spec(grouped_specs, ["caracteristicas"], ["modelo"])
-                    or _first_spec(spec_values, ["modelo"])
-                    or _ref_type_from_text(description)
+                    _ref_type_from_text(description)
+                    or _first_group_spec(grouped_specs, ["caracteristicas", "especificacoes tecnicas"], ["quantidade de portas"])
+                    or _first_spec(spec_values, ["quantidade de portas"])
                 ),
                 "ref_capacity": _commaize_duplicates(_known_text(
                     _first_group_spec(
