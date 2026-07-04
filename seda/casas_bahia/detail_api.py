@@ -194,7 +194,7 @@ def _product_source_detail(data):
                 "ref_refrigerator_type": _known_text(
                     _first_group_spec(grouped_specs, ["caracteristicas"], ["modelo"])
                     or _first_spec(spec_values, ["modelo"])
-                    or _ref_type_from_text(description, name)
+                    or _ref_type_from_text(description)
                 ),
                 "ref_capacity": _commaize_duplicates(_known_text(
                     _first_group_spec(
