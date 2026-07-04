@@ -575,7 +575,7 @@ def _capacity_from_description(item):
 def _ref_refrigerator_type(item):
     for fact in _iter_facts(_item_facts(item)):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
-        if key not in {"porta", "tipo"}:
+        if key not in {"porta", "tipo", "tipo de porta"}:
             continue
         cleaned = _clean_ref_refrigerator_type(_fact_value(fact))
         if cleaned:

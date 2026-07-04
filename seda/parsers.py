@@ -1424,9 +1424,9 @@ def _magalu_capacity_from_description(item):
     return ""
 
 def _magalu_ref_refrigerator_type(item):
-    for fact in _iter_magalu_facts(item.get("factsheet") or []):
+    for fact in _iter_magalu_facts(_magalu_item_facts(item)):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
-        if key not in {"porta", "tipo"}:
+        if key not in {"porta", "tipo", "tipo de porta"}:
             continue
         cleaned = _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
         if cleaned:
