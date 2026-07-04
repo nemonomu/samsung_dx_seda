@@ -194,6 +194,7 @@ def _product_source_detail(data):
                 "ref_refrigerator_type": _known_text(
                     _first_group_spec(grouped_specs, ["caracteristicas"], ["modelo"])
                     or _first_spec(spec_values, ["modelo"])
+                    or _ref_type_from_text(description, name)
                 ),
                 "ref_capacity": _commaize_duplicates(_known_text(
                     _first_group_spec(
@@ -294,6 +295,38 @@ def _ref_capacity_freetext(description):
         re.IGNORECASE,
     )
     return f"{match.group(1)} L" if match else ""
+
+
+_REF_TYPE_PORTAS_RE = re.compile(r"\b([1-4])\s*portas?\b")
+
+
+def _ref_type_from_text(*texts):
+    """Refrigerator door/type from the description or product name, returned as
+    a Portuguese keyword that translate_row maps (Duplex -> Freezer-on-Top,
+    Inverse/Bottom Freezer -> Freezer-on-Bottom, Multidoor, Side by Side,
+    French Door, N portas). Most specific match wins."""
+    for text in texts:
+        norm = _normalize_ascii(text)
+        if not norm:
+            continue
+        if "side by side" in norm:
+            return "Side by Side"
+        if "french door" in norm or "porta francesa" in norm:
+            return "French Door"
+        if "multidoor" in norm or "multi door" in norm:
+            return "Multidoor"
+        if "bottom freezer" in norm:
+            return "Bottom Freezer"
+        if "top freezer" in norm:
+            return "Top Freezer"
+        if re.search(r"\binvers[eo]\b", norm):
+            return "Inverse"
+        if "duplex" in norm:
+            return "Duplex"
+        match = _REF_TYPE_PORTAS_RE.search(norm)
+        if match:
+            return f"{match.group(1)} portas"
+    return ""
 
 
 def _commaize_duplicates(value):

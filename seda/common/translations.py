@@ -200,6 +200,8 @@ def _translate_ref_refrigerator_type(text):
         return "Side by Side"
     if "multidoor" in normalized or "multi door" in normalized:
         return "Multidoor"
+    if "bottom freezer" in normalized or "freezer inferior" in normalized:
+        return "Freezer-on-Bottom"
     if "top freezer" in normalized or normalized.startswith("duplex"):
         return "Freezer-on-Top"
     if normalized.startswith("inverse") or normalized.startswith("inverso"):
