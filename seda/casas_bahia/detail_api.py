@@ -210,9 +210,9 @@ def _product_source_detail(data):
         detail.update(
             {
                 "ldy_loading_type": _known_text(
-                    _first_group_spec(grouped_specs, ["caracteristicas"], ["acesso ao cesto"])
-                    or _first_spec(spec_values, ["acesso ao cesto"])
-                    or _freetext_label_value(description, ["acesso ao cesto"])
+                    _first_group_spec(grouped_specs, ["caracteristicas"], ["acesso ao cesto", "abertura da tampa"])
+                    or _first_spec(spec_values, ["acesso ao cesto", "abertura da tampa"])
+                    or _freetext_label_value(description, ["acesso ao cesto", "abertura da tampa"])
                 ),
                 "ldy_color": _commaize_duplicates(_known_text(
                     _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
@@ -224,9 +224,9 @@ def _product_source_detail(data):
                     _first_group_spec(
                         grouped_specs,
                         ["caracteristicas"],
-                        ["capacidade total", "capacidade kg de roupas", "capacidade"],
+                        ["capacidade total", "capacidade kg de roupas", "capacidade de lavagem kg", "capacidade de lavagem", "capacidade"],
                     )
-                    or _first_spec(spec_values, ["capacidade total", "capacidade kg de roupas", "capacidade"])
+                    or _first_spec(spec_values, ["capacidade total", "capacidade kg de roupas", "capacidade de lavagem kg", "capacidade de lavagem", "capacidade"])
                     or _ldy_capacity_freetext(description)
                 )),
                 "sku_short_version": ldy_sku_short_version_from_text(name),
@@ -260,6 +260,8 @@ def _freetext_label_value(text, labels):
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             segment = re.split(r"\s+-", match.group(1))[0]
+            # stop before the next "Label:" field so we don't swallow it
+            segment = re.split(r"\s+[A-Za-zÀ-ÿ][\w ()/]{0,24}:", segment)[0]
             value = _known_text(segment)[:60].strip()
             if value:
                 return value
@@ -300,6 +302,7 @@ def _ldy_capacity_freetext(text):
         return ""
     patterns = (
         r"capacidade\s+total\s*:\s*([^;\n\r]+)",
+        r"capacidade\s+de\s+lavagem\s*(?:\([^)]*\))?\s*:\s*([^;\n\r]+)",
         r"capacidade\s*:\s*([^;\n\r]+)",
         r"capacidade\s*\(\s*kg\s*\)\s*:\s*([^;\n\r]+)",
         r"capacidade\s*-\s*kg\s*-?\s*:\s*([^;\n\r]+)",
