@@ -188,6 +188,7 @@ def _product_source_detail(data):
     if line == "TV":
         detail["sku"] = model
     if line == "REF":
+        description = _description_text(data)
         detail.update(
             {
                 "ref_refrigerator_type": _known_text(
@@ -201,6 +202,7 @@ def _product_source_detail(data):
                         ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"],
                     )
                     or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"])
+                    or _ref_capacity_freetext(description, name)
                 )),
                 "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
             }
@@ -279,6 +281,22 @@ _LDY_CAPACITY_TOKEN_RE = re.compile(
 def _capacity_token(value):
     match = _LDY_CAPACITY_TOKEN_RE.match(str(value or ""))
     return match.group(1).strip() if match else ""
+
+
+def _ref_capacity_freetext(description, name):
+    """REF capacity fallback: liters near "Capacidade" in the description
+    ("Capacidade de 434L", "Capacidade total: 434 L") or an "<n>L" in the
+    product name ("... 434L Inox"). Returns "<n> L"."""
+    text = str(description or "")
+    match = re.search(
+        r"capacidade(?:\s+de\s+armazenagem)?(?:\s+total)?\s*(?:\(\s*l\s*\))?"
+        r"\s*(?:de\s+|:\s*)?(\d{2,4})\s*(?:l\b|litros?)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"\b(\d{2,4})\s*(?:l\b|litros?\b)", str(name or ""), re.IGNORECASE)
+    return f"{match.group(1)} L" if match else ""
 
 
 def _commaize_duplicates(value):
