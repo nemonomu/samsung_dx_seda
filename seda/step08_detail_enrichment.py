@@ -681,6 +681,56 @@ def _magalu_seller_id(row, product_url=""):
     return (query.get("seller_id") or "").strip()
 
 
+def _needs_magalu_detail_retry(row):
+    # a blocked/failed item query leaves sku (and the factsheet-derived specs) blank;
+    # a successful query almost always yields a sku (factsheet or title fallback).
+    return row.get("retailer") == "Magalu" and not (row.get("sku") or "").strip()
+
+
+def _retry_magalu_detail_blanks(row, product_url):
+    if not _needs_magalu_detail_retry(row):
+        return False
+    attempts = int(os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY_ATTEMPTS", "2"))
+    for attempt in range(1, attempts + 1):
+        _magalu_graphql_detail(row, product_url)  # re-fetches item and merges into row
+        if (row.get("sku") or "").strip():
+            row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_blank_retry")
+            return True
+    row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_blank_retry_failed")
+    return False
+
+
+def _backfill_magalu_detail_blanks(rows, output, checkpoint_every=25):
+    """Second pass: re-fetch items whose item query failed the first time (blank sku),
+    recovering sku/model_year/energy that a transient block/crash dropped."""
+    if os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY", "1").lower() in {"0", "false", "no", "n"}:
+        return rows
+    candidates = [row for row in rows if _needs_magalu_detail_retry(row)]
+    limit = int(os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY_LIMIT", "0"))
+    if limit:
+        candidates = candidates[:limit]
+    total = len(candidates)
+    if not total:
+        return rows
+    print(f"[seda] detail blank retry candidates={total}", flush=True)
+    updated = 0
+    for index, row in enumerate(candidates, start=1):
+        changed = _retry_magalu_detail_blanks(row, row.get("product_url", ""))
+        recovered = bool(changed and (row.get("sku") or "").strip())
+        if recovered:
+            updated += 1
+        print(
+            f"[seda] detail retry {index}/{total} item={_safe_log_value(row.get('item'))} "
+            f"sku={_safe_log_value(row.get('sku'))} updated={int(recovered)}",
+            flush=True,
+        )
+        if checkpoint_every and index % checkpoint_every == 0:
+            write_csv(output, rows, columns=OUTPUT_COLUMNS)
+            print(f"[seda] detail retry checkpoint {output} updated={updated}", flush=True)
+    print(f"[seda] detail blank retry updated={updated}/{total}", flush=True)
+    return rows
+
+
 def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):
     if os.getenv("SEDA_MAGALU_SHIPPING_BLANK_RETRY", "1").lower() in {"0", "false", "no", "n"}:
         return rows
@@ -1393,6 +1443,7 @@ def main():
             write_csv(output, enriched, columns=OUTPUT_COLUMNS)
             _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
             print(f"[seda] checkpoint {output} rows={len(enriched)}", flush=True)
+    enriched = _backfill_magalu_detail_blanks(enriched, output, checkpoint_every=checkpoint_every)
     enriched = _backfill_magalu_shipping_blanks(enriched, output, checkpoint_every=checkpoint_every)
     write_csv(output, enriched, columns=OUTPUT_COLUMNS)
     _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
