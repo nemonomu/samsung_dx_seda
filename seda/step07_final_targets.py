@@ -7,7 +7,7 @@ def _key(row):
 
 def _rank_key(row):
     url = normalized_product_url(row.get("product_url", ""))
-    return (row.get("retailer"), url) if url else ("", "")
+    return ("url", url) if url else ("", "")
 
 
 def main():

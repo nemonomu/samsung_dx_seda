@@ -20,7 +20,7 @@ def main():
         row = dict(row)
         row["bsr_rank"] = len(selected) + 1
         selected.append(row)
-        if len(selected) >= target_size * max(1, len({r.get("retailer") for r in rows})):
+        if len(selected) >= target_size:
             break
     with output.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["retailer", "sku", "product_url", "bsr_rank"])
@@ -34,7 +34,7 @@ def main():
                     "bsr_rank": row.get("bsr_rank", ""),
                 }
             )
-    print(f"[seda] wrote {output} rows={len(selected)}")
+    print(f"[seda] wrote {output} rows={len(selected)} source_rows={len(rows)} target_size={target_size}")
 
 
 if __name__ == "__main__":

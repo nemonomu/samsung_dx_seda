@@ -17,11 +17,11 @@ def main():
         seen.add(key)
         row["main_rank"] = len(selected) + 1
         selected.append(row)
-        if len(selected) >= target_size * max(1, len({r.get("retailer") for r in rows})):
+        if len(selected) >= target_size:
             break
     output = root / "output" / "seda_main_targets.csv"
     write_csv(output, selected, columns=OUTPUT_COLUMNS)
-    print(f"[seda] wrote {output} rows={len(selected)}")
+    print(f"[seda] wrote {output} rows={len(selected)} source_rows={len(rows)} target_size={target_size}")
 
 
 if __name__ == "__main__":

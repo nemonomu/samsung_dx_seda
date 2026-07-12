@@ -319,7 +319,10 @@ def normalized_product_url(url):
 
 def product_identity(row):
     url = normalized_product_url(row.get("product_url", ""))
-    return (row.get("retailer", ""), url or row.get("sku", ""))
+    if url:
+        return ("url", url)
+    retailer = str(row.get("retailer") or row.get("account_name") or "").strip().lower()
+    return (retailer, row.get("sku", ""))
 
 
 def write_json(path, value):
