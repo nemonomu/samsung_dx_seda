@@ -9,7 +9,9 @@ from pathlib import Path
 import requests
 
 from ._net import is_retryable_exc, request_with_retry, retry_after_seconds, sleep_backoff, throttle
+from ..common.field_rules import extract_screen_size_from_title, is_screen_size_value
 from ..parsers import (
+    _html_break_text,
     appliance_model_number_from_text,
     clean_text,
     ldy_color_from_text,
@@ -19,6 +21,10 @@ from ..parsers import (
     screen_size_from_text,
 )
 from ..step00_config import product_line, run_root
+from .field_extraction import (
+    extract_fields as extract_semantic_fields,
+    is_tv_product_title,
+)
 
 
 PDP_API = "https://pdp-api.casasbahia.com.br"
@@ -32,15 +38,18 @@ def fetch_product_source(sku_id, timeout=None):
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
     url = f"{PRODUCT_SOURCE_URL}?skuId={sku_id}"
     cached = _read_product_source_cache(sku_id)
-    if cached is not None:
-        return {
-            "success": True,
-            "detail": _product_source_detail(cached),
-            "method": "casas_bahia_product_source_cache",
-            "headers": {},
-        }
-    attempts = _product_source_attempts()
     last_error = "not_attempted"
+    if cached is not None:
+        cache_error = _product_source_payload_error(cached, expected_sku_id=sku_id)
+        if not cache_error:
+            return {
+                "success": True,
+                "detail": _product_source_detail(cached),
+                "method": "casas_bahia_product_source_cache",
+                "headers": {},
+            }
+        last_error = f"cache_invalid_payload:{cache_error}"
+    attempts = _product_source_attempts()
     for attempt in attempts:
         retries = int(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRIES", "1"))
         for retry in range(retries + 1):
@@ -51,8 +60,13 @@ def fetch_product_source(sku_id, timeout=None):
             else:
                 result = _fetch_product_source_direct(url, timeout=timeout)
             if result.get("success"):
-                _write_product_source_cache(sku_id, result.get("data") or {})
-                detail = _product_source_detail(result.get("data") or {})
+                data = result.get("data") or {}
+                payload_error = _product_source_payload_error(data, expected_sku_id=sku_id)
+                if payload_error:
+                    last_error = f"{result.get('method', attempt)}_invalid_payload:{payload_error}"
+                    continue
+                _write_product_source_cache(sku_id, data)
+                detail = _product_source_detail(data)
                 return {
                     "success": True,
                     "detail": detail,
@@ -90,6 +104,39 @@ def _write_product_source_cache(sku_id, data):
     except OSError:
         return
 
+
+def _product_source_payload_error(data, expected_sku_id=None):
+    if not isinstance(data, dict) or not data:
+        return "empty_data"
+    if data.get("isValid") is False:
+        return "is_valid_false"
+    product = data.get("product") if isinstance(data.get("product"), dict) else {}
+    sku = data.get("sku") if isinstance(data.get("sku"), dict) else {}
+    if not product or not sku:
+        return "missing_product_or_sku"
+    product_id = _known_text(product.get("id"))
+    sku_id = _known_text(sku.get("id"))
+    if not product_id or not sku_id:
+        return "missing_product_identity"
+    if expected_sku_id is not None and sku_id != str(expected_sku_id).strip():
+        return f"sku_mismatch:{sku_id}"
+    name = (
+        _known_text(product.get("name"))
+        or _known_text(product.get("rawName"))
+        or _known_text(sku.get("name"))
+    )
+    if not name:
+        return "missing_product_name"
+    description = _known_text(product.get("description")) or _known_text(product.get("rawDescription"))
+    # Images and merchandising highlights prove that a SKU exists, but they do
+    # not prove that this response evaluated the audited specification fields.
+    # Only a non-empty description or at least one usable product spec makes
+    # this payload authoritative enough to clear existing listing values.
+    has_content = bool(description or _spec_values(product.get("specGroups")))
+    if not has_content:
+        return "missing_product_content"
+    return ""
+
 def _product_source_attempts():
     mode = os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_MODE", "direct_first").lower().strip()
     if mode in {"0", "false", "no", "n", "off"}:
@@ -118,6 +165,13 @@ def _fetch_product_source_direct(url, timeout=None):
         data = response.json()
     except ValueError:
         return {"success": False, "error": "direct_invalid_json", "method": "casas_bahia_product_source_direct"}
+    payload_error = _product_source_payload_error(data)
+    if payload_error:
+        return {
+            "success": False,
+            "error": f"direct_invalid_payload:{payload_error}",
+            "method": "casas_bahia_product_source_direct",
+        }
     return {"success": True, "data": data, "method": "casas_bahia_product_source_direct"}
 
 def _fetch_product_source_zenrows(url, timeout=None):
@@ -158,6 +212,14 @@ def _fetch_product_source_zenrows(url, timeout=None):
             "method": f"casas_bahia_product_source_zenrows:{result.estimated_multiplier}",
             "headers": result.headers,
         }
+    payload_error = _product_source_payload_error(data)
+    if payload_error:
+        return {
+            "success": False,
+            "error": f"zenrows_invalid_payload:{payload_error}",
+            "method": f"casas_bahia_product_source_zenrows:{result.estimated_multiplier}",
+            "headers": result.headers,
+        }
     return {
         "success": True,
         "data": data,
@@ -171,12 +233,17 @@ def _product_source_detail(data):
     spec_groups = product.get("specGroups")
     spec_values = _spec_values(spec_groups)
     grouped_specs = _grouped_spec_values(spec_groups)
-    name = _known_text(product.get("name") or product.get("rawName"))
-    sku_name = _known_text(sku.get("name"))
+    name = (
+        _known_text(product.get("name"))
+        or _known_text(product.get("rawName"))
+        or _known_text(sku.get("name"))
+    )
     line = product_line()
+    description = _description_text(data)
+    semantic_fields = extract_semantic_fields(spec_values, name, description, line)
     model = _first_spec(spec_values, ["modelo"])
     screen_size = _screen_size_from_specs(spec_values, name)
-    energy_use = _known_text(_first_spec(spec_values, ["consumo de energia"]))
+    energy_use = semantic_fields["estimated_annual_electricity_use"]
     model_year = _known_text(_first_spec(spec_values, ["ano de lancamento"]))
     detail = {
         "retailer_sku_name": name,
@@ -188,7 +255,6 @@ def _product_source_detail(data):
     if line == "TV":
         detail["sku"] = model
     if line == "REF":
-        description = _description_text(data)
         detail.update(
             {
                 "ref_refrigerator_type": _known_text(
@@ -196,42 +262,21 @@ def _product_source_detail(data):
                     or _first_group_spec(grouped_specs, ["caracteristicas", "especificacoes tecnicas"], ["quantidade de portas"])
                     or _first_spec(spec_values, ["quantidade de portas"])
                 ),
-                "ref_capacity": _commaize_duplicates(_known_text(
-                    _first_group_spec(
-                        grouped_specs,
-                        ["especificacoes tecnicas"],
-                        ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"],
-                    )
-                    or _first_spec(spec_values, ["capacidade de armazenagem total (l)", "capacidade de armazenagem total", "capacidade total"])
-                    or _ref_capacity_freetext(description)
-                )),
+                "ref_capacity": semantic_fields["ref_capacity"],
                 "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
             }
         )
     if line == "LDY":
-        description = _description_text(data)
         detail.update(
             {
-                "ldy_loading_type": _known_text(
-                    _first_group_spec(grouped_specs, ["caracteristicas"], ["acesso ao cesto", "abertura da tampa"])
-                    or _first_spec(spec_values, ["acesso ao cesto", "abertura da tampa"])
-                    or _freetext_label_value(description, ["acesso ao cesto", "abertura da tampa"])
-                ),
+                "ldy_loading_type": semantic_fields["ldy_loading_type"],
                 "ldy_color": _commaize_duplicates(_known_text(
                     _first_group_spec(grouped_specs, ["especificacoes tecnicas"], ["cor"])
                     or _first_spec(spec_values, ["cor"])
                     or ldy_color_from_text(_freetext_label_value(description, ["cor"]))
                     or ldy_color_from_text(name)
                 )),
-                "ldy_capacity": _commaize_duplicates(_known_text(
-                    _first_group_spec(
-                        grouped_specs,
-                        ["caracteristicas"],
-                        ["capacidade total", "capacidade kg de roupas", "capacidade de lavagem kg", "capacidade de lavagem", "capacidade"],
-                    )
-                    or _first_spec(spec_values, ["capacidade total", "capacidade kg de roupas", "capacidade de lavagem kg", "capacidade de lavagem", "capacidade"])
-                    or _ldy_capacity_freetext(description)
-                )),
+                "ldy_capacity": semantic_fields["ldy_capacity"],
                 "sku_short_version": ldy_sku_short_version_from_text(name),
                 "sku": ldy_sku_from_text(name),
             }
@@ -244,9 +289,9 @@ def _description_text(data):
     raw = product.get("description") or product.get("rawDescription") or ""
     if not raw:
         return ""
-    # The product-source description is HTML; drop tags so "Label: value;"
-    # spec lines in the free text become searchable plain text.
-    return clean_text(re.sub(r"<[^>]+>", " ", str(raw)))
+    # Keep adjacent label/value cells together, but preserve boundaries between
+    # separate specification rows for the semantic description parser.
+    return _html_break_text(raw).replace("\n", "; ")
 
 
 def _freetext_label_value(text, labels):
@@ -330,9 +375,7 @@ def _ref_type_from_text(*texts):
 
 
 def _commaize_duplicates(value):
-    """Some catalog specs duplicate a value joined by a hyphen ("14-14",
-    "Preto-Preto"). Keep the duplication but use a comma so it matches the
-    product page. Non-duplicate hyphens (ranges "8-12", "Auto-limpeza") stay."""
+    """Preserve the existing Casas repeated-value display contract."""
     text = str(value or "").strip()
     if "-" not in text:
         return text
@@ -428,6 +471,8 @@ def _first_group_spec(grouped_specs, group_labels, spec_labels):
     return ""
 
 def _screen_size_from_specs(specs, title):
+    if not is_tv_product_title(title):
+        return ""
     values = []
     wanted = _normalize_key("tamanho da tela")
     for key, items in specs.items():
@@ -437,16 +482,20 @@ def _screen_size_from_specs(specs, title):
         extracted = _screen_size_from_tamanho_tela(value)
         if extracted:
             return extracted
-    return ""
+    return extract_screen_size_from_title(title)
 
 def _screen_size_from_tamanho_tela(value):
     text = _known_text(value)
-    if not text:
+    if not text or not is_screen_size_value(text):
         return ""
-    explicit = re.search(r"^\s*-?\s*(\d{2,3})\s*(?:\"|''|polegadas|pol\b|in\b)", text, re.I)
+    explicit = re.search(
+        r"^\s*-?\s*(\d{2,3})\s*(?:\"|''|\u2033|polegadas?|pol\.?|inch(?:es)?|in\b)",
+        text,
+        re.I,
+    )
     if explicit:
         return f'{explicit.group(1)}"'
-    quoted = re.search(r"(\d{2,3})\s*(?:\"|'')", text, re.I)
+    quoted = re.search(r"(\d{2,3})\s*(?:\"|''|\u2033)", text, re.I)
     if quoted:
         return f'{quoted.group(1)}"'
     numeric = re.fullmatch(r"\d{2,3}", text)

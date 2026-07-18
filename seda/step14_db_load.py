@@ -1,20 +1,26 @@
+import csv
 import os
+from collections import Counter
+from pathlib import Path
 
-from .step00_config import db_connect, output_table, read_csv, run_root, write_json
+from .step00_config import csv_rows_contract_error, db_connect, output_table, read_csv, run_root, write_json
+from .step15_final_output import _validate_source_context, final_output_columns
 
 
 INTEGER_COLUMNS = {"main_rank", "bsr_rank"}
 
 
 def main():
+    root = run_root()
+    csv_path = os.getenv("SEDA_DB_LOAD_CSV", str(root / "output" / "final_output.csv"))
+    rows = read_csv(csv_path)
+    _validate_source_context(rows, csv_path)
+    _validate_db_csv_schema(rows, csv_path)
     try:
         from psycopg2.extras import execute_values
     except ImportError as exc:
         raise SystemExit("psycopg2 is required for step14_db_load") from exc
 
-    root = run_root()
-    csv_path = os.getenv("SEDA_DB_LOAD_CSV", str(root / "output" / "final_output.csv"))
-    rows = read_csv(csv_path)
     table = output_table()
     inserted = 0
     if rows:
@@ -31,6 +37,44 @@ def main():
     output = root / "db" / "manifest_db_load.json"
     write_json(output, {"success": True, "table": table, "csv_path": csv_path, "inserted": inserted})
     print(f"[seda] loaded table={table} rows={inserted}")
+
+
+def _validate_db_csv_schema(rows, csv_path):
+    """Fail before importing the DB driver when an internal CSV is selected."""
+    path = Path(csv_path)
+    fieldnames = list(rows[0].keys()) if rows else []
+    if path.is_file():
+        try:
+            with path.open('r', encoding='utf-8-sig', newline='') as handle:
+                fieldnames = csv.DictReader(handle).fieldnames or []
+        except OSError as exc:
+            raise RuntimeError(f'db_load_schema_unreadable:source={csv_path}') from exc
+    duplicates = sorted(
+        str(column)
+        for column, count in Counter(fieldnames).items()
+        if count > 1
+    )
+    if duplicates:
+        raise RuntimeError(
+            'db_load_schema_duplicate_columns:'
+            f'columns={",".join(duplicates)}:source={csv_path}'
+        )
+    expected = set(final_output_columns())
+    actual = set(fieldnames)
+    for row in rows:
+        actual.update(row.keys())
+    missing = sorted(expected - actual)
+    extra = sorted(str(column) for column in actual - expected)
+    if missing or extra:
+        missing_text = ",".join(missing) or "none"
+        extra_text = ",".join(extra) or "none"
+        raise RuntimeError(
+            "db_load_schema_mismatch:"
+            f"missing={missing_text}:extra={extra_text}:source={csv_path}"
+        )
+    row_error = csv_rows_contract_error(rows, final_output_columns())
+    if row_error:
+        raise RuntimeError(f"db_load_schema_malformed:{row_error}:source={csv_path}")
 
 
 def _db_value(column, value):

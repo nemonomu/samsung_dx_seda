@@ -1,6 +1,8 @@
 import re
 import unicodedata
 
+from .field_rules import normalize_loading_type
+
 
 TRANSLATABLE_FIELDS = {
     "sku_status",
@@ -213,12 +215,7 @@ def _translate_ref_refrigerator_type(text):
     return text
 
 def _translate_ldy_loading_type(text):
-    normalized = _normalize(text)
-    if re.search(r"superior|top\s*load|carga\s+superior", normalized, re.I):
-        return "Top load"
-    if re.search(r"frontal|front\s*load", normalized, re.I):
-        return "Front load"
-    return text
+    return normalize_loading_type(text) or text
 
 
 def translate_weekday(value):

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from pathlib import Path
 
@@ -6,7 +7,8 @@ import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from ..parsers import parse_detail
-from ..step00_config import OUTPUT_COLUMNS, read_csv, run_root, write_csv
+from ..step00_config import OUTPUT_COLUMNS, product_line, read_csv, run_root, write_csv
+from ..step08_detail_enrichment import _detail_identity_mode
 
 
 FIELDS = [
@@ -17,6 +19,9 @@ FIELDS = [
     "sku",
     "screen_size",
     "estimated_annual_electricity_use",
+    "ref_capacity",
+    "ldy_capacity",
+    "ldy_loading_type",
     "model_year",
     "retailer_sku_name_similar",
 ]
@@ -81,9 +86,21 @@ def _default_input(root):
 
 
 def _needs_backfill(row):
-    if row.get("retailer") not in {"Casas Bahia", ""} and row.get("account_name") != "Casas Bahia":
+    retailer = row.get("retailer") or row.get("account_name") or ""
+    normalized_retailer = re.sub(r"[^a-z]", "", str(retailer).lower())
+    if normalized_retailer and normalized_retailer != "casasbahia":
         return False
-    return not row.get("estimated_annual_electricity_use") or not row.get("screen_size")
+    line = str(row.get("product_line") or row.get("product") or product_line()).strip().upper()
+    semantic_fields = {
+        "TV": ("screen_size", "estimated_annual_electricity_use"),
+        "REF": ("ref_capacity", "estimated_annual_electricity_use"),
+        "LDY": (
+            "ldy_capacity",
+            "ldy_loading_type",
+            "estimated_annual_electricity_use",
+        ),
+    }.get(line, ("estimated_annual_electricity_use",))
+    return any(not row.get(field) for field in semantic_fields)
 
 
 def _create_driver():
@@ -118,7 +135,16 @@ def _fetch_detail(driver, url, wait_seconds, retries):
             time.sleep(wait_seconds + attempt)
             html = driver.page_source or ""
             detail = parse_detail(html, "Casas Bahia", base_url, url)
-            if detail.get("estimated_annual_electricity_use") or detail.get("screen_size"):
+            semantic_fields = {
+                "TV": ("screen_size", "estimated_annual_electricity_use"),
+                "REF": ("ref_capacity", "estimated_annual_electricity_use"),
+                "LDY": (
+                    "ldy_capacity",
+                    "ldy_loading_type",
+                    "estimated_annual_electricity_use",
+                ),
+            }.get(product_line(), ("estimated_annual_electricity_use",))
+            if any(detail.get(field) for field in semantic_fields):
                 detail["_html"] = html
                 return detail
         except WebDriverException as exc:
@@ -137,7 +163,15 @@ def _stop_loading(driver):
 
 def _merge(row, detail):
     if not detail:
-        return
+        return False
+    identity_mode = _detail_identity_mode(row, detail)
+    if identity_mode not in {'verified', 'same_name'}:
+        reason = 'identity_conflict' if identity_mode == 'conflict' else 'missing_product_identity'
+        row['parse_status'] = _append_token(
+            row.get('parse_status', ''),
+            f'casas_html_backfill_{reason}',
+        )
+        return False
     for field in FIELDS:
         value = detail.get(field)
         if not value:
@@ -149,6 +183,7 @@ def _merge(row, detail):
         row[field] = value
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_html_backfill")
     row["parse_status"] = _append_token(row.get("parse_status", ""), detail.get("parse_status", "detail_casas_bahia_html"))
+    return True
 
 
 def _append_token(value, token):

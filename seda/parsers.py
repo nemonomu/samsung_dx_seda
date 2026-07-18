@@ -7,6 +7,28 @@ from datetime import datetime
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
+from .common.field_rules import (
+    extract_screen_size_from_title,
+    is_screen_size_value,
+    normalize_key as normalize_field_key,
+)
+from .magalu.field_extraction import extract_fields as extract_magalu_semantic_fields
+from .casas_bahia.field_extraction import (
+    ENERGY_ALIAS_LABELS as CASAS_ENERGY_ALIAS_LABELS,
+    ENERGY_CANONICAL_LABELS as CASAS_ENERGY_CANONICAL_LABELS,
+    LDY_ALIAS_LABELS as CASAS_LDY_ALIAS_LABELS,
+    LDY_CANONICAL_LABELS as CASAS_LDY_CANONICAL_LABELS,
+    LOADING_ALIAS_LABELS as CASAS_LOADING_ALIAS_LABELS,
+    LOADING_CANONICAL_LABELS as CASAS_LOADING_CANONICAL_LABELS,
+    REF_CANONICAL_TOTAL_LABELS as CASAS_REF_CANONICAL_TOTAL_LABELS,
+    REF_FREEZER_LABELS as CASAS_REF_FREEZER_LABELS,
+    REF_GENERIC_LABELS as CASAS_REF_GENERIC_LABELS,
+    REF_LIQUID_TOTAL_LABELS as CASAS_REF_LIQUID_TOTAL_LABELS,
+    REF_REFRIGERATOR_LABELS as CASAS_REF_REFRIGERATOR_LABELS,
+    REF_TOTAL_ALIAS_LABELS as CASAS_REF_TOTAL_ALIAS_LABELS,
+    extract_fields_by_sources as extract_casas_bahia_semantic_fields,
+    is_tv_product_title as is_casas_bahia_tv_product_title,
+)
 
 
 try:
@@ -16,6 +38,24 @@ except Exception:
 
 
 BRL_RE = re.compile(r"R\$\s*[\d\.]+,\d{2}")
+
+CASAS_BAHIA_DOM_LABELS = {
+    *CASAS_ENERGY_CANONICAL_LABELS,
+    *CASAS_ENERGY_ALIAS_LABELS,
+    *CASAS_REF_LIQUID_TOTAL_LABELS,
+    *CASAS_REF_CANONICAL_TOTAL_LABELS,
+    *CASAS_REF_TOTAL_ALIAS_LABELS,
+    *CASAS_REF_GENERIC_LABELS,
+    *CASAS_REF_REFRIGERATOR_LABELS,
+    *CASAS_REF_FREEZER_LABELS,
+    *CASAS_LDY_CANONICAL_LABELS,
+    *CASAS_LDY_ALIAS_LABELS,
+    *CASAS_LOADING_CANONICAL_LABELS,
+    *CASAS_LOADING_ALIAS_LABELS,
+    "polegada",
+    "polegadas",
+    "tamanho da tela",
+}
 
 def clean_text(value):
     text = html.unescape(str(value or "")).replace("\xa0", " ")
@@ -45,9 +85,25 @@ def sku_from_url(url):
     match = re.search(r"(?:skuId|produto|productId)=([^&]+)", parsed.query)
     return match.group(1) if match else ""
 
+def _url_product_identity_matches(product_url, structured_id):
+    """Require a structured ID whenever the product URL exposes an ID."""
+    expected = clean_text(sku_from_url(product_url)).casefold()
+    actual = clean_text(structured_id).casefold()
+    if expected:
+        return bool(actual) and expected == actual
+    return True
+
+def _normalized_identity_name(value):
+    text = remove_accents(clean_text(value)).casefold()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
 def screen_size_from_text(text):
     text = clean_text(text)
-    match = re.search(r"(\d{2,3})\s*(?:\"|''|polegadas|pol\b|in\b)", text, re.I)
+    match = re.search(
+        r"(\d{2,3})\s*(?:\"|''|\u2033|polegadas?|pol\.?|inch(?:es)?|in\b)",
+        text,
+        re.I,
+    )
     if not match:
         match = re.search(
             r"\b(?:smart\s+)?tv\b[^\d]{0,50}(\d{2,3})\b\s*(?=(?:4k|8k|full\s*hd|hd|uhd|qled|oled|led|crystal|neo)\b)",
@@ -1038,6 +1094,15 @@ def _parse_listing_from_jsonld(html_text, retailer, base_url, source_url, run_id
             rows.append(row)
     return rows
 
+_AUDITED_SEMANTIC_DETAIL_FIELDS = {
+    "screen_size",
+    "estimated_annual_electricity_use",
+    "ref_capacity",
+    "ldy_capacity",
+    "ldy_loading_type",
+}
+
+
 def parse_detail(html_text, retailer, base_url, product_url):
     text = _visible_text(html_text)
     row = {
@@ -1065,7 +1130,14 @@ def parse_detail(html_text, retailer, base_url, product_url):
         row["detailed_review_content"] = ""
         row["recommendation_intent"] = ""
         magalu_detail = _parse_magalu_next_detail(html_text, base_url, product_url)
-        row.update({key: value for key, value in magalu_detail.items() if value not in ("", None, [], {})})
+        row.update(
+            {
+                key: value
+                for key, value in magalu_detail.items()
+                if key in _AUDITED_SEMANTIC_DETAIL_FIELDS
+                or value not in ("", None, [], {})
+            }
+        )
     if retailer == "Casas Bahia":
         row["delivery_availability"] = ""
         row["pick_up_availability"] = ""
@@ -1074,34 +1146,90 @@ def parse_detail(html_text, retailer, base_url, product_url):
         row["estimated_annual_electricity_use"] = ""
         row["model_year"] = ""
         casas_detail = _parse_casas_bahia_html_detail(html_text, base_url, product_url)
-        row.update({key: value for key, value in casas_detail.items() if value not in ("", None, [], {})})
-    _merge_jsonld_detail(row, html_text)
+        row.update(
+            {
+                key: value
+                for key, value in casas_detail.items()
+                if key in _AUDITED_SEMANTIC_DETAIL_FIELDS
+                or value not in ("", None, [], {})
+            }
+        )
+    _merge_jsonld_detail(row, html_text, product_url)
     if not row.get("count_of_reviews"):
         comments = re.search(r"([\d\.]+)\s+comentários", text, re.I)
         row["count_of_reviews"] = comments.group(1) if comments else ""
     return row
 
 def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
-    description = _meta_content(html_text, "og:description") or _meta_content(html_text, "description")
-    product_name = _jsonld_product_value(html_text, "name")
-    title = product_name or _meta_content(html_text, "og:title") or _meta_content(html_text, "title")
-    description_text = _html_break_text(description)
-    specs = _casas_bahia_next_specs(html_text)
-    for key, value in _casas_bahia_specs(description_text).items():
-        specs.setdefault(key, value)
-    model = specs.get("modelo", "")
-    screen_size = (
-        specs.get("tamanho da tela", "")
-        or _casas_bahia_detail_label_value(html_text, ["Tamanho da tela"])
+    meta_description = _meta_content(html_text, "og:description") or _meta_content(html_text, "description")
+    meta_title = _meta_content(html_text, "og:title") or _meta_content(html_text, "title")
+    next_product = _casas_bahia_next_product(html_text)
+    next_description = next_product.get("description") or next_product.get("rawDescription") or ""
+    next_product_name = clean_text(next_product.get("name") or next_product.get("rawName"))
+    identity_verified, identity_conflict = _casas_bahia_main_identity(
+        next_product,
+        html_text,
+        product_url,
     )
-    screen_size = _screen_size_value(screen_size)
+    product_name = _jsonld_product_value(html_text, "name")
+    title = (
+        next_product_name
+        or product_name
+        or meta_title
+    )
+    next_description_text = _html_break_text(next_description)
+    meta_description_matches_main = bool(
+        meta_title
+        and next_product_name
+        and _normalized_identity_name(meta_title)
+        == _normalized_identity_name(next_product_name)
+    )
+    meta_description_text = (
+        _html_break_text(meta_description)
+        if not next_product_name or meta_description_matches_main
+        else ""
+    )
+    semantic_specs = _casas_bahia_next_spec_values(html_text, next_product)
+    if next_product_name and identity_verified:
+        for raw_label, value in _html_target_label_value_pairs(
+            html_text,
+            CASAS_BAHIA_DOM_LABELS,
+        ):
+            key = _normalize_key(raw_label)
+            values = semantic_specs.setdefault(key, [])
+            if value and value not in values:
+                values.append(value)
+    specs = {key: values[0] for key, values in semantic_specs.items() if values}
+    for description_text in (next_description_text, meta_description_text):
+        for key, value in _casas_bahia_specs(description_text).items():
+            specs.setdefault(key, value)
+    model = specs.get("modelo", "")
+    screen_size = ""
+    if is_casas_bahia_tv_product_title(title):
+        screen_size = specs.get("tamanho da tela", "")
+        screen_size = _screen_size_value(screen_size)
+        if not screen_size:
+            screen_size = extract_screen_size_from_title(title)
     if screen_size and screen_size.isdigit():
         screen_size = f'{screen_size}"'
-    energy_use = _first_spec_value(specs, ["consumo de energia"])
+    semantic_fields = extract_casas_bahia_semantic_fields(
+        semantic_specs,
+        title,
+        [
+            next_description_text.replace("\n", "; "),
+            meta_description_text.replace("\n", "; "),
+        ],
+        product_line(),
+    )
+    energy_use = semantic_fields["estimated_annual_electricity_use"]
     original, final = _casas_bahia_detail_prices(html_text)
-    return {
+    detail = {
         "retailer": "Casas Bahia",
-        "retailer_sku_name": clean_text(product_name),
+        "retailer_sku_name": clean_text(title),
+        # JSON-LD and meta names can belong to a shell or recommendation.  Only
+        # a product at a fixed main NEXT_DATA path proves PDP identity.
+        "_detail_identity_verified": bool(next_product_name) and identity_verified,
+        "_detail_identity_conflict": identity_conflict,
         "original_sku_price": original,
         "final_sku_price": final,
         "savings": _savings_from_text(_visible_text(html_text)),
@@ -1113,6 +1241,70 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
         "retailer_sku_name_similar": compact_json(_similar_names(html_text, base_url)),
         "parse_status": "detail_casas_bahia_html",
     }
+    for field_name in ("ref_capacity", "ldy_capacity", "ldy_loading_type"):
+        if field_name in semantic_fields:
+            detail[field_name] = semantic_fields[field_name]
+    return detail
+
+
+def _casas_bahia_next_product(html_text):
+    data = extract_next_data(html_text)
+    page_props = (data.get('props') or {}).get('pageProps') if isinstance(data, dict) else {}
+    page_props = page_props if isinstance(page_props, dict) else {}
+    page_data = page_props.get('data') if isinstance(page_props.get('data'), dict) else {}
+    for product in (page_props.get('product'), page_data.get('product')):
+        if isinstance(product, dict) and product:
+            return product
+    # Do not recursively promote recommendation products to the PDP's main
+    # product.  Unknown layouts stay unverified until an explicit path is added.
+    return {}
+
+
+def _casas_bahia_main_identity(product, html_text, product_url):
+    expected = clean_text(sku_from_url(product_url)).casefold()
+    if not expected:
+        return bool(product), False
+    candidates = _casas_bahia_main_sku_ids(product, html_text)
+    if not candidates:
+        return False, False
+    return expected in candidates, expected not in candidates
+
+
+def _casas_bahia_main_sku_ids(product, html_text):
+    product_candidates = set()
+
+    def add(candidates, value):
+        if isinstance(value, dict):
+            for key in ("id", "skuId", "idSku"):
+                add(candidates, value.get(key))
+            return
+        text = clean_text(value).casefold()
+        if text:
+            candidates.add(text)
+
+    if isinstance(product, dict):
+        for key in ("skuId", "idSku", "selectedSku"):
+            add(product_candidates, product.get(key))
+        sku = product.get("sku")
+        if isinstance(sku, dict):
+            add(product_candidates, sku)
+
+    # Product-bound SKU evidence is authoritative. Page URL metadata is only a
+    # fallback for payload variants that expose no SKU at all; otherwise a
+    # stale/cross-product canonical URL could hide a real payload conflict.
+    if product_candidates:
+        return product_candidates
+
+    url_candidates = set()
+    urls = [_meta_content(html_text, "og:url")]
+    if BeautifulSoup:
+        soup = BeautifulSoup(html_text, "html.parser")
+        canonical = soup.select_one('link[rel="canonical"][href]')
+        if canonical:
+            urls.append(canonical.get("href"))
+    for url in urls:
+        add(url_candidates, sku_from_url(url))
+    return url_candidates
 
 def _casas_bahia_detail_label_value(html_text, labels):
     if not BeautifulSoup:
@@ -1219,10 +1411,30 @@ def _meta_content(html_text, name):
 
 def _html_break_text(value):
     text = html.unescape(str(value or ""))
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    # Product descriptions often render a label and its value as adjacent
+    # cells.  Preserve that semantic adjacency before replacing block tags.
+    text = re.sub(
+        r"</\s*(?:div|td|th)\s*>\s*<\s*(?:div|td|th)\b[^>]*>",
+        ": ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"<(?=\s*\d)", " __SEDA_LT__", text)
+    text = re.sub(
+        r"<\s*/?\s*(?:br|p|div|li|tr|td|th|h[1-6]|section|article)\b[^>]*>",
+        "\n",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"<[^>]+>", " ", text)
-    lines = [clean_text(line) for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)
+    lines = [clean_text(line).replace("__SEDA_LT__", "<") for line in text.splitlines()]
+    merged = []
+    for line in (line for line in lines if line):
+        if merged and re.search(r"[:=]\s*$", merged[-1]):
+            merged[-1] = clean_text(f"{merged[-1]} {line}")
+        else:
+            merged.append(line)
+    return "\n".join(merged)
 
 def _casas_bahia_specs(text):
     specs = {}
@@ -1237,9 +1449,13 @@ def _casas_bahia_specs(text):
     return specs
 
 def _casas_bahia_next_specs(html_text):
+    return {key: values[0] for key, values in _casas_bahia_next_spec_values(html_text).items() if values}
+
+
+def _casas_bahia_next_spec_values(html_text, product=None):
     specs = {}
-    data = extract_next_data(html_text)
-    for group in _iter_casas_bahia_spec_groups(data):
+    product = product if isinstance(product, dict) else _casas_bahia_next_product(html_text)
+    for group in product.get('specGroups') or []:
         items = group.get("specs") if isinstance(group, dict) else None
         if not isinstance(items, list):
             continue
@@ -1249,25 +1465,12 @@ def _casas_bahia_next_specs(html_text):
             key = _normalize_key(item.get("name"))
             value = clean_text(item.get("value"))
             if key and value:
-                specs.setdefault(key, value)
+                specs.setdefault(key, []).append(value)
     return specs
-
-def _iter_casas_bahia_spec_groups(value):
-    if isinstance(value, dict):
-        groups = value.get("specGroups")
-        if isinstance(groups, list):
-            for group in groups:
-                if isinstance(group, dict):
-                    yield group
-        for child in value.values():
-            yield from _iter_casas_bahia_spec_groups(child)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _iter_casas_bahia_spec_groups(item)
 
 def _screen_size_value(value):
     text = clean_text(value)
-    if not text:
+    if not text or not is_screen_size_value(text):
         return ""
     extracted = screen_size_from_text(text)
     if extracted:
@@ -1309,17 +1512,27 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
 
     html_summary = _summary_review_content(html_text)
     line = product_line()
+    semantic_fields = extract_magalu_semantic_fields(item, line)
     model = _magalu_factsheet_value(item, ["modelo"])
     reference = _magalu_factsheet_value(item, ["referencia", "referência"])
+    item_title = clean_text(item.get("title"))
+    expected_item_id = clean_text(sku_from_url(product_url)).casefold()
+    actual_item_id = clean_text(item.get("id")).casefold()
+    identity_conflict = bool(
+        expected_item_id
+        and actual_item_id
+        and expected_item_id != actual_item_id
+    )
     detail = {
         "retailer": "Magalu",
         "sku": _magalu_sku_for_product_line(line, reference, model, item, product_url),
-        "retailer_sku_name": clean_text(item.get("title")),
+        "retailer_sku_name": item_title,
+        "_detail_identity_verified": bool(item_title) and _url_product_identity_matches(product_url, item.get("id")),
+        "_detail_identity_conflict": identity_conflict,
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
-        "screen_size": _magalu_attribute_value(item, ["polegadas", "tamanho da tela"])
-        or _magalu_factsheet_value(item, ["polegadas", "tamanho da tela"]),
-        "estimated_annual_electricity_use": _magalu_energy_use(item),
+        "screen_size": semantic_fields["screen_size"],
+        "estimated_annual_electricity_use": semantic_fields["estimated_annual_electricity_use"],
         "model_year": _magalu_factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
         or _magalu_model_year_from_description(item),
         "summarized_review_content": html_summary or clean_text(review_summary.get("summary")),
@@ -1335,32 +1548,14 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         detail.update(
             {
                 "ref_refrigerator_type": _magalu_ref_refrigerator_type(item),
-                "ref_capacity": _magalu_factsheet_value(
-                    item,
-                    ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
-                )
-                or _magalu_factsheet_value(item, ["capacidade"])
-                or _magalu_capacity_from_description(item),
+                "ref_capacity": semantic_fields["ref_capacity"],
             }
         )
     if line == "LDY":
         detail.update(
             {
-                "ldy_loading_type": _magalu_factsheet_value(
-                    item,
-                    [
-                        "tipo de abertura",
-                        "tipo de abertura eletrodomestico",
-                        "tipo de abertura eletrodoméstico",
-                        "tipo de abertura electrodomestico",
-                        "tipo de abertura do eletrodomestico",
-                        "abertura da tampa",
-                        "tipo de carga",
-                    ],
-                ),
-                "ldy_capacity": _magalu_factsheet_value(item, ["capacidade de lavagem"])
-                or _magalu_factsheet_value(item, ["capacidade da maquina de lavar", "capacidade da máquina de lavar"])
-                or _magalu_factsheet_value(item, ["capacidade"]),
+                "ldy_loading_type": semantic_fields["ldy_loading_type"],
+                "ldy_capacity": semantic_fields["ldy_capacity"],
                 "ldy_color": _magalu_factsheet_value(item, ["cor", "cor do produto"])
                 or ldy_color_from_text(item.get("title")),
             }
@@ -1608,14 +1803,33 @@ def _similar_name_noise(text):
     )
     return any(marker in normalized for marker in noise_markers)
 
-def _merge_jsonld_detail(row, html_text):
+def _merge_jsonld_detail(row, html_text, product_url=""):
     for block in extract_jsonld(html_text):
         if not isinstance(block, dict) or block.get("@type") != "Product":
             continue
-        row["retailer_sku_name"] = row.get("retailer_sku_name") or clean_text(block.get("name"))
-        row["sku"] = row.get("sku") or clean_text(block.get("sku"))
+        # JSON-LD is useful for non-empty auxiliary values, but is not PDP
+        # identity proof: shells and recommendation widgets can expose Product.
+        block_name = clean_text(block.get("name"))
+        block_sku = clean_text(block.get("sku"))
+        main_name = _normalized_identity_name(row.get("retailer_sku_name"))
+        jsonld_name = _normalized_identity_name(block_name)
+        if main_name and jsonld_name and main_name != jsonld_name:
+            continue
+        expected_id = clean_text(sku_from_url(product_url)).casefold()
+        if expected_id and block_sku and expected_id != block_sku.casefold():
+            continue
+        name_matches = bool(jsonld_name and (not main_name or jsonld_name == main_name))
+        sku_matches = bool(
+            expected_id
+            and block_sku
+            and expected_id == block_sku.casefold()
+        )
+        if not (name_matches or sku_matches):
+            continue
+        row["retailer_sku_name"] = row.get("retailer_sku_name") or block_name
+        row["sku"] = row.get("sku") or block_sku
         offers = block.get("offers") if isinstance(block.get("offers"), dict) else {}
-        if offers.get("price"):
+        if offers.get("price") and not row.get("final_sku_price"):
             row["final_sku_price"] = str(offers.get("price"))
         rating = block.get("aggregateRating") if isinstance(block.get("aggregateRating"), dict) else {}
         row["star_rating"] = row.get("star_rating") or clean_text(rating.get("ratingValue"))
@@ -1623,3 +1837,203 @@ def _merge_jsonld_detail(row, html_text):
         if row.get("retailer") != "Magalu":
             row["count_of_reviews"] = row.get("count_of_reviews") or clean_text(rating.get("reviewCount"))
         break
+
+
+_NON_MAIN_DOM_MARKER_RE = re.compile(
+    r"(?:recommend|recomend|similar|showcase|vitrine|carousel|carrossel|shelf|"
+    r"cross\s*sell|related|sponsor|patrocin|product\s*card|compare|compar)"
+)
+
+
+def _is_non_main_dom_root(tag):
+    if getattr(tag, "name", "") == "aside":
+        return True
+    values = []
+    for name in (
+        "id",
+        "class",
+        "data-testid",
+        "data-component",
+        "data-name",
+        "aria-label",
+    ):
+        value = tag.get(name) if hasattr(tag, "get") else None
+        if isinstance(value, (list, tuple)):
+            values.extend(str(item) for item in value)
+        elif value:
+            values.append(str(value))
+    marker_text = remove_accents(" ".join(values).lower())
+    marker_text = re.sub(r"[^a-z0-9]+", " ", marker_text)
+    if _NON_MAIN_DOM_MARKER_RE.search(marker_text):
+        return True
+    if getattr(tag, "name", "") in {"section", "article", "div"}:
+        for heading in tag.find_all(
+            ["h1", "h2", "h3", "h4", "h5", "h6"],
+            recursive=False,
+        ):
+            heading_text = remove_accents(clean_text(heading.get_text(" ")).lower())
+            if _NON_MAIN_DOM_MARKER_RE.search(heading_text):
+                return True
+    if getattr(tag, "name", "") in {"article", "li"}:
+        link = tag.find("a", href=True)
+        if link and "/p/" in str(link.get("href") or ""):
+            return True
+    return False
+
+
+def _html_target_label_value_pairs(html_text, labels):
+    """Return repeated DOM label/value pairs without crossing another target label."""
+    if not html_text or not BeautifulSoup:
+        return []
+    wanted = {normalize_field_key(label) for label in labels if clean_text(label)}
+    soup = BeautifulSoup(html_text, "html.parser")
+    for tag in soup.select("script,style,noscript,template"):
+        tag.decompose()
+    for tag in list(soup.find_all(True)):
+        if getattr(tag, "parent", None) is not None and _is_non_main_dom_root(tag):
+            tag.decompose()
+    pairs = []
+    seen = set()
+
+    known_spec_label = (
+        r"(?:entradas?|mem[oó]ria|c[oó]digo|motor|sistema|pot[eê]ncia|voltagem|"
+        r"tens[aã]o|capacidade|dimens[oõ]es|peso|frequ[eê]ncia|cor|modelo|marca|"
+        r"garantia|conectividade|classifica[cç][aã]o|resolu[cç][aã]o|sensor|"
+        r"desligamento|economia)"
+    )
+
+    def is_energy_semantic_label(value):
+        key = normalize_field_key(value)
+        return bool(re.search(r"(?:^|\s)(?:consumo|standby|stand\s+by)(?:\s|$)", key))
+
+    def is_label_boundary(value, target_label=""):
+        text = clean_text(value)
+        if not text:
+            return False
+        current_is_energy = is_energy_semantic_label(target_label)
+        normalized = normalize_field_key(text.rstrip(" :=-"))
+        if normalized in wanted:
+            if current_is_energy and is_energy_semantic_label(normalized):
+                return False
+            return True
+        inline_label = re.match(r"^([^\d:]{2,80}?)\s*[:=]\s*\S", text, re.I)
+        if inline_label:
+            if current_is_energy and is_energy_semantic_label(inline_label.group(1)):
+                return False
+            return True
+        return bool(re.match(rf"^{known_spec_label}\b(?:\s+\S.*)?$", text, re.I))
+
+    def trim_next_general_label(value, target_label=""):
+        text = clean_text(value)
+        current_is_energy = is_energy_semantic_label(target_label)
+        boundaries = []
+        for match in re.finditer(
+            r"\s+(?!(?:polegadas?|pol\.?|litros?|lts?|kg|kgs|kwh|wh|kw|watts?|w)\b)"
+            r"(?P<label>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 /()_-]{1,60}?)\s*[:=]\s*\S",
+            text,
+            re.I,
+        ):
+            if current_is_energy and is_energy_semantic_label(match.group("label")):
+                continue
+            boundaries.append(match.start())
+        for match in re.finditer(
+            rf"(?:[,;|]\s*|\s+)(?P<label>{known_spec_label})\b(?=\s+\S)",
+            text,
+            re.I,
+        ):
+            if current_is_energy and is_energy_semantic_label(match.group("label")):
+                continue
+            boundaries.append(match.start())
+        if not boundaries:
+            return text.rstrip(" ,;|")
+        return clean_text(text[: min(boundaries)].rstrip(" ,;|"))
+
+    def add(label, value):
+        raw_label = clean_text(label).rstrip(" :=-")
+        normalized_label = normalize_field_key(raw_label)
+        raw_value = trim_next_general_label(value, normalized_label)
+        if normalized_label not in wanted or not raw_value:
+            return
+        if is_label_boundary(raw_value, normalized_label):
+            return
+        key = (normalized_label, raw_value.casefold())
+        if key not in seen:
+            seen.add(key)
+            pairs.append((raw_label, raw_value))
+
+    def bounded_parts(tag, target_label=""):
+        output = []
+        for part in (clean_text(value) for value in tag.stripped_strings):
+            if not part:
+                continue
+            if is_label_boundary(part, target_label):
+                if output:
+                    break
+                return []
+            output.append(part)
+            if len(output) >= 6:
+                break
+        return output
+
+    for row in soup.select("tr"):
+        cells = row.find_all(["th", "td"], recursive=False)
+        for index, cell in enumerate(cells[:-1]):
+            label = clean_text(cell.get_text(" ", strip=True))
+            normalized_label = normalize_field_key(label.rstrip(" :=-"))
+            if normalized_label not in wanted:
+                continue
+            parts = bounded_parts(cells[index + 1], normalized_label)
+            if parts:
+                add(label, " ".join(parts))
+
+    for term in soup.find_all("dt"):
+        label = clean_text(term.get_text(" ", strip=True))
+        normalized_label = normalize_field_key(label.rstrip(" :=-"))
+        if normalized_label not in wanted:
+            continue
+        definition = term.find_next_sibling("dd")
+        if definition:
+            parts = bounded_parts(definition, normalized_label)
+            if parts:
+                add(label, " ".join(parts))
+
+    for node in soup.find_all(string=True):
+        raw = clean_text(node)
+        if not raw:
+            continue
+        inline = re.match(r"^(.{1,80}?)\s*[:=]\s*(.+)$", raw)
+        if inline and normalize_field_key(inline.group(1)) in wanted:
+            add(inline.group(1), inline.group(2))
+            continue
+        if normalize_field_key(raw.rstrip(" :=-")) not in wanted:
+            continue
+        normalized_label = normalize_field_key(raw.rstrip(" :=-"))
+        parent = getattr(node, "parent", None)
+        if parent is None:
+            continue
+        for sibling in parent.find_next_siblings(limit=3):
+            parts = bounded_parts(sibling, normalized_label)
+            if parts:
+                add(raw, " ".join(parts))
+                break
+            sibling_text = clean_text(sibling.get_text(" ", strip=True))
+            if is_label_boundary(sibling_text, normalized_label):
+                break
+        else:
+            container = getattr(parent, "parent", None)
+            if container is None:
+                continue
+            strings = [clean_text(value) for value in container.stripped_strings]
+            strings = [value for value in strings if value]
+            try:
+                position = strings.index(raw)
+            except ValueError:
+                continue
+            value_parts = []
+            for value in strings[position + 1 : position + 7]:
+                if is_label_boundary(value, normalized_label):
+                    break
+                value_parts.append(value)
+            if value_parts:
+                add(raw, " ".join(value_parts))
+    return pairs

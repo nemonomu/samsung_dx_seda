@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 
 from ..parsers import parse_detail, sku_from_url
+from ..step08_detail_enrichment import _detail_identity_mode
 
 
 def main():
@@ -23,10 +24,10 @@ def main():
     pdp_requests = [request for request in pdp_requests if request]
     print(f"[seda] pdp_curl_requests={len(pdp_requests)}")
 
-    summaries = {}
+    summary_details = {}
     for request in pdp_requests:
         item = sku_from_url(request["url"])
-        if not item or item in summaries:
+        if not item or item in summary_details:
             continue
         try:
             response = _fetch(request, args.timeout, args.transport)
@@ -36,27 +37,37 @@ def main():
         detail = parse_detail(response["text"] or "", "Magalu", "https://www.magazineluiza.com.br", request["url"])
         summary = detail.get("summarized_review_content", "")
         if summary:
-            summaries[item] = summary
+            summary_details[item] = detail
         print(
             f"[seda] ai_summary item={item} status={response['status_code']} "
             f"html_len={len(response['text'] or '')} summary_len={len(summary)}"
         )
 
     if args.dry_run:
-        print(f"[seda] dry_run summaries={len(summaries)}")
+        print(f"[seda] dry_run summary_candidates={len(summary_details)}")
         return
 
     path = Path(args.csv)
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     df["_item"] = df["product_url"].str.extract(r"/p/([^/]+)/", expand=False).fillna("")
     before = int(df["summarized_review_content"].ne("").sum())
-    mask = df["_item"].isin(summaries) & df["summarized_review_content"].eq("")
-    df.loc[mask, "summarized_review_content"] = df.loc[mask, "_item"].map(summaries)
+    candidates = df.apply(
+        lambda row: _trusted_summary(row, summary_details.get(row.get("_item"), {})),
+        axis=1,
+    )
+    mask = candidates.ne("") & df["summarized_review_content"].eq("")
+    df.loc[mask, "summarized_review_content"] = candidates[mask]
     updated = int(mask.sum())
     df = df.drop(columns=["_item"])
     df.to_csv(path, index=False, encoding="utf-8-sig")
     after = int(df["summarized_review_content"].ne("").sum())
     print(f"[seda] wrote {path} before={before} updated={updated} after={after}")
+
+
+def _trusted_summary(row, detail):
+    if not detail or _detail_identity_mode(row, detail) not in {'verified', 'same_name'}:
+        return ''
+    return str(detail.get('summarized_review_content') or '').strip()
 
 
 def _curl_blocks(text):

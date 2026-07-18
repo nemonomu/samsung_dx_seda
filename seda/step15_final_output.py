@@ -11,7 +11,16 @@ from .parsers import (
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
 )
-from .step00_config import product_line, read_csv, run_root, write_csv
+from .step00_config import (
+    OUTPUT_COLUMNS,
+    csv_header_contract_error,
+    csv_rows_contract_error,
+    product_identity,
+    product_line,
+    read_csv,
+    run_root,
+    write_csv,
+)
 
 
 DELIMITER = " ||| "
@@ -62,7 +71,8 @@ def final_output_columns(product_line_value=None):
     return COMMON_FINAL_COLUMNS + extras + REVIEW_FINAL_COLUMNS
 
 def _active_retailer():
-    return (os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS") or "").strip().lower()
+    raw = (os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS") or "").strip().lower()
+    return _canonical_retailer(raw) or raw
 
 def _batch_id(now):
     prefix = "m" if _active_retailer() == "magalu" else "c"
@@ -72,6 +82,8 @@ def main():
     root = run_root()
     source = _source_path(root)
     rows = read_csv(source)
+    _validate_source_context(rows, source)
+    _validate_internal_source_schema(rows, source)
     now = _run_datetime()
     output_rows = [_format_row(row, now) for row in rows]
     output = Path(os.getenv("SEDA_FINAL_OUTPUT_CSV", str(root / "output" / "final_output.csv")))
@@ -83,17 +95,128 @@ def main():
 def _source_path(root):
     override = os.getenv("SEDA_FINAL_SOURCE_CSV", "").strip()
     if override:
-        return Path(override)
-    badged = root / "output" / "final_output_badged.csv"
-    if badged.exists():
-        return badged
-    enriched = root / "output" / "final_output_enriched.csv"
-    if enriched.exists():
-        return enriched
-    current_final = root / "output" / "final_output.csv"
-    if current_final.exists() and _has_internal_columns(current_final):
-        return current_final
-    return root / "output" / "seda_final_targets.csv"
+        source = Path(override)
+        if not source.is_file():
+            raise FileNotFoundError(f"SEDA_FINAL_SOURCE_CSV does not exist: {source}")
+        return source
+
+    output_dir = root / "output"
+    # These files are successive normal pipeline outputs.  A detail/backfill
+    # rerun can make an upstream file newer than a stale downstream artifact,
+    # so existence order alone is not a safe lineage signal.
+    candidates = [
+        output_dir / "final_output_badged.csv",
+        output_dir / "final_output_delivery_backfilled.csv",
+        output_dir / "final_output_enriched.csv",
+    ]
+    current_final = output_dir / "final_output.csv"
+    if current_final.is_file() and _has_internal_columns(current_final):
+        candidates.append(current_final)
+    existing = [path for path in candidates if path.is_file()]
+    if existing:
+        targets_path = output_dir / "seda_final_targets.csv"
+        target_rows = read_csv(targets_path)
+        if not target_rows:
+            raise RuntimeError(f"final_source_contract_missing_targets:{targets_path}")
+        priority = {path.name: len(candidates) - index for index, path in enumerate(candidates)}
+        valid = []
+        invalid = []
+        targets_mtime = targets_path.stat().st_mtime_ns
+        for path in existing:
+            if path.stat().st_mtime_ns < targets_mtime:
+                invalid.append(f"{path.name}:older_than_targets")
+                continue
+            header_error = csv_header_contract_error(path, OUTPUT_COLUMNS)
+            if header_error:
+                invalid.append(f"{path.name}:{header_error}")
+                continue
+            error = _source_completeness_error(target_rows, read_csv(path))
+            if error:
+                invalid.append(f"{path.name}:{error}")
+            else:
+                valid.append(path)
+        if not valid:
+            raise RuntimeError(f"final_source_no_complete_candidate:{';'.join(invalid)}")
+        return max(valid, key=lambda path: (path.stat().st_mtime_ns, priority[path.name]))
+
+    return output_dir / "seda_final_targets.csv"
+
+
+def _source_completeness_error(target_rows, candidate_rows):
+    if not candidate_rows:
+        return "empty"
+    if len(candidate_rows) != len(target_rows):
+        return f"row_count:{len(candidate_rows)}!={len(target_rows)}"
+    expected = [product_identity(row) for row in target_rows]
+    actual = [product_identity(row) for row in candidate_rows]
+    if actual != expected:
+        mismatch = next(
+            (
+                index
+                for index, (expected_id, actual_id) in enumerate(zip(expected, actual))
+                if expected_id != actual_id
+            ),
+            0,
+        )
+        return f"identity_at:{mismatch}:actual={actual[mismatch]!r}:expected={expected[mismatch]!r}"
+    return csv_rows_contract_error(candidate_rows, OUTPUT_COLUMNS)
+
+
+def _validate_internal_source_schema(rows, source):
+    error = csv_rows_contract_error(rows, OUTPUT_COLUMNS)
+    if error:
+        raise RuntimeError(f"final_source_schema_invalid:{error}:source={source}")
+    header_error = csv_header_contract_error(source, OUTPUT_COLUMNS)
+    if header_error:
+        raise RuntimeError(
+            f"final_source_schema_invalid:{header_error}:source={source}"
+        )
+
+
+def _validate_source_context(rows, source):
+    if not rows:
+        raise RuntimeError(f"final_source_empty:{source}")
+    expected_line = str(os.getenv("SEDA_PRODUCT_LINE") or "").strip().upper()
+    if expected_line not in PRODUCT_EXTRA_COLUMNS:
+        raise RuntimeError(f"final_env_product_line_missing_or_unknown:{expected_line or 'blank'}")
+    expected_retailer = _canonical_retailer(_active_retailer())
+    if not expected_retailer:
+        raise RuntimeError(f"final_env_retailer_missing_or_unknown:{_active_retailer() or 'blank'}")
+
+    for index, row in enumerate(rows, start=1):
+        actual_line = str(row.get("product_line") or row.get("product") or "").strip().upper()
+        if not actual_line:
+            raise RuntimeError(f"final_source_product_line_missing:row={index}:source={source}")
+        if actual_line not in PRODUCT_EXTRA_COLUMNS:
+            raise RuntimeError(f"final_source_product_line_unknown:row={index}:value={actual_line}:source={source}")
+        if actual_line != expected_line:
+            raise RuntimeError(
+                f"final_source_product_line_mismatch:env={expected_line}:row={index}:value={actual_line}:source={source}"
+            )
+
+        retailer_value = str(row.get("retailer") or row.get("account_name") or "").strip()
+        if not retailer_value:
+            raise RuntimeError(f"final_source_retailer_missing:row={index}:source={source}")
+        actual_retailer = _canonical_retailer(retailer_value)
+        if not actual_retailer:
+            raise RuntimeError(
+                f"final_source_retailer_unknown:row={index}:value={retailer_value}:source={source}"
+            )
+        if actual_retailer != expected_retailer:
+            raise RuntimeError(
+                "final_source_retailer_mismatch:"
+                f"env={expected_retailer}:row={index}:value={actual_retailer}:source={source}"
+            )
+
+
+def _canonical_retailer(value):
+    normalized = re.sub(r"[^a-z]", "", str(value or "").lower())
+    if normalized in {"magalu", "magazineluiza"}:
+        return "magalu"
+    if normalized in {"casasbahia", "casasbahiacombr"}:
+        return "casas_bahia"
+    return ""
+
 
 def _has_internal_columns(path):
     try:
@@ -285,10 +408,11 @@ def _is_magalu_row(row):
     return "magalu" in retailer or "magazineluiza.com.br" in url
 
 def _account_name_for_output(row):
-    if _is_magalu_row(row):
-        return "Magalu"
     retailer = row.get("retailer") or row.get("account_name", "")
-    if str(retailer).strip().lower() in {"casas bahia", "casasbahia"}:
+    canonical = _canonical_retailer(retailer)
+    if canonical == "magalu" or _is_magalu_row(row):
+        return "Magalu"
+    if canonical == "casas_bahia" or _is_casas_bahia_row(row):
         return "CasasBahia"
     return retailer
 

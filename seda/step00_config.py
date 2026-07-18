@@ -304,6 +304,52 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
+def csv_rows_contract_error(rows, required_columns):
+    """Return why parsed CSV rows cannot safely satisfy a named-column contract."""
+    if not rows:
+        return ""
+    required = list(required_columns)
+    first_keys = set(rows[0].keys())
+    missing = [column for column in required if column not in first_keys]
+    if missing:
+        return f"missing_columns:{','.join(missing)}"
+    for index, row in enumerate(rows, start=1):
+        if None in row:
+            return f"extra_values_without_header:row={index}"
+        missing = [column for column in required if column not in row]
+        if missing:
+            return f"missing_columns:row={index}:columns={','.join(missing)}"
+        short = [column for column in required if row.get(column) is None]
+        if short:
+            return f"short_row:row={index}:columns={','.join(short)}"
+    return ""
+
+
+def csv_header_contract_error(path, required_columns=()):
+    """Return why a CSV header cannot safely represent named internal fields."""
+    path = Path(path)
+    if not path.is_file():
+        return ""
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            fieldnames = csv.DictReader(handle).fieldnames or []
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+    duplicates = sorted(
+        {
+            str(column)
+            for column in fieldnames
+            if fieldnames.count(column) > 1
+        }
+    )
+    if duplicates:
+        return f"duplicate_columns:{','.join(duplicates)}"
+    missing = [column for column in required_columns if column not in fieldnames]
+    if missing:
+        return f"missing_columns:{','.join(missing)}"
+    return ""
+
+
 def normalized_product_url(url):
     if not url:
         return ""

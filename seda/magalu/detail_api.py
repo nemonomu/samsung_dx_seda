@@ -12,6 +12,7 @@ from ..parsers import (
     ldy_color_from_text,
 )
 from ..step00_config import product_line
+from .field_extraction import extract_fields as extract_semantic_fields
 
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
@@ -314,6 +315,9 @@ def fetch_detail(item_id, timeout=None, seller_id=None, context_url=None):
     item = _request_item(item_id, timeout, trace, context_url=context_url)
     if not item:
         return {"success": False, "error": "item_query_failed", "detail": {}, "trace": trace}
+    identity_error = _item_identity_error(item_id, item)
+    if identity_error:
+        return {"success": False, "error": identity_error, "detail": {}, "trace": trace}
     detail = _detail_from_item(item, seller_id=seller_id)
     if os.getenv("SEDA_MAGALU_SHIPPING_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
         shipping = fetch_shipping(item, timeout=timeout, seller_id=seller_id, context_url=context_url)
@@ -351,6 +355,9 @@ def fetch_shipping_for_item_id(item_id, timeout=None, seller_id=None, context_ur
     item = _request_item(item_id, timeout, trace, context_url=context_url)
     if not item:
         return {"success": False, "error": "item_query_failed", "delivery": "", "pickup": "", "trace": trace}
+    identity_error = _item_identity_error(item_id, item)
+    if identity_error:
+        return {"success": False, "error": identity_error, "delivery": "", "pickup": "", "trace": trace}
     result = fetch_shipping(item, timeout=timeout, seller_id=seller_id, context_url=context_url)
     trace.extend(result.get("trace") or [])
     result["trace"] = trace
@@ -395,6 +402,16 @@ def _request_item(item_id, timeout, trace, context_url=None):
     }
     data = _post(payload, timeout, trace, label="item", context_url=context_url)
     return (data.get("data") or {}).get("item") or {}
+
+
+def _item_identity_error(requested_item_id, item):
+    requested = clean_text(requested_item_id).casefold()
+    actual = clean_text(item.get("id") if isinstance(item, dict) else "").casefold()
+    if not actual:
+        return "item_identity_missing"
+    if requested != actual:
+        return "item_identity_mismatch"
+    return ""
 
 def _post(payload, timeout, trace, label, context_url=None):
     if _browser_context_label(label):
@@ -478,6 +495,7 @@ def _detail_from_item(item, seller_id=None):
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
     rating = item.get("rating") if isinstance(item.get("rating"), dict) else {}
     line = product_line()
+    semantic_fields = extract_semantic_fields(item, line)
     model = _factsheet_value(item, ["modelo"])
     reference = _factsheet_value(item, ["referencia", "referência"])
     detail = {
@@ -486,8 +504,8 @@ def _detail_from_item(item, seller_id=None):
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
-        "screen_size": _attribute_value(item, ["polegadas", "tamanho da tela"]) or _factsheet_value(item, ["polegadas", "tamanho da tela"]),
-        "estimated_annual_electricity_use": _energy_use(item),
+        "screen_size": semantic_fields["screen_size"],
+        "estimated_annual_electricity_use": semantic_fields["estimated_annual_electricity_use"],
         "model_year": _factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
         or _model_year_from_description(item),
         "star_rating": clean_text(rating.get("score")),
@@ -498,32 +516,14 @@ def _detail_from_item(item, seller_id=None):
         detail.update(
             {
                 "ref_refrigerator_type": _ref_refrigerator_type(item),
-                "ref_capacity": _factsheet_value(
-                    item,
-                    ["capacidade liquida total", "capacidade líquida total", "capacidade total"],
-                )
-                or _factsheet_value(item, ["capacidade"])
-                or _capacity_from_description(item),
+                "ref_capacity": semantic_fields["ref_capacity"],
             }
         )
     if line == "LDY":
         detail.update(
             {
-                "ldy_loading_type": _factsheet_value(
-                    item,
-                    [
-                        "tipo de abertura",
-                        "tipo de abertura eletrodomestico",
-                        "tipo de abertura eletrodoméstico",
-                        "tipo de abertura electrodomestico",
-                        "tipo de abertura do eletrodomestico",
-                        "abertura da tampa",
-                        "tipo de carga",
-                    ],
-                ),
-                "ldy_capacity": _factsheet_value(item, ["capacidade de lavagem"])
-                or _factsheet_value(item, ["capacidade da maquina de lavar", "capacidade da máquina de lavar"])
-                or _factsheet_value(item, ["capacidade"]),
+                "ldy_loading_type": semantic_fields["ldy_loading_type"],
+                "ldy_capacity": semantic_fields["ldy_capacity"],
                 "ldy_color": _factsheet_value(item, ["cor", "cor do produto"]) or ldy_color_from_text(item.get("title")),
             }
         )

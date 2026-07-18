@@ -10,8 +10,42 @@ import time
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .parsers import BeautifulSoup, clean_text, compact_json, extract_next_data, parse_detail, sku_from_url
-from .step00_config import RETAILERS, OUTPUT_COLUMNS, read_csv, run_root, write_csv
+from .magalu.field_extraction import (
+    ENERGY_ALIAS_LABELS as MAGALU_ENERGY_ALIAS_LABELS,
+    ENERGY_CANONICAL_LABELS as MAGALU_ENERGY_CANONICAL_LABELS,
+    LDY_ALIAS_LABELS as MAGALU_LDY_ALIAS_LABELS,
+    LDY_CANONICAL_LABELS as MAGALU_LDY_CANONICAL_LABELS,
+    LOADING_ALIAS_LABELS as MAGALU_LOADING_ALIAS_LABELS,
+    LOADING_CANONICAL_LABELS as MAGALU_LOADING_CANONICAL_LABELS,
+    REF_FREEZER_LABELS as MAGALU_REF_FREEZER_LABELS,
+    REF_GENERIC_LABELS as MAGALU_REF_GENERIC_LABELS,
+    REF_LIQUID_TOTAL_LABELS as MAGALU_REF_LIQUID_TOTAL_LABELS,
+    REF_REFRIGERATOR_LABELS as MAGALU_REF_REFRIGERATOR_LABELS,
+    REF_TOTAL_LABELS as MAGALU_REF_TOTAL_LABELS,
+    SCREEN_LABELS as MAGALU_SCREEN_LABELS,
+    extract_fields as extract_magalu_semantic_fields,
+)
+from .parsers import (
+    _html_target_label_value_pairs,
+    _url_product_identity_matches,
+    clean_text,
+    compact_json,
+    extract_next_data,
+    parse_detail,
+    remove_accents,
+    sku_from_url,
+)
+from .step00_config import (
+    OUTPUT_COLUMNS,
+    RETAILERS,
+    csv_header_contract_error,
+    csv_rows_contract_error,
+    product_identity,
+    product_line,
+    read_csv,
+    run_root,
+    write_csv,
+)
 from .transport import fetch_url, is_blocked_html
 
 
@@ -52,6 +86,62 @@ REVIEW_PAGE_TRACE_COLUMNS = [
     "target",
     "error",
 ]
+
+
+MAGALU_PDP_SEMANTIC_FIELDS = (
+    "screen_size",
+    "estimated_annual_electricity_use",
+    "model_year",
+    "ref_refrigerator_type",
+    "ref_capacity",
+    "ldy_loading_type",
+    "ldy_capacity",
+    "ldy_color",
+)
+
+AUTHORITATIVE_AUDITED_FIELDS = (
+    "screen_size",
+    "estimated_annual_electricity_use",
+    "ref_capacity",
+    "ldy_capacity",
+    "ldy_loading_type",
+)
+
+MAGALU_DOM_LABELS = {
+    *MAGALU_SCREEN_LABELS,
+    *MAGALU_ENERGY_CANONICAL_LABELS,
+    *MAGALU_ENERGY_ALIAS_LABELS,
+    *MAGALU_REF_LIQUID_TOTAL_LABELS,
+    *MAGALU_REF_TOTAL_LABELS,
+    *MAGALU_REF_GENERIC_LABELS,
+    *MAGALU_REF_REFRIGERATOR_LABELS,
+    *MAGALU_REF_FREEZER_LABELS,
+    *MAGALU_LDY_CANONICAL_LABELS,
+    *MAGALU_LDY_ALIAS_LABELS,
+    *MAGALU_LOADING_CANONICAL_LABELS,
+    *MAGALU_LOADING_ALIAS_LABELS,
+}
+
+def _merge_missing_detail_fields(row, detail, fields):
+    updated = False
+    for key in fields:
+        if detail.get(key) and not row.get(key):
+            row[key] = detail[key]
+            updated = True
+    return updated
+
+
+def _relevant_audited_fields(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return {
+        "TV": ("screen_size", "estimated_annual_electricity_use"),
+        "REF": ("estimated_annual_electricity_use", "ref_capacity"),
+        "LDY": (
+            "estimated_annual_electricity_use",
+            "ldy_capacity",
+            "ldy_loading_type",
+        ),
+    }.get(line, ())
 
 
 def _base_url(retailer):
@@ -424,13 +514,17 @@ def _merge_casas_bahia_apis(row):
         if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_API", "1").lower() not in {"0", "false", "no", "n"}:
             product_source = fetch_product_source(sku_id)
             if product_source.get("success"):
-                _merge_non_empty(row, product_source.get("detail") or {})
-                row["fetch_method"] = _append_token(
-                    row.get("fetch_method", ""), product_source.get("method", "casas_bahia_product_source_api")
-                )
-                cost = (product_source.get("headers") or {}).get("X-Request-Cost", "")
-                if cost:
-                    row["parse_status"] = _append_token(row.get("parse_status", ""), f"product_source_cost:{cost}")
+                product_detail = product_source.get("detail") or {}
+                if product_detail.get("retailer_sku_name"):
+                    _merge_authoritative_detail(row, product_detail)
+                    row["fetch_method"] = _append_token(
+                        row.get("fetch_method", ""), product_source.get("method", "casas_bahia_product_source_api")
+                    )
+                    cost = (product_source.get("headers") or {}).get("X-Request-Cost", "")
+                    if cost:
+                        row["parse_status"] = _append_token(row.get("parse_status", ""), f"product_source_cost:{cost}")
+                else:
+                    row["parse_status"] = _append_token(row.get("parse_status", ""), "product_source_missing_identity")
             else:
                 row["parse_status"] = _append_token(
                     row.get("parse_status", ""), f"product_source_failed:{product_source.get('error','unknown')}"
@@ -515,7 +609,59 @@ def _clear_magalu_listing_metrics(row):
 
 
 def _merge_non_empty(row, detail):
-    row.update({key: value for key, value in detail.items() if value not in ("", None, [], {})})
+    row.update(
+        {
+            key: value
+            for key, value in detail.items()
+            if not str(key).startswith("_") and value not in ("", None, [], {})
+        }
+    )
+
+
+def _normalized_detail_name(value):
+    text = remove_accents(clean_text(value)).casefold()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _detail_identity_mode(row, detail):
+    if detail.get("_detail_identity_conflict") is True:
+        return "conflict"
+    if detail.get("_detail_identity_verified") is True:
+        return "verified"
+    existing_name = _normalized_detail_name(row.get("retailer_sku_name"))
+    detail_name = _normalized_detail_name(detail.get("retailer_sku_name"))
+    if existing_name and detail_name and existing_name == detail_name:
+        return "same_name"
+    return ""
+
+
+def _merge_authoritative_detail(row, detail):
+    """Merge a verified product-detail payload, including explicit audited blanks.
+
+    Listing values are only hints.  Once an authoritative detail producer has
+    evaluated an audited field, an explicit blank means that the listing value
+    was not valid for the product and must be cleared rather than retained.
+    Fields omitted from the payload remain untouched.
+    """
+    _merge_non_empty(row, detail)
+    for key in AUTHORITATIVE_AUDITED_FIELDS:
+        if key not in detail:
+            continue
+        value = detail.get(key)
+        row[key] = "" if value in ("", None, [], {}) else value
+
+
+def _merge_generic_product_detail(row, detail):
+    """Apply product detail according to its identity proof strength."""
+    mode = _detail_identity_mode(row, detail)
+    if mode == "verified":
+        _merge_authoritative_detail(row, detail)
+        return True
+    if mode == "same_name":
+        fields = tuple(key for key in detail if not str(key).startswith("_"))
+        return _merge_missing_detail_fields(row, detail, fields)
+    # Explicit conflict or absent identity: merge no product-bound fields.
+    return False
 
 
 def _merge_zero_preserving(row, key, value):
@@ -552,7 +698,7 @@ def _magalu_graphql_detail(row, product_url, trace_rows=None, row_index=""):
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
-    _merge_non_empty(row, result.get("detail") or {})
+    _merge_authoritative_detail(row, result.get("detail") or {})
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), "graphql_item")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_item_graphql")
     return result
@@ -589,6 +735,22 @@ def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""
         )
         return False
     detail = parse_detail(result.text or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+    identity_mode = _detail_identity_mode(row, detail)
+    if identity_mode not in {"verified", "same_name"}:
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:missing_product_identity")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_detail",
+            method=token,
+            success=False,
+            status_code=getattr(result, "status_code", ""),
+            length=len(result.text or ""),
+            error="missing_product_identity",
+        )
+        return False
     meaningful_keys = (
         "retailer_sku_name",
         "final_sku_price",
@@ -619,7 +781,14 @@ def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""
             error="empty_detail",
         )
         return False
-    _merge_non_empty(row, detail)
+    if identity_mode == "verified":
+        _merge_authoritative_detail(row, detail)
+        merged = True
+    else:
+        merged = _merge_generic_product_detail(row, detail)
+        if not merged:
+            row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:same_name_no_missing_fields")
+            return False
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
     cost = (result.headers or {}).get("X-Request-Cost", "")
     status = "zenrows_detail_html" if not cost else f"zenrows_detail_html_cost:{cost}"
@@ -636,7 +805,7 @@ def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""
         length=len(result.text or ""),
         detail=status,
     )
-    return True
+    return merged
 
 def _retry_magalu_shipping_blanks(row, product_url):
     if row.get("retailer") != "Magalu":
@@ -779,7 +948,7 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
         row.get(key) for key in ("star_rating", "count_of_star_ratings", "count_of_reviews", "detailed_review_content")
     )
     needs_similar = not row.get("retailer_sku_name_similar")
-    needs_specs = not row.get("screen_size") or not row.get("estimated_annual_electricity_use")
+    needs_specs = any(not row.get(key) for key in _relevant_audited_fields(row))
     if not needs_summary and not needs_similar and not needs_reviews and not needs_rating and not needs_specs:
         _record_subcall(trace_rows, row, row_index, product_url, "pdp_html", success=True, error="", detail="not_needed")
         return
@@ -811,27 +980,26 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
             return
         return
     detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+    identity_mode = _detail_identity_mode(row, detail)
+    if identity_mode not in {"verified", "same_name"}:
+        reason = "identity_conflict" if identity_mode == "conflict" else "missing_product_identity"
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"pdp_html_{reason}")
+        _record_subcall(trace_rows, row, row_index, product_url, "pdp_html_identity", success=False, error=reason)
+        _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=trace_rows, row_index=row_index)
+        return
     if detail.get("sku"):
-        row["sku"] = detail["sku"]
-    for key in (
+        if identity_mode == "verified" or not row.get("sku"):
+            row["sku"] = detail["sku"]
+    _merge_missing_detail_fields(row, detail, (
         "summarized_review_content",
         "retailer_sku_name_similar",
-        "screen_size",
-        "estimated_annual_electricity_use",
-        "model_year",
-        "ref_refrigerator_type",
-        "ref_capacity",
-        "ldy_loading_type",
-        "ldy_capacity",
-        "ldy_color",
+        *MAGALU_PDP_SEMANTIC_FIELDS,
         "star_rating",
         "count_of_star_ratings",
         "count_of_reviews",
         "detailed_review_content",
-    ):
-        if detail.get(key) and not row.get(key):
-            row[key] = detail[key]
-    if _merge_magalu_exact_html_specs(row, result.get("text") or ""):
+    ))
+    if _merge_magalu_exact_html_specs(row, result.get("text") or "", detail):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_specs")
     if _merge_magalu_shipping_from_next_data(row, result.get("text") or "", product_url, trace_rows=trace_rows, row_index=row_index):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html_shipping")
@@ -871,28 +1039,35 @@ def _merge_magalu_similar(row, product_url, trace_rows=None, row_index=""):
     return True
 
 
-def _merge_magalu_exact_html_specs(row, html_text):
-    if row.get("retailer") != "Magalu":
+def _merge_magalu_exact_html_specs(row, html_text, detail=None):
+    """Validate repeated DOM specs through the normal Magalu field extractor."""
+    detail = detail if isinstance(detail, dict) else {}
+    if (
+        row.get("retailer") != "Magalu"
+        or _detail_identity_mode(row, detail) != "verified"
+    ):
         return False
-    specs = _magalu_exact_html_specs(html_text)
-    updated = False
-    if not row.get("screen_size") and specs.get("screen_size"):
-        row["screen_size"] = specs["screen_size"]
-        updated = True
-    if not row.get("estimated_annual_electricity_use") and specs.get("estimated_annual_electricity_use"):
-        row["estimated_annual_electricity_use"] = specs["estimated_annual_electricity_use"]
-        updated = True
-    return updated
-
-
-def _magalu_exact_html_specs(html_text):
-    return {
-        "screen_size": _magalu_exact_html_spec_value(html_text, "Tamanho Da Tela"),
-        "estimated_annual_electricity_use": _magalu_exact_html_spec_value(
-            html_text,
-            "Consumo Aproximado de Energia",
-        ),
+    pairs = _html_target_label_value_pairs(html_text, MAGALU_DOM_LABELS)
+    if not pairs:
+        return False
+    synthetic_item = {
+        "title": detail.get("retailer_sku_name") or row.get("retailer_sku_name") or "",
+        "factsheet": [
+            {"keyName": label, "value": value}
+            for label, value in pairs
+        ],
+        "attributes": [],
+        "bundles": [],
     }
+    fields = extract_magalu_semantic_fields(
+        synthetic_item,
+        str(row.get("product_line") or product_line()).strip().upper(),
+    )
+    return _merge_missing_detail_fields(
+        row,
+        fields,
+        _relevant_audited_fields(row),
+    )
 
 
 def _merge_magalu_shipping_from_next_data(row, html_text, product_url, trace_rows=None, row_index=""):
@@ -907,6 +1082,13 @@ def _merge_magalu_shipping_from_next_data(row, html_text, product_url, trace_row
     item = _magalu_next_item_from_html(html_text)
     if not item:
         _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=False, error="missing_ssr_item")
+        return False
+    if not _url_product_identity_matches(product_url, item.get("id")):
+        expected = sku_from_url(product_url)
+        actual = clean_text(item.get("id"))
+        reason = "item_identity_missing" if expected and not actual else "item_identity_mismatch"
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"shipping_ssr_{reason}")
+        _record_subcall(trace_rows, row, row_index, product_url, "shipping_ssr_item", success=False, error=reason)
         return False
     try:
         from .magalu.detail_api import fetch_shipping
@@ -941,48 +1123,6 @@ def _magalu_next_item_from_html(html_text):
     if not page_data:
         page_data = data.get("data") if isinstance(data.get("data"), dict) else {}
     return page_data.get("item") if isinstance(page_data.get("item"), dict) else {}
-
-
-def _magalu_exact_html_spec_value(html_text, label):
-    if not html_text or not BeautifulSoup:
-        return ""
-    soup = BeautifulSoup(html_text, "html.parser")
-    wanted = _norm_spec_label(label)
-    for node in soup.find_all(string=True):
-        label_text = clean_text(node)
-        if _norm_spec_label(label_text) != wanted:
-            continue
-        value = _magalu_value_from_nearby_spec_node(node, label_text)
-        if value:
-            return value
-    return ""
-
-
-def _magalu_value_from_nearby_spec_node(node, label_text):
-    label_norm = _norm_spec_label(label_text)
-    parent = getattr(node, "parent", None)
-    if parent is not None:
-        for sibling in parent.find_next_siblings(limit=3):
-            value = clean_text(sibling.get_text(" ", strip=True))
-            if value and _norm_spec_label(value) != label_norm:
-                return value
-    for _ in range(5):
-        if parent is None:
-            return ""
-        parts = [clean_text(text) for text in parent.stripped_strings]
-        parts = [part for part in parts if part]
-        value_parts = [part for part in parts if _norm_spec_label(part) != label_norm]
-        if 0 < len(value_parts) <= 3:
-            return clean_text(" ".join(value_parts))
-        parent = getattr(parent, "parent", None)
-    return ""
-
-
-def _norm_spec_label(value):
-    import unicodedata
-
-    normalized = unicodedata.normalize("NFKD", clean_text(value))
-    return normalized.encode("ascii", "ignore").decode("ascii").casefold()
 
 
 def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_trace_rows=None, row_index=""):
@@ -1042,6 +1182,37 @@ def _merge_magalu_review_pages(row, product_url, trace_rows=None, review_page_tr
         }
         if result.get("status_code") == 200 and "__NEXT_DATA__" in (result.get("text") or ""):
             detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
+            identity_mode = _detail_identity_mode(row, detail)
+            if identity_mode not in {'verified', 'same_name'}:
+                reason = 'identity_conflict' if identity_mode == 'conflict' else 'missing_product_identity'
+                trace_item['error'] = reason
+                trace_item['descriptions'] = 0
+                trace_item['new_descriptions'] = 0
+                trace_item['total_reviews_after'] = len(reviews)
+                trace.append(trace_item)
+                row['parse_status'] = _append_token(
+                    row.get('parse_status', ''),
+                    f'review_html_pages_{reason}',
+                )
+                _record_review_page_trace(
+                    review_page_trace_rows,
+                    row,
+                    row_index,
+                    product_url,
+                    review_url,
+                    trace_item,
+                )
+                _record_subcall(
+                    trace_rows,
+                    row,
+                    row_index,
+                    product_url,
+                    'review_html_pages',
+                    success=False,
+                    error=reason,
+                    detail=f'page:{page}',
+                )
+                break
             for key in ("star_rating", "count_of_star_ratings", "count_of_reviews"):
                 if detail.get(key) and not row.get(key):
                     row[key] = detail[key]
@@ -1150,12 +1321,30 @@ def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=
         )
         return False
     detail = parse_detail(result.text or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
-    merged = False
-    for key in ("summarized_review_content", "retailer_sku_name_similar"):
-        if detail.get(key) and not row.get(key):
-            row[key] = detail[key]
-            merged = True
-    if _merge_magalu_exact_html_specs(row, result.text or ""):
+    identity_mode = _detail_identity_mode(row, detail)
+    if identity_mode not in {"verified", "same_name"}:
+        reason = "identity_conflict" if identity_mode == "conflict" else "missing_product_identity"
+        row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:{reason}")
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_pdp_html",
+            method=token,
+            success=False,
+            status_code=result.status_code,
+            length=len(result.text or ""),
+            has_next_data=1,
+            error=reason,
+        )
+        return False
+    merged = _merge_missing_detail_fields(
+        row,
+        detail,
+        ("summarized_review_content", "retailer_sku_name_similar", *MAGALU_PDP_SEMANTIC_FIELDS),
+    )
+    if _merge_magalu_exact_html_specs(row, result.text or "", detail):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "zenrows_pdp_html_specs")
         merged = True
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), token)
@@ -1253,6 +1442,59 @@ def _safe_filename(value):
     return text[:120] or "sku"
 
 
+def _detail_raw_filename(row, index):
+    run_token = os.getenv("SEDA_DETAIL_RUN_TOKEN", "").strip()
+    worker_id = os.getenv("SEDA_DETAIL_WORKER_ID", "").strip()
+    run_prefix = f"r{_safe_filename(run_token)}_" if run_token else ""
+    worker_prefix = f"w{worker_id}_" if worker_id else ""
+    return f"{run_prefix}{worker_prefix}{index:04d}_{_safe_filename(row.get('sku') or 'sku')}.html"
+
+
+def _parallel_part_error(expected_rows, actual_rows):
+    if len(actual_rows) != len(expected_rows):
+        return f"row_count:{len(actual_rows)}!={len(expected_rows)}"
+    expected_ids = [product_identity(row) for row in expected_rows]
+    actual_ids = [product_identity(row) for row in actual_rows]
+    if actual_ids != expected_ids:
+        mismatch = next(
+            (
+                index
+                for index, (expected, actual) in enumerate(zip(expected_ids, actual_ids))
+                if expected != actual
+            ),
+            0,
+        )
+        return f"identity_at:{mismatch}:actual={actual_ids[mismatch]!r}:expected={expected_ids[mismatch]!r}"
+    return csv_rows_contract_error(actual_rows, OUTPUT_COLUMNS)
+
+
+def _resume_prefix(output, skip, is_worker, expected_rows, target_path=None):
+    if not skip or is_worker:
+        return []
+    if len(expected_rows) != skip:
+        raise RuntimeError(
+            f"detail_resume_invalid_input:expected_count:{len(expected_rows)}!={skip}"
+        )
+    if not os.path.exists(output):
+        raise RuntimeError(f"detail_resume_invalid_output:missing_output:{output}")
+    if target_path and os.path.exists(target_path):
+        if os.stat(output).st_mtime_ns < os.stat(target_path).st_mtime_ns:
+            raise RuntimeError(
+                "detail_resume_invalid_output:"
+                f"older_than_target:path={output}:target={target_path}"
+            )
+    header_error = csv_header_contract_error(output, OUTPUT_COLUMNS)
+    if header_error:
+        raise RuntimeError(
+            f"detail_resume_invalid_output:{header_error}:path={output}"
+        )
+    prefix = read_csv(output)[:skip]
+    error = _parallel_part_error(expected_rows, prefix)
+    if error:
+        raise RuntimeError(f"detail_resume_invalid_output:{error}:path={output}")
+    return prefix
+
+
 def _run_parallel(workers, rows, output):
     """Fan step08 out across N child processes, each with its own browser, then merge.
 
@@ -1272,14 +1514,20 @@ def _run_parallel(workers, rows, output):
     profile_base = os.getenv("SEDA_MAGALU_BROWSER_PROFILE", "C:/tmp/seda_magalu_drission_profile")
     stagger = float(os.getenv("SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS", "4"))
     out_dir = os.path.dirname(output) or "."
+    run_token = f"{os.getpid()}_{time.time_ns()}"
     parts, procs = [], []
     for i in range(workers):
         start = i * slice_size
         end = min(total, start + slice_size)
         if start >= end:
             continue
-        part = os.path.join(out_dir, f"_detail_part_{i}.csv")
+        # A per-parent token prevents an interrupted previous run (or a second
+        # concurrent parent) from being mistaken for this worker's output.
+        part = os.path.join(out_dir, f"_detail_part_{run_token}_{i}.csv")
+        if os.path.exists(part):
+            os.remove(part)
         env = dict(os.environ)
+        env["SEDA_DETAIL_RUN_TOKEN"] = run_token
         env["SEDA_DETAIL_WORKER_ID"] = str(i)
         env["SEDA_MAGALU_DETAIL_WORKERS"] = "1"  # child stays serial (also guarded by WORKER_ID)
         env["SEDA_DETAIL_SKIP"] = str(start)
@@ -1296,16 +1544,41 @@ def _run_parallel(workers, rows, output):
             time.sleep(stagger)  # stagger browser launches to avoid startup contention
     failed = []
     for (i, _s, _e, _p), proc in zip(parts, procs):
-        if proc.wait() != 0:
-            failed.append(i)
+        return_code = proc.wait()
+        if return_code != 0:
+            failed.append((i, return_code))
+    if failed:
+        detail = ",".join(f"worker={i}:exit={return_code}" for i, return_code in failed)
+        raise RuntimeError(f"detail_parallel_worker_failed:{detail}")
+
     merged = []
+    invalid = []
     for (i, start, end, part) in parts:
-        if os.path.exists(part):
-            merged.extend(read_csv(part))
-        else:
-            print(f"[seda] WARNING detail worker {i} produced no output ({part})", flush=True)
+        if not os.path.exists(part):
+            invalid.append(f"worker={i}:missing_output")
+            continue
+        header_error = csv_header_contract_error(part, OUTPUT_COLUMNS)
+        if header_error:
+            invalid.append(f"worker={i}:{header_error}")
+            continue
+        part_rows = read_csv(part)
+        error = _parallel_part_error(rows[start:end], part_rows)
+        if error:
+            invalid.append(f"worker={i}:{error}")
+            continue
+        merged.extend(part_rows)
+    if invalid:
+        raise RuntimeError(f"detail_parallel_invalid_output:{';'.join(invalid)}")
+    if len(merged) != total:
+        raise RuntimeError(f"detail_parallel_merged_count:{len(merged)}!={total}")
+
     write_csv(output, merged, columns=OUTPUT_COLUMNS)
-    print(f"[seda] wrote {output} rows={len(merged)}/{total} (parallel workers={workers}, failed={failed})", flush=True)
+    for _i, _start, _end, part in parts:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+    print(f"[seda] wrote {output} rows={len(merged)}/{total} (parallel workers={workers})", flush=True)
 
 
 def main():
@@ -1332,11 +1605,16 @@ def main():
         _run_parallel(workers, rows, output)
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
-    enriched = []
+    enriched = _resume_prefix(
+        output,
+        skip,
+        is_worker,
+        rows[:skip],
+        target_path=input_csv,
+    )
     subcall_trace_rows = []
     review_page_trace_rows = []
     if skip:
-        enriched = read_csv(output)[:skip] if os.path.exists(output) else []
         rows = rows[skip:]
     total_rows = len(enriched) + len(rows)
     checkpoint_every = int(os.getenv("SEDA_DETAIL_CHECKPOINT_EVERY", "25"))
@@ -1392,12 +1670,12 @@ def main():
             )
             raw_dir = root / "detail" / "raw" / row.get("retailer", "unknown").lower().replace(" ", "_")
             raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{index:04d}_{_safe_filename(row.get('sku') or 'sku')}.html"
+            raw_path = raw_dir / _detail_raw_filename(row, index)
             raw_path.write_text(result.text or result.error, encoding="utf-8", errors="ignore")
             blocked = is_blocked_html(result.text, result.status_code)
             if result.text and not result.error and not blocked:
                 detail = parse_detail(result.text, row.get("retailer", ""), _base_url(row.get("retailer", "")), url)
-                _merge_non_empty(row, detail)
+                _merge_generic_product_detail(row, detail)
                 row["fetch_method"] = _append_token(row.get("fetch_method", ""), result.method)
             else:
                 detail_error = result.error or ("blocked_html" if blocked else "empty_detail")
@@ -1452,4 +1730,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
