@@ -3,11 +3,16 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from .step00_config import csv_rows_contract_error, db_connect, output_table, read_csv, run_root, write_json
-from .step15_final_output import _validate_source_context, final_output_columns
+from .step00_config import csv_rows_contract_error, db_connect, output_table, product_line, read_csv, run_root, write_json
+from .step15_final_output import _active_retailer, _validate_source_context, final_output_columns
 
 
 INTEGER_COLUMNS = {"main_rank", "bsr_rank"}
+TRUE_VALUES = {"1", "true", "yes", "y"}
+RETAILER_ACCOUNT_KEYS = {
+    "magalu": ("magalu", "magazineluiza"),
+    "casas_bahia": ("casasbahia", "casasbahiacombr"),
+}
 
 
 def main():
@@ -16,6 +21,10 @@ def main():
     rows = read_csv(csv_path)
     _validate_source_context(rows, csv_path)
     _validate_db_csv_schema(rows, csv_path)
+    truncate_requested = _env_flag("SEDA_DB_TRUNCATE_BEFORE_LOAD")
+    replace_retailer = _env_flag("SEDA_DB_REPLACE_RETAILER_BEFORE_LOAD")
+    if truncate_requested and replace_retailer:
+        raise RuntimeError("db_load_conflicting_replace_modes:truncate_and_replace_retailer")
     try:
         from psycopg2.extras import execute_values
     except ImportError as exc:
@@ -23,6 +32,8 @@ def main():
 
     table = output_table()
     inserted = 0
+    deleted = 0
+    mode = "replace_retailer" if replace_retailer else "truncate" if truncate_requested else "append"
     if rows:
         columns = list(rows[0].keys())
         columns_sql = ", ".join(f'"{column}"' for column in columns)
@@ -30,13 +41,52 @@ def main():
         sql = f"INSERT INTO {table} ({columns_sql}) VALUES %s"
         with db_connect() as conn:
             with conn.cursor() as cur:
-                if os.getenv("SEDA_DB_TRUNCATE_BEFORE_LOAD", "0").lower() in {"1", "true", "yes", "y"}:
+                if truncate_requested:
                     cur.execute(f"TRUNCATE TABLE {table}")
+                elif replace_retailer:
+                    deleted = _delete_retailer_rows(
+                        cur,
+                        table,
+                        _active_retailer(),
+                        product_line(),
+                    )
                 execute_values(cur, sql, values)
                 inserted = len(values)
     output = root / "db" / "manifest_db_load.json"
-    write_json(output, {"success": True, "table": table, "csv_path": csv_path, "inserted": inserted})
-    print(f"[seda] loaded table={table} rows={inserted}")
+    write_json(
+        output,
+        {
+            "success": True,
+            "table": table,
+            "csv_path": csv_path,
+            "inserted": inserted,
+            "deleted": deleted,
+            "mode": mode,
+        },
+    )
+    print(f"[seda] loaded table={table} rows={inserted} mode={mode} deleted={deleted}")
+
+
+def _env_flag(name):
+    return str(os.getenv(name, "0")).strip().lower() in TRUE_VALUES
+
+
+def _delete_retailer_rows(cursor, table, retailer, product_line_value):
+    keys = RETAILER_ACCOUNT_KEYS.get(str(retailer or "").strip().lower())
+    if not keys:
+        raise RuntimeError(f"db_load_replace_retailer_unknown:{retailer or 'blank'}")
+    line = str(product_line_value or "").strip().upper()
+    if line not in {"TV", "REF", "LDY"}:
+        raise RuntimeError(f"db_load_replace_product_line_unknown:{line or 'blank'}")
+    placeholders = ", ".join(["%s"] * len(keys))
+    cursor.execute(
+        f'DELETE FROM {table} '
+        'WHERE regexp_replace(lower(coalesce("account_name", \'\')), \'[^a-z]\', \'\', \'g\') '
+        f'IN ({placeholders}) '
+        'AND upper(trim(coalesce("product", \'\'))) = %s',
+        (*keys, line),
+    )
+    return cursor.rowcount if isinstance(cursor.rowcount, int) and cursor.rowcount >= 0 else 0
 
 
 def _validate_db_csv_schema(rows, csv_path):

@@ -67,23 +67,75 @@ Useful test run:
 $env:SEDA_PAGES='1'
 $env:SEDA_TARGET_SIZE='10'
 $env:SEDA_DETAIL_LIMIT='3'
-python -m seda.seda_orchestrator --all
+python -m seda.seda_orchestrator --retailer magalu --all
+python -m seda.seda_orchestrator --retailer casas_bahia --all
 ```
+
+The shared launcher is only a dispatcher. `--retailer all` runs the Magalu and
+Casas Bahia orchestrators as separate child processes with separate
+`SEDA_RETAILERS`, `SEDA_ACTIVE_RETAILER`, and dated `SEDA_RUN_ROOT` values:
+
+```powershell
+python -m seda.seda_orchestrator --retailer all --product-line TV --all
+```
+
+When an explicit `SEDA_RUN_ROOT` base is provided to `--retailer all`, child
+results are written below
+`<SEDA_RUN_ROOT>/<retailer>/<product-line>` instead of sharing one directory.
+
+No mixed-retailer CSV is passed to final output or DB load. The interleaved
+batch files use the same isolation at every retailer/product-line stage:
+
+```text
+run_magalu_casas_interleaved_tv_ref_ldy_full.bat
+run_magalu_casas_interleaved_ref_ldy_full.bat
+run_magalu_casas_ref_ldy_seq.bat
+```
+
+These combined batch files force the canonical dated run root for every stage,
+so a stale `SEDA_RUN_ROOT` from the shell or `.env` cannot merge their outputs.
+
+If `SEDA_DB_TRUNCATE_BEFORE_LOAD=1`, a combined run converts that destructive
+table-wide operation into a retailer-and-product-line-scoped replacement. Each
+retailer deletes its own canonical and legacy `account_name` rows for the
+active TV/REF/LDY line and inserts the new rows in one transaction. A failed
+insert rolls back that retailer's delete, and the other retailer or product
+line is never removed. With the default truncate setting (`0`), the existing
+append/history behavior is unchanged.
+
+Local cleanup remains opt-in. When enabled, it only considers dated run
+directories in the supported legacy and split layouts (`data/<date>`,
+`data/<product-line>/<date>`, and
+`data/<retailer>/<product-line>/<date>`). It skips cleanup for an external
+`SEDA_RUN_ROOT`, rejects negative retention, and refuses any run tree that
+contains a symbolic link, junction, or other reparse point. Its manifest
+records validation failures and any reparse paths skipped during discovery.
 
 Run one step:
 
 ```powershell
-python -m seda.seda_orchestrator 01
-python -m seda.seda_orchestrator detail_enrichment
+python -m seda.seda_orchestrator --retailer magalu 01
+python -m seda.seda_orchestrator --retailer casas_bahia detail_enrichment
 ```
+
+Step numbers are retailer-specific because Casas Bahia has additional
+backfill steps, and the historical shared-orchestrator numbering no longer
+applies. Select one retailer when using numeric identifiers; prefer step names.
+The dispatcher rejects numeric identifiers with `--retailer all` so different
+retailer steps cannot be run accidentally. Named steps used with
+`--retailer all` must exist in both pipelines; select `casas_bahia` explicitly
+for `freight_cdp_backfill` or `listing_discount_backfill`.
 
 Resume incomplete work:
 
 ```powershell
-python -m seda.seda_orchestrator --resume
+python -m seda.seda_orchestrator --retailer magalu --resume
+python -m seda.seda_orchestrator --retailer casas_bahia --resume
 ```
 
 ## Steps
+
+Magalu operational steps:
 
 ```text
 00 erd_schema
@@ -91,11 +143,31 @@ python -m seda.seda_orchestrator --resume
 02 main_targets
 03 bsr_list
 04 bsr_rank
-05 promotion_deals
-06 trending_deals
-07 final_targets
-08 detail_enrichment
-09 review20
+05 final_targets
+06 detail_enrichment
+07 review20
+08 final_output
+09 field_audit
+10 s3_sync
+11 db_prepare
+12 db_load
+13 status_check
+14 local_cleanup
+```
+
+Casas Bahia operational steps:
+
+```text
+00 erd_schema
+01 main_list
+02 main_targets
+03 bsr_list
+04 bsr_rank
+05 final_targets
+06 detail_enrichment
+07 freight_cdp_backfill
+08 review20
+09 listing_discount_backfill
 10 final_output
 11 field_audit
 12 s3_sync
@@ -103,21 +175,6 @@ python -m seda.seda_orchestrator --resume
 14 db_load
 15 status_check
 16 local_cleanup
-```
-
-Casas Bahia adds two retailer-specific steps between `review20` and
-`final_output`:
-
-```text
-10 freight_cdp_backfill
-11 listing_badge_backfill
-12 final_output
-13 field_audit
-14 s3_sync
-15 db_prepare
-16 db_load
-17 status_check
-18 local_cleanup
 ```
 
 ## Environment
@@ -268,6 +325,10 @@ Or force ZenRows first:
 $env:ZENROWS_API_KEY='...'
 $env:SEDA_FETCH_MODE='zenrows_first'
 ```
+
+The shared dispatcher preserves these generic modes for both retailers. Use
+`SEDA_MAGALU_FETCH_MODE` or `SEDA_CASAS_BAHIA_FETCH_MODE` when each retailer
+needs a different transport mode.
 
 Or force UC only:
 

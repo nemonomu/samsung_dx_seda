@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def configure_retailer(retailer_key):
     os.environ["SEDA_RETAILERS"] = retailer_key
-    os.environ.setdefault("SEDA_ACTIVE_RETAILER", retailer_key)
+    os.environ["SEDA_ACTIVE_RETAILER"] = retailer_key
     os.environ.setdefault("SEDA_PRODUCT_LINE", product_line())
     default_fetch_mode = "magalu_graphql_first" if retailer_key == "magalu" else f"{retailer_key}_uc_first"
     os.environ.setdefault("SEDA_FETCH_MODE", default_fetch_mode)

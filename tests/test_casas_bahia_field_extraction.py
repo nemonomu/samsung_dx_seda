@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from seda.casas_bahia.detail_api import _product_source_detail, _screen_size_from_tamanho_tela
+from seda.casas_bahia.field_extraction import _same_ldy_capacity_numbers
 from seda.common.translations import translate_value
 from seda.parsers import _parse_casas_bahia_html_detail, screen_size_from_text
 
@@ -48,6 +49,50 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
     def detail(self, line, data):
         with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": line}):
             return _product_source_detail(data)
+
+    def test_ldy_description_prefers_later_exact_same_capacity(self):
+        description = (
+            "Possuindo capacidade de lavagem de 1,2 k e 5 programas. "
+            "Capacidade de lavagem : 1,2 Kg. "
+            "Capacidade de lavagem: 1,2kg."
+        )
+        data = source(
+            "Maquina de Lavar Petit 1,2 Kg 5 Programas de Lavagem Praxis",
+            [],
+            description,
+        )
+        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "1,2 Kg")
+
+        title_only_exact = source(
+            "Maquina de Lavar Petit 1,2 Kg",
+            [],
+            "Possuindo capacidade de lavagem de 1,2 k e 5 programas.",
+        )
+        self.assertEqual(self.detail("LDY", title_only_exact)["ldy_capacity"], "1,2 Kg")
+
+        structured_then_description = source(
+            "Lavadora compacta",
+            [spec("Capacidade de lavagem", "de 1,2")],
+            "Capacidade de lavagem: 1,2 Kg.",
+        )
+        self.assertEqual(
+            self.detail("LDY", structured_then_description)["ldy_capacity"],
+            "1,2 Kg",
+        )
+
+        nonstandard_only = source(
+            "Lavadora compacta",
+            [],
+            "Possuindo capacidade de lavagem de 1,2 k e 5 programas.",
+        )
+        self.assertEqual(self.detail("LDY", nonstandard_only)["ldy_capacity"], "de 1,2 k")
+
+        numeric_only = source("Lavadora compacta", [], "Capacidade total: 14")
+        self.assertEqual(self.detail("LDY", numeric_only)["ldy_capacity"], "14")
+
+        self.assertFalse(_same_ldy_capacity_numbers("1", "10 kg"))
+        self.assertTrue(_same_ldy_capacity_numbers("10", "10 kg"))
+        self.assertTrue(_same_ldy_capacity_numbers("01,20", "1.2 kg"))
 
     def test_ref_capacity_priority(self):
         data = source(

@@ -8,6 +8,9 @@ from seda.common.retailer_runner import configure_retailer, run_module, step_env
 from seda.step00_config import csv_count, dated_run_root, product_line, run_root
 
 
+TRUE_VALUES = {"1", "true", "yes", "y"}
+
+
 @dataclass(frozen=True)
 class Step:
     number: int
@@ -160,7 +163,17 @@ def selected_steps(args, steps):
 
 
 def run_retailer_orchestrator(retailer_key, package_name, description):
-    explicit_run_root = bool(str(os.environ.get("SEDA_RUN_ROOT", "")).strip())
+    _configure_combined_db_mode()
+    force_dated_run_root = os.environ.get("SEDA_FORCE_DATED_RUN_ROOT", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+    explicit_run_root = (
+        bool(str(os.environ.get("SEDA_RUN_ROOT", "")).strip())
+        and not force_dated_run_root
+    )
     configure_retailer(retailer_key)
     steps = steps_for(package_name)
     parser = argparse.ArgumentParser(description=description)
@@ -177,7 +190,7 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
     )
     args = parser.parse_args()
     os.environ["SEDA_PRODUCT_LINE"] = str(args.product_line).strip().upper()
-    if not explicit_run_root:
+    if force_dated_run_root or not explicit_run_root:
         os.environ["SEDA_RUN_ROOT"] = str(dated_run_root(retailer=retailer_key))
     chosen = selected_steps(args, steps)
     if not chosen:
@@ -189,3 +202,15 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
         code = run_module(step.module, env=step_env(retailer_key, step.env), dry_run=args.dry_run)
         if code:
             raise SystemExit(code)
+
+
+def _configure_combined_db_mode():
+    if os.environ.get("SEDA_COMBINED_RETAILER_RUN", "0").strip().lower() not in TRUE_VALUES:
+        return
+    replace_requested = (
+        os.environ.get("SEDA_DB_TRUNCATE_BEFORE_LOAD", "0").strip().lower()
+        in TRUE_VALUES
+    )
+    os.environ["SEDA_DB_TRUNCATE_BEFORE_LOAD"] = "0"
+    os.environ["SEDA_DB_REPLACE_RETAILER_BEFORE_LOAD"] = "1" if replace_requested else "0"
+    os.environ["SEDA_COMBINED_RETAILER_RUN"] = "0"

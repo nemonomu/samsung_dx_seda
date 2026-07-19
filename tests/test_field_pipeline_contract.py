@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from unittest.mock import Mock, patch
 
 from seda.casas_bahia.detail_api import (
@@ -741,6 +742,136 @@ class FieldPipelineContractTests(unittest.TestCase):
         self.assertIs(main_detail["_detail_identity_verified"], True)
         self.assertEqual(main_detail["ref_capacity"], "300L")
 
+    def test_casas_initial_state_main_product_uses_sibling_sku_identity(self):
+        main = {
+            "id": "internal-product-id",
+            "name": 'Smart TV 65" TCL QLED 4K',
+            "description": "",
+            "specGroups": [{"specs": [
+                {"name": "Tamanho da tela", "value": '65"'},
+                {"name": "Consumo de energia", "value": "180"},
+            ]}],
+        }
+        recommendation = {
+            "id": "recommended-product-id",
+            "name": 'Smart TV Recomendada 55"',
+            "specGroups": [{"specs": [
+                {"name": "Tamanho da tela", "value": '55"'},
+                {"name": "Consumo de energia", "value": "130"},
+            ]}],
+        }
+        payload = {
+            "props": {
+                "initialState": {
+                    "Product": {
+                        "product": main,
+                        "sku": {"id": "55069103", "name": 'TV 65" TCL QLED'},
+                        "recommendations": [{"product": recommendation}],
+                    }
+                }
+            }
+        }
+        # Mirrors the long og:description/no-og:url shape from the archived PDP.
+        long_description = "Smart TV &lt;br /&gt;" * 350
+        html = (
+            f'<meta property="og:description" content="{long_description}">'
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+        )
+        started = perf_counter()
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            detail = parse_detail(
+                html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                "https://www.casasbahia.com.br/smart-tv/p/55069103",
+            )
+        self.assertLess(perf_counter() - started, 1.0)
+        self.assertEqual(_casas_bahia_next_product(html), main)
+        self.assertIs(detail["_detail_identity_verified"], True)
+        self.assertIs(detail["_detail_identity_conflict"], False)
+        self.assertEqual(detail["retailer_sku_name"], main["name"])
+        self.assertEqual(detail["screen_size"], '65"')
+        self.assertEqual(detail["estimated_annual_electricity_use"], "180")
+
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            conflict = parse_detail(
+                html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                "https://www.casasbahia.com.br/smart-tv/p/99999999",
+            )
+        self.assertIs(conflict["_detail_identity_verified"], False)
+        self.assertIs(conflict["_detail_identity_conflict"], True)
+
+    def test_casas_initial_state_sku_name_fallback_requires_verified_identity(self):
+        payload = {
+            "props": {
+                "initialState": {
+                    "Product": {
+                        "product": {"id": "internal-id", "name": "."},
+                        "sku": {"id": "123", "name": 'Smart TV TCL 55" 4K'},
+                    }
+                }
+            }
+        }
+        html = '<script id="__NEXT_DATA__" type="application/json">' + json.dumps(payload) + "</script>"
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            detail = parse_detail(
+                html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                "https://www.casasbahia.com.br/smart-tv/p/123",
+            )
+        self.assertIs(detail["_detail_identity_verified"], True)
+        self.assertEqual(detail["retailer_sku_name"], 'Smart TV TCL 55" 4K')
+        self.assertEqual(detail["screen_size"], '55"')
+
+        payload["props"]["initialState"]["Product"]["product"]["name"] = "Bivolt"
+        payload["props"]["initialState"]["Product"]["sku"]["name"] = "."
+        placeholder_html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+        )
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            placeholder = parse_detail(
+                placeholder_html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                "https://www.casasbahia.com.br/smart-tv/p/123",
+            )
+        self.assertIs(placeholder["_detail_identity_verified"], False)
+        self.assertEqual(placeholder.get("retailer_sku_name") or "", "")
+        listing = {
+            "retailer_sku_name": 'Smart TV Listing 55"',
+            "screen_size": '55"',
+            "estimated_annual_electricity_use": "100 W",
+        }
+        self.assertIs(_merge_generic_product_detail(listing, placeholder), False)
+        self.assertEqual(listing["retailer_sku_name"], 'Smart TV Listing 55"')
+        self.assertEqual(listing["screen_size"], '55"')
+        self.assertEqual(listing["estimated_annual_electricity_use"], "100 W")
+
+        for line, variant_name in (("TV", "Bivolt"), ("REF", "Branco"), ("LDY", "110V")):
+            with self.subTest(line=line, variant_name=variant_name):
+                payload["props"]["initialState"]["Product"]["sku"]["name"] = variant_name
+                variant_html = (
+                    '<script id="__NEXT_DATA__" type="application/json">'
+                    + json.dumps(payload)
+                    + "</script>"
+                )
+                with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": line}):
+                    variant = parse_detail(
+                        variant_html,
+                        "Casas Bahia",
+                        "https://www.casasbahia.com.br",
+                        "https://www.casasbahia.com.br/produto/p/123",
+                    )
+                self.assertIs(variant["_detail_identity_verified"], False)
+                self.assertEqual(variant.get("retailer_sku_name") or "", "")
+
     def test_exact_html_compatibility_path_cannot_bypass_validators(self):
         item = {
             "id": "sample",
@@ -1371,6 +1502,8 @@ class FieldPipelineContractTests(unittest.TestCase):
     def test_energy_suffix_trimming_preserves_compound_consumption(self):
         cases = (
             ("36W Entradas:3xHDMI", "36W"),
+            ("130 W Outros recursos: Art Store", "130 W"),
+            ("130 W e Outros recursos: Art Store", "130 W"),
             ("4,65 kWh/mês Memória interna:2GB", "4,65 kWh/mês"),
             ("135W Código:ABC", "135W"),
             ("0,19 kWh/ciclo, Motor Inverter", "0,19 kWh/ciclo"),

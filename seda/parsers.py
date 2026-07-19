@@ -4,6 +4,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
@@ -27,6 +28,7 @@ from .casas_bahia.field_extraction import (
     REF_REFRIGERATOR_LABELS as CASAS_REF_REFRIGERATOR_LABELS,
     REF_TOTAL_ALIAS_LABELS as CASAS_REF_TOTAL_ALIAS_LABELS,
     extract_fields_by_sources as extract_casas_bahia_semantic_fields,
+    is_product_title_for_line as is_casas_bahia_product_title_for_line,
     is_tv_product_title as is_casas_bahia_tv_product_title,
 )
 
@@ -1163,14 +1165,25 @@ def parse_detail(html_text, retailer, base_url, product_url):
 def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
     meta_description = _meta_content(html_text, "og:description") or _meta_content(html_text, "description")
     meta_title = _meta_content(html_text, "og:title") or _meta_content(html_text, "title")
-    next_product = _casas_bahia_next_product(html_text)
+    next_product, next_sku = _casas_bahia_main_product_data(html_text)
     next_description = next_product.get("description") or next_product.get("rawDescription") or ""
     next_product_name = clean_text(next_product.get("name") or next_product.get("rawName"))
+    line = product_line()
+    if not is_casas_bahia_product_title_for_line(next_product_name, line):
+        next_product_name = ""
     identity_verified, identity_conflict = _casas_bahia_main_identity(
         next_product,
         html_text,
         product_url,
+        next_sku,
     )
+    # Some legacy PDP payloads keep the sellable SKU name beside the main
+    # product instead of on it. It is safe only after that sibling SKU proves
+    # the URL identity; placeholder values (for example ".") stay excluded.
+    if not next_product_name and identity_verified:
+        sku_name = clean_text(next_sku.get("name")) if isinstance(next_sku, dict) else ""
+        if is_casas_bahia_product_title_for_line(sku_name, line):
+            next_product_name = sku_name
     product_name = _jsonld_product_value(html_text, "name")
     title = (
         next_product_name
@@ -1219,7 +1232,7 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
             next_description_text.replace("\n", "; "),
             meta_description_text.replace("\n", "; "),
         ],
-        product_line(),
+        line,
     )
     energy_use = semantic_fields["estimated_annual_electricity_use"]
     original, final = _casas_bahia_detail_prices(html_text)
@@ -1248,29 +1261,48 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
 
 
 def _casas_bahia_next_product(html_text):
+    return _casas_bahia_main_product_data(html_text)[0]
+
+
+def _casas_bahia_main_product_data(html_text):
     data = extract_next_data(html_text)
-    page_props = (data.get('props') or {}).get('pageProps') if isinstance(data, dict) else {}
+    props = data.get('props') if isinstance(data, dict) else {}
+    props = props if isinstance(props, dict) else {}
+    page_props = props.get('pageProps')
     page_props = page_props if isinstance(page_props, dict) else {}
     page_data = page_props.get('data') if isinstance(page_props.get('data'), dict) else {}
     for product in (page_props.get('product'), page_data.get('product')):
         if isinstance(product, dict) and product:
-            return product
+            return product, {}
+
+    # The legacy PDP has one explicit main-product state. Keep this fixed path
+    # separate from recommendations and return its sibling SKU as identity
+    # evidence; product.id is an internal product id, not the sellable SKU id.
+    initial_state = props.get('initialState')
+    initial_state = initial_state if isinstance(initial_state, dict) else {}
+    product_state = initial_state.get('Product')
+    product_state = product_state if isinstance(product_state, dict) else {}
+    product = product_state.get('product')
+    if isinstance(product, dict) and product:
+        main_sku = product_state.get('sku')
+        return product, main_sku if isinstance(main_sku, dict) else {}
+
     # Do not recursively promote recommendation products to the PDP's main
     # product.  Unknown layouts stay unverified until an explicit path is added.
-    return {}
+    return {}, {}
 
 
-def _casas_bahia_main_identity(product, html_text, product_url):
+def _casas_bahia_main_identity(product, html_text, product_url, main_sku=None):
     expected = clean_text(sku_from_url(product_url)).casefold()
     if not expected:
         return bool(product), False
-    candidates = _casas_bahia_main_sku_ids(product, html_text)
+    candidates = _casas_bahia_main_sku_ids(product, html_text, main_sku)
     if not candidates:
         return False, False
     return expected in candidates, expected not in candidates
 
 
-def _casas_bahia_main_sku_ids(product, html_text):
+def _casas_bahia_main_sku_ids(product, html_text, main_sku=None):
     product_candidates = set()
 
     def add(candidates, value):
@@ -1288,6 +1320,8 @@ def _casas_bahia_main_sku_ids(product, html_text):
         sku = product.get("sku")
         if isinstance(sku, dict):
             add(product_candidates, sku)
+    if isinstance(main_sku, dict):
+        add(product_candidates, main_sku)
 
     # Product-bound SKU evidence is authoritative. Page URL metadata is only a
     # fallback for payload variants that expose no SKU at all; otherwise a
@@ -1396,18 +1430,43 @@ def _casas_bahia_detail_prices(html_text):
     final = prices[0] if prices else ""
     return original, final
 
+class _MetaContentFound(Exception):
+    pass
+
+
+class _MetaContentParser(HTMLParser):
+    def __init__(self, name):
+        super().__init__(convert_charrefs=True)
+        self.name = clean_text(name).casefold()
+        self.value = ""
+
+    def handle_starttag(self, tag, attrs):
+        if str(tag).casefold() != "meta":
+            return
+        values = {
+            str(key).casefold(): value
+            for key, value in attrs
+            if key and value is not None
+        }
+        identities = {
+            clean_text(values.get("property")).casefold(),
+            clean_text(values.get("name")).casefold(),
+        }
+        if self.name not in identities or "content" not in values:
+            return
+        # HTMLParser already decodes character references in attribute values.
+        # Keep the former single-unescape contract for callers.
+        self.value = values["content"]
+        raise _MetaContentFound
+
+
 def _meta_content(html_text, name):
-    patterns = [
-        rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']',
-        rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']',
-        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']{re.escape(name)}["\']',
-        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']{re.escape(name)}["\']',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, html_text, re.I | re.S)
-        if match:
-            return html.unescape(match.group(1))
-    return ""
+    parser = _MetaContentParser(name)
+    try:
+        parser.feed(str(html_text or ""))
+    except _MetaContentFound:
+        pass
+    return parser.value
 
 def _html_break_text(value):
     text = html.unescape(str(value or ""))

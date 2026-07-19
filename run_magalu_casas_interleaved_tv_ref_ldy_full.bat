@@ -7,6 +7,9 @@ rem Shared defaults for stable RDP full runs.
 if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
 if not defined SEDA_TIMEOUT set SEDA_TIMEOUT=25
 if not defined SEDA_RETAILER_SWITCH_SLEEP_SECONDS set SEDA_RETAILER_SWITCH_SLEEP_SECONDS=0
+set "SEDA_COMBINED_RETAILER_RUN=1"
+set "SEDA_DB_REPLACE_RETAILER_BEFORE_LOAD="
+set "SEDA_FORCE_DATED_RUN_ROOT=1"
 set SEDA_RUN_ROOT=
 
 rem Magalu defaults.
@@ -82,11 +85,17 @@ echo [SEDA] Magalu/Casas Bahia interleaved TV/REF/LDY full run completed
 exit /b 0
 
 :run_magalu
+set "SEDA_RETAILERS=magalu"
+set "SEDA_ACTIVE_RETAILER=magalu"
+set "SEDA_RUN_ROOT="
 set "SEDA_FETCH_MODE=%SEDA_MAGALU_FETCH_MODE%"
 call :run_stage Magalu %~1 seda.magalu.magalu_orchestrator %~1
 exit /b %errorlevel%
 
 :run_casas
+set "SEDA_RETAILERS=casas_bahia"
+set "SEDA_ACTIVE_RETAILER=casas_bahia"
+set "SEDA_RUN_ROOT="
 set "SEDA_FETCH_MODE=%SEDA_CASAS_BAHIA_FETCH_MODE%"
 call :run_stage "Casas Bahia" %~1 seda.casas_bahia.casas_bahia_orchestrator %~1
 exit /b %errorlevel%
@@ -96,6 +105,7 @@ set "RETAILER_LABEL=%~1"
 set "PRODUCT_LABEL=%~2"
 set "MODULE_NAME=%~3"
 set "PRODUCT_LINE=%~4"
+set "SEDA_RUN_ROOT="
 echo [SEDA] %RETAILER_LABEL% %PRODUCT_LABEL% full run started
 call python -m %MODULE_NAME% --product-line %PRODUCT_LINE% --all
 if errorlevel 1 (

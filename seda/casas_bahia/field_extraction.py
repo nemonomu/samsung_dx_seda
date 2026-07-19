@@ -106,6 +106,10 @@ _LDY_VALUE = (
     rf"|(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?(?:\s+a\s+\d+(?:[.,]\d+)?)?"
     r"\s*(?:kgs?|kg\.?|quilos?|libras?|lbs?|litros?|lts?|l|ml|rpm|k?wh|kw|watts?|w)?\b"
 )
+_LDY_EXPLICIT_MASS_UNIT_RE = re.compile(
+    r"(?:^|[^a-z])(?:kgs?|kg\.?|quilos?|libras?|lbs?)\b",
+    re.I,
+)
 _ENERGY_TOKEN_RE = re.compile(
     r"(?:abaixo\s+de\s+|aprox(?:imadamente)?\.?\s*|[<>]\s*)?\d+(?:[.,]\d+)?\s*"
     r"(?:kwh|wh|kw|watts?|w)(?:\s*/\s*(?:ano|m[eê]s|ciclo|hora|dia))?",
@@ -115,14 +119,7 @@ _ENERGY_TOKEN_RE = re.compile(
 
 def extract_fields(specs, title, description, line, allow_title_fallback=True):
     line = clean_text(line).upper()
-    if line == "TV":
-        product_title = is_tv_product_title(title)
-    elif line == "REF":
-        product_title = _is_ref_title(title)
-    elif line == "LDY":
-        product_title = _is_ldy_title(title)
-    else:
-        product_title = True
+    product_title = is_product_title_for_line(title, line)
     fields = {
         "estimated_annual_electricity_use": _energy_use(specs, description)
         if product_title
@@ -315,11 +312,19 @@ def _ldy_capacity(specs, title, description, allow_title_fallback=True):
         _ldy_description_values(description, canonical=True),
         _ldy_description_values(description, canonical=False),
     ]
-    if allow_title_fallback:
-        title_capacity = extract_ldy_capacity_from_title(title)
-        if title_capacity:
-            levels.append([title_capacity])
-    return select_ldy_capacity_from_levels(levels)
+    title_capacity = extract_ldy_capacity_from_title(title) if allow_title_fallback else ""
+    if title_capacity:
+        levels.append([title_capacity])
+    selected = select_ldy_capacity_from_levels(levels)
+    if _is_incomplete_ldy_capacity(selected):
+        for values in levels:
+            for candidate in values:
+                if (
+                    _has_explicit_ldy_mass_unit(candidate)
+                    and _same_ldy_capacity_numbers(selected, candidate)
+                ):
+                    return candidate
+    return selected
 
 
 def _ldy_loading_type(specs, title, description, allow_title_fallback=True):
@@ -512,13 +517,54 @@ def _ldy_description_values(text, canonical):
             r"capacidade\s*-\s*kg\s*-",
             r"capacidade(?!\s+(?:de|total|m[aá]xima|kg))",
         )
+    source = clean_text(text)
     output = []
     for label_pattern in label_patterns:
-        for match in re.finditer(rf"\b{label_pattern}\s*(?:[:=-]\s*)?({_LDY_VALUE})", clean_text(text), re.I):
+        for match in re.finditer(rf"\b{label_pattern}\s*(?:[:=-]\s*)?({_LDY_VALUE})", source, re.I):
             value = clean_text(match.group(1))
+            if not _has_explicit_ldy_mass_unit(value):
+                partial_unit = re.match(r"\s*k\b", source[match.end(1) :], re.I)
+                if partial_unit:
+                    value = clean_text(f"{value} {partial_unit.group(0).strip()}")
             if is_ldy_capacity_value(value):
                 output.append((match.start(), value))
-    return [value for _, value in sorted(output, key=lambda item: item[0])]
+    ordered = sorted(output, key=lambda item: item[0])
+    values = []
+    for index, (_, value) in enumerate(ordered):
+        if _is_incomplete_ldy_capacity(value) and any(
+            _has_explicit_ldy_mass_unit(later_value)
+            and _same_ldy_capacity_numbers(value, later_value)
+            for _, later_value in ordered[index + 1 :]
+        ):
+            continue
+        values.append(value)
+    return values
+
+
+def _has_explicit_ldy_mass_unit(value):
+    return bool(_LDY_EXPLICIT_MASS_UNIT_RE.search(clean_text(value)))
+
+
+def _is_incomplete_ldy_capacity(value):
+    text = clean_text(value)
+    key = normalize_key(text)
+    return bool(text) and not _has_explicit_ldy_mass_unit(text) and (
+        key.startswith("de ") or bool(re.search(r"\s+k\.?$", key))
+    )
+
+
+def _same_ldy_capacity_numbers(left, right):
+    def numbers(value):
+        output = []
+        for token in re.findall(r"\d+(?:[.,]\d+)?", clean_text(value)):
+            normalized = token.replace(",", ".")
+            if "." in normalized:
+                normalized = normalized.rstrip("0").rstrip(".")
+            output.append(normalized.lstrip("0") or "0")
+        return tuple(output)
+
+    left_numbers = numbers(left)
+    return bool(left_numbers) and left_numbers == numbers(right)
 
 
 def _normalized_loading(values):
@@ -564,6 +610,17 @@ def _is_ref_title(title):
         r'carro\s+para|reles?|gaxetas?|tampas?|moto\s+ventilador|restaura\s+desempenho|'
         r'unidade\s+refrigeradora)\b',
     )
+
+
+def is_product_title_for_line(title, line):
+    line = clean_text(line).upper()
+    if line == "TV":
+        return is_tv_product_title(title)
+    if line == "REF":
+        return _is_ref_title(title)
+    if line == "LDY":
+        return _is_ldy_title(title)
+    return True
 
 
 def is_tv_product_title(title):

@@ -422,9 +422,9 @@ _ENERGY_VALUE_TOKEN_RE = re.compile(
     re.I,
 )
 _ENERGY_NEXT_SPEC_RE = re.compile(
-    r"(?:[,;]\s*|\s+)(?:[-–—]\s*)?(?:entradas?|mem[oó]ria|c[oó]digo|motor|sistema|pot[eê]ncia|"
+    r"(?:[,;]\s*|\s+)(?:[-–—]\s*)?(?:e\s+)?(?:entradas?|mem[oó]ria|c[oó]digo|motor|sistema|pot[eê]ncia|"
     r"voltagem|tens[aã]o|alimenta[cç][aã]o|padr[aã]o|capacidade|dimens[oõ]es|peso|frequ[eê]ncia|cor|modelo|marca|"
-    r"garantia|conectividade|classifica[cç][aã]o|sensor(?:\s+ecol[oó]gico)?|"
+    r"garantia|conectividade|classifica[cç][aã]o|outros\s+recursos|sensor(?:\s+ecol[oó]gico)?|"
     r"desligamento(?:\s+autom[aá]tico)?|economia\s+de\s+energia(?:\s+autom[aá]tica)?)"
     r"\b\s*(?::|=|-)?",
     re.I,

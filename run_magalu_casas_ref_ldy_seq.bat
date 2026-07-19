@@ -5,6 +5,10 @@ REM Sequential full runs: Magalu REF -> Casas REF -> Magalu LDY -> Casas LDY.
 REM Each step is isolated (child bats use their own setlocal); a failure is logged
 REM and the sequence continues so the other categories still get collected.
 set "FAILED="
+set "SEDA_RUN_ROOT="
+set "SEDA_COMBINED_RETAILER_RUN=1"
+set "SEDA_DB_REPLACE_RETAILER_BEFORE_LOAD="
+set "SEDA_FORCE_DATED_RUN_ROOT=1"
 
 echo ===== [1/4] Magalu REF =====
 call "%~dp0run_magalu_ref_full.bat"
