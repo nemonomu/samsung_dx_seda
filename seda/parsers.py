@@ -1571,7 +1571,10 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
 
     html_summary = _summary_review_content(html_text)
     line = product_line()
-    semantic_fields = extract_magalu_semantic_fields(item, line)
+    semantic_item = dict(item)
+    if not clean_text(semantic_item.get("path")):
+        semantic_item["path"] = product_url
+    semantic_fields = extract_magalu_semantic_fields(semantic_item, line)
     model = _magalu_factsheet_value(item, ["modelo"])
     reference = _magalu_factsheet_value(item, ["referencia", "referência"])
     item_title = clean_text(item.get("title"))

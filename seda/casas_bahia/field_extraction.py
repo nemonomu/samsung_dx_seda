@@ -14,7 +14,6 @@ from ..common.field_rules import (
     is_ldy_capacity_value,
     is_ref_capacity_value,
     normalize_key,
-    normalize_exact_loading_direction,
     normalize_loading_type,
     sanitize_labeled_energy_target_value,
     select_ldy_capacity_from_levels,
@@ -108,6 +107,32 @@ _LDY_VALUE = (
 )
 _LDY_EXPLICIT_MASS_UNIT_RE = re.compile(
     r"(?:^|[^a-z])(?:kgs?|kg\.?|quilos?|libras?|lbs?)\b",
+    re.I,
+)
+_LDY_EXACT_TITLE_MASS_RE = re.compile(
+    r"(?:de\s+)?\d+(?:[.,]\d+)?\s*(?:kgs?|kg\.?|quilos?|libras?|lbs?)\b",
+    re.I,
+)
+_LDY_TITLE_MASS_MENTION_RE = re.compile(
+    r"(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*"
+    r"(?P<unit>kgs?|kg\.?|quilos?|libras?|lbs?)\b",
+    re.I,
+)
+_LDY_TITLE_VOLUME_RE = re.compile(
+    rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?"
+    r"(?:\s+a\s+\d+(?:[.,]\d+)?)?\s*(?:litros?|lts?|l)\b",
+    re.I,
+)
+_LDY_EXACT_TITLE_VOLUME_RE = re.compile(
+    r"(?:de\s+)?\d+(?:[.,]\d+)?\s*(?:litros?|lts?|l)\b",
+    re.I,
+)
+_LDY_TITLE_VOLUME_MENTION_RE = re.compile(
+    r"(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*(?P<unit>litros?|lts?|l)\b",
+    re.I,
+)
+_LDY_COMPACT_VOLUME_TITLE_RE = re.compile(
+    r"\b(?:mini|portatil|dobravel|tanquinho)\b",
     re.I,
 )
 _ENERGY_TOKEN_RE = re.compile(
@@ -306,6 +331,12 @@ def _ref_spec_component_values(specs, kind):
 
 
 def _ldy_capacity(specs, title, description, allow_title_fallback=True):
+    exact_title_capacity = (
+        _exact_ldy_capacity_from_title(title) if allow_title_fallback else ""
+    )
+    if exact_title_capacity:
+        return exact_title_capacity
+
     levels = [
         _spec_candidates(specs, LDY_CANONICAL_LABELS, is_ldy_capacity_value),
         _spec_candidates(specs, LDY_ALIAS_LABELS, is_ldy_capacity_value),
@@ -331,7 +362,6 @@ def _ldy_loading_type(specs, title, description, allow_title_fallback=True):
     levels = (
         _normalized_loading(_spec_candidates(specs, LOADING_CANONICAL_LABELS)),
         _normalized_loading(_spec_candidates(specs, LOADING_ALIAS_LABELS)),
-        _exact_loading_values(specs),
         _loading_from_description(description),
     )
     selected = _first_level(levels)
@@ -571,14 +601,91 @@ def _normalized_loading(values):
     return [normalized for value in values for normalized in [normalize_loading_type(value)] if normalized]
 
 
-def _exact_loading_values(specs):
-    return [
-        normalized
-        for values in (specs or {}).values()
-        for value in values or []
-        for normalized in [normalize_exact_loading_direction(value)]
-        if normalized
-    ]
+def _exact_ldy_capacity_from_title(title):
+    """Return a single exact title capacity suitable for Casas-first priority."""
+    source = clean_text(title)
+    mass_capacity = extract_ldy_capacity_from_title(source)
+    mass_mentions = list(_LDY_TITLE_MASS_MENTION_RE.finditer(source))
+    mass_measurements = _title_measurement_keys(source, _LDY_TITLE_MASS_MENTION_RE)
+    if (
+        mass_capacity
+        and _LDY_EXACT_TITLE_MASS_RE.fullmatch(mass_capacity)
+        and len(mass_measurements) == 1
+        and not any(_title_measurement_is_qualified(source, match) for match in mass_mentions)
+    ):
+        return mass_capacity
+
+    # Compact/portable washers are often sold by tub volume instead of clothes
+    # mass. Keep this narrow so a full-size washer's water-volume wording is not
+    # mistaken for its load capacity.
+    if mass_measurements or not _LDY_COMPACT_VOLUME_TITLE_RE.search(normalize_key(source)):
+        return ""
+    match = _LDY_TITLE_VOLUME_RE.search(source)
+    if not match:
+        return ""
+    volume_capacity = clean_text(match.group(0))
+    volume_measurements = _title_measurement_keys(source, _LDY_TITLE_VOLUME_MENTION_RE)
+    if (
+        _LDY_EXACT_TITLE_VOLUME_RE.fullmatch(volume_capacity)
+        and len(volume_measurements) == 1
+    ):
+        prefix = normalize_key(source[max(0, match.start() - 40) : match.start()])
+        suffix = normalize_key(source[match.end() : match.end() + 20])
+        if re.search(
+            r"\b(?:agua|consumo|economia)(?:\s+de)?$",
+            prefix,
+        ) or re.match(r"^(?:de\s+)?agua\b", suffix) or _title_measurement_is_qualified(
+            source,
+            match,
+        ):
+            return ""
+        volume = _LDY_TITLE_VOLUME_MENTION_RE.search(volume_capacity)
+        return f'{volume.group("number")}L' if volume else ""
+    return ""
+
+
+def _title_measurement_keys(text, pattern):
+    measurements = set()
+    for match in pattern.finditer(clean_text(text)):
+        number = match.group("number").replace(",", ".")
+        if "." in number:
+            number = number.rstrip("0").rstrip(".")
+        number = number.lstrip("0") or "0"
+        unit = normalize_key(match.group("unit"))
+        if unit in {"kg", "kgs", "quilo", "quilos"}:
+            unit = "kg"
+        elif unit in {"libra", "libras", "lb", "lbs"}:
+            unit = "lb"
+        elif unit in {"l", "lt", "lts", "litro", "litros"}:
+            unit = "l"
+        measurements.add((number, unit))
+    return measurements
+
+
+def _title_measurement_is_qualified(text, match):
+    raw_prefix = clean_text(text)[max(0, match.start() - 40) : match.start()]
+    prefix = normalize_key(raw_prefix)
+    suffix = normalize_key(clean_text(text)[match.end() : match.end() + 40])
+    return bool(
+        re.search(
+            r"\b(?:acima|abaixo|ate|cerca|mais|menos|aprox|aproximadamente|"
+            r"aproximado|aproximada|estimado|estimada)(?:\s+de)?$",
+            prefix,
+        )
+        # In compact title ranges only the trailing number may carry the unit
+        # (for example 11-15kg or 11/15kg). Treating that trailing token as
+        # exact would incorrectly override structured targets.
+        or re.search(r"\d+(?:[.,]\d+)?\s*[-\u2013\u2014/~]\s*$", raw_prefix)
+        or re.search(
+            r"\b(?:entre\s+|de\s+)?\d+(?:[.,]\d+)?\s+(?:a|e|ou|ate)\s*$",
+            prefix,
+        )
+        or re.match(
+            r"^(?:aprox|aproximadamente|aproximad[oa]s?|estimad[oa]s?|"
+            r"cerca|mais\s+ou\s+menos|no\s+maximo|maxim[oa]s?)\b",
+            suffix,
+        )
+    )
 
 
 def _loading_from_description(text):

@@ -123,6 +123,21 @@ _LDY_VALUE = (
     rf"|(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?(?:\s+a\s+\d+(?:[.,]\d+)?)?"
     r"\s*(?:kgs?|kg\.?|quilos?|libras?|lbs?|litros?|lts?|l|ml|rpm|k?wh|kw|watts?|w)?\b"
 )
+_LDY_COMPACT_VOLUME_VALUE_RE = re.compile(
+    rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?"
+    r"(?:\s*(?:a|[-\u2013\u2014/])\s*\d+(?:[.,]\d+)?)?"
+    r"\s*(?:litros?|lts?|l)\b",
+    re.I,
+)
+_LDY_COMPACT_CONTEXT_RE = re.compile(
+    r"\b(?:mini|dobravel)\b",
+    re.I,
+)
+_LDY_DESCRIPTION_COUNT_RE = re.compile(
+    r"^(?:x\b|(?:x\s+)?(?:toalhas?|roupas?|pecas?|unidades?|itens?|item|pares?|meias?|"
+    r"camisetas?|babadores?|camisas?|cuecas?|calcinhas?|programas?|ciclos?|cargas?)\b)",
+    re.I,
+)
 _ENERGY_TOKEN_RE = re.compile(
     r"(?:abaixo\s+de\s+|aprox(?:imadamente)?\.?\s*|[<>]\s*)?\d+(?:[.,]\d+)?\s*"
     r"(?:kwh|wh|kw|watts?|w)(?:\s*/\s*(?:ano|m[eê]s|ciclo|hora|dia))?",
@@ -219,14 +234,26 @@ def _ref_capacity(item):
 def _ldy_capacity(item):
     facts = _effective_facts(item)
     text = _description_text(item)
-    levels = (
-        _fact_candidates(facts, LDY_CANONICAL_LABELS, is_ldy_capacity_value),
-        _fact_candidates(facts, LDY_ALIAS_LABELS, is_ldy_capacity_value),
-        _ldy_description_values(text, LDY_CANONICAL_LABELS),
-        _ldy_description_values(text, LDY_ALIAS_LABELS),
-    )
     title = clean_text(item.get('title')) if isinstance(item, dict) else ''
     title_capacity = extract_ldy_capacity_from_title(title) if _is_ldy_title(title) else ''
+    allow_compact_volume = bool(
+        not title_capacity and _is_compact_ldy_volume_item(item)
+    )
+
+    def validator(value):
+        return _is_magalu_ldy_capacity_value(
+            value,
+            allow_compact_volume=allow_compact_volume,
+        )
+
+    levels = (
+        _fact_candidates(facts, LDY_CANONICAL_LABELS, validator),
+        _fact_candidates(facts, LDY_ALIAS_LABELS, validator),
+        _ldy_description_values(text, LDY_CANONICAL_LABELS, validator=validator),
+        _ldy_description_values(text, LDY_ALIAS_LABELS, validator=validator),
+    )
+    if not title_capacity and allow_compact_volume:
+        title_capacity = _compact_ldy_volume_from_title(title)
     return select_ldy_capacity_from_levels(
         list(levels) + ([[title_capacity]] if title_capacity else [])
     )
@@ -557,16 +584,75 @@ def _ref_description_values(text, kind):
     return [value for _, value in sorted(output, key=lambda item: item[0])]
 
 
-def _ldy_description_values(text, labels):
+def _ldy_description_values(text, labels, validator=is_ldy_capacity_value):
     output = []
     for label in sorted(labels, key=len, reverse=True):
         words = [re.escape(word) for word in label.split()]
         label_pattern = r"\s+".join(words)
         for match in re.finditer(rf"\b{label_pattern}\b\s*(?:[:=-]\s*)?({_LDY_VALUE})", text, re.I):
             value = clean_text(match.group(1))
-            if is_ldy_capacity_value(value):
+            if _is_ldy_description_count(text, match, value):
+                continue
+            if validator(value):
                 output.append((match.start(), value))
     return [value for _, value in sorted(output, key=lambda item: item[0])]
+
+
+def _is_magalu_ldy_capacity_value(value, allow_compact_volume=False):
+    if is_ldy_capacity_value(value):
+        return True
+    return bool(
+        allow_compact_volume
+        and _LDY_COMPACT_VOLUME_VALUE_RE.fullmatch(clean_text(value))
+    )
+
+
+def _is_compact_ldy_volume_item(item):
+    if not isinstance(item, dict):
+        return False
+    title = clean_text(item.get("title"))
+    context_values = [clean_text(item.get("path"))]
+    for field_name in ("category", "subcategory"):
+        value = item.get(field_name)
+        if isinstance(value, dict):
+            context_values.extend(
+                clean_text(value.get(key))
+                for key in ("id", "name", "url")
+                if clean_text(value.get(key))
+            )
+        elif clean_text(value):
+            context_values.append(clean_text(value))
+    context = normalize_key(" ".join(context_values))
+    if re.search(r"\bmmlp\b|\bmini\s+(?:maquina\s+de\s+lavar|lavadora)\b", context):
+        return True
+    return bool(
+        _is_ldy_title(title)
+        and _LDY_COMPACT_CONTEXT_RE.search(normalize_key(title))
+    )
+
+
+def _compact_ldy_volume_from_title(title):
+    source = clean_text(title)
+    candidates = {}
+    for match in _LDY_COMPACT_VOLUME_VALUE_RE.finditer(source):
+        prefix = normalize_key(source[max(0, match.start() - 40) : match.start()])
+        suffix = normalize_key(source[match.end() : match.end() + 24])
+        if re.search(
+            r"\b(?:agua|consumo|economia)(?:\s+de)?$",
+            prefix,
+        ) or re.match(r"^(?:de\s+)?agua\b", suffix):
+            continue
+        raw = clean_text(match.group(0))
+        key = re.sub(r"\s+", "", raw).casefold()
+        candidates.setdefault(key, raw)
+    return next(iter(candidates.values())) if len(candidates) == 1 else ""
+
+
+def _is_ldy_description_count(text, match, value):
+    if not re.fullmatch(r"\d+", clean_text(value)):
+        return False
+    suffix = normalize_key(text[match.end(1) : match.end(1) + 60])
+    return bool(_LDY_DESCRIPTION_COUNT_RE.match(suffix))
 
 
 def _normalized_loading_candidates(values):

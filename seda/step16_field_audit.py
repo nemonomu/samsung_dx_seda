@@ -29,8 +29,15 @@ PARSER_CRITERIA = {
     "similar": "similar product names joined with delimiter.",
     "ref_refrigerator_type": "REF type from retailer detail specs, e.g. Magalu Ficha Tecnica > Porta.",
     "ref_capacity": "REF capacity from retailer detail specs, e.g. Magalu Ficha Tecnica > Capacidade Liquida total.",
-    "ldy_loading_type": "LDY loading/opening type from retailer detail specs, e.g. Tipo de Abertura.",
-    "ldy_capacity": "LDY washing capacity from retailer detail specs, e.g. Capacidade de Lavagem.",
+    "ldy_loading_type": (
+        "Casas Bahia: canonical or alias labels, then explicit loading-direction phrases in description/title; "
+        "never use unrelated spec values. Magalu: preserve the existing exact-value fallback."
+    ),
+    "ldy_capacity": (
+        "Casas Bahia: one unambiguous exact capacity in the product title first, then retailer detail targets; "
+        "Magalu: retailer detail targets first. Preserve target ranges/approximate values when no reliable exact "
+        "Casas Bahia title capacity exists."
+    ),
     "sku_short_version": "Short model code from retailer_sku_name, e.g. RS58 or RF29D.",
 }
 

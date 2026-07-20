@@ -179,7 +179,7 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
             "Lavadora Consul 9kg",
             [spec("Capacidade (kg de roupas)", "96 litros"), spec("Capacidade de lavagem", "De 7 a 10kg")],
         )
-        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "De 7 a 10kg")
+        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "9kg")
         data = source("Lavadora portátil 1.2Kg", [spec("Capacidade", "26 l")])
         self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "1.2Kg")
         dishwasher = source("Lava-louças 14 serviços", [spec("Capacidade", "14")])
@@ -187,11 +187,20 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
         dishwasher = source("Máquina de Lavar Louças Ecomax", [spec("Capacidade", "24")])
         self.assertEqual(self.detail("LDY", dishwasher)["ldy_capacity"], "")
         range_data = source("Lavadora Consul 9kg", [], "Capacidade 9kg; Faixa Capacidade 8kg a 9kg")
-        self.assertEqual(self.detail("LDY", range_data)["ldy_capacity"], "9kg,8kg a 9kg")
+        self.assertEqual(self.detail("LDY", range_data)["ldy_capacity"], "9kg")
         range_data = source("Lavadora Brastemp 14kg", [], "Capacidade 12kg - 14kg")
-        self.assertEqual(self.detail("LDY", range_data)["ldy_capacity"], "12kg - 14kg")
+        self.assertEqual(self.detail("LDY", range_data)["ldy_capacity"], "14kg")
         ordered = source("Lavadora 15kg", [], "Capacidade 15kg; Capacidade total 14kg")
-        self.assertEqual(self.detail("LDY", ordered)["ldy_capacity"], "15kg,14kg")
+        self.assertEqual(self.detail("LDY", ordered)["ldy_capacity"], "15kg")
+        target_only = source(
+            "Lavadora Consul",
+            [],
+            "Capacidade 9kg; Faixa Capacidade 8kg a 9kg",
+        )
+        self.assertEqual(
+            self.detail("LDY", target_only)["ldy_capacity"],
+            "9kg,8kg a 9kg",
+        )
 
     def test_ldy_suspicious_unitless_decimal_yields_to_conflicting_capacity(self):
         data = source(
@@ -206,14 +215,14 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
                 spec("Capacidade de lavagem", "15kg"),
             ],
         )
-        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "15kg")
+        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "16kg")
 
     def test_ldy_small_capacity_is_not_globally_rejected(self):
         data = source(
             "Mini lavadora portátil 1kg",
             [spec("Capacidade (kg de roupas)", "1")],
         )
-        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "1")
+        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "1kg")
         data = source("Lavadora compacta", [spec("Capacidade (kg de roupas)", "0,49")])
         self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "0,49")
         data = source(
@@ -223,7 +232,150 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
                 spec("Capacidade de lavagem", "0,49 kg"),
             ],
         )
-        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "0,49")
+        self.assertEqual(self.detail("LDY", data)["ldy_capacity"], "16kg")
+
+    def test_ldy_exact_title_capacity_has_priority_for_reported_cases(self):
+        cases = (
+            (
+                "1570578247",
+                "Máquina de Lavar Consul 15kg com Modo Eco - 110V",
+                [
+                    spec("Capacidade (kg de roupas)", "620"),
+                    spec("Capacidade", "De 11 a 15kg"),
+                ],
+                "Capacidade Total: 15 kg",
+                "15kg",
+            ),
+            (
+                "1570474147",
+                "Máquina De Lavar 14 Kg Philco Preto PLR14B",
+                [spec("Capacidade", "Acima de 16 kg")],
+                "Capacidade de lavagem: 14kg",
+                "14 Kg",
+            ),
+            (
+                "1514271762",
+                "Lavadora de Roupas Electrolux Top Load LED17 17Kg Automática",
+                [spec("Capacidade", "De 11 a 15kg")],
+                "Capacidade (kg): 17",
+                "17Kg",
+            ),
+            (
+                "1582258509",
+                "Mini Máquina De Lavar Roupas Dobrável Portátil 12 Litros Lilás",
+                [
+                    spec("Capacidade (kg de roupas)", "12L"),
+                    spec("Capacidade", "De 11 a 15kg"),
+                ],
+                "Capacidade: 12L",
+                "12L",
+            ),
+            (
+                "1582708993",
+                "Máquina de Lavar 14 kg Philco 12 Programas Titânio PLR14B",
+                [
+                    spec("Capacidade (kg de roupas)", "14"),
+                    spec("Capacidade (kg de roupas)", "De 11 a 15kg"),
+                ],
+                "",
+                "14 kg",
+            ),
+            (
+                "1545346578",
+                "Lavadora de Roupas Consul CWB09BB 9kg",
+                [],
+                "Capacidade 9kg; Faixa Capacidade 8kg a 9kg",
+                "9kg",
+            ),
+            (
+                "1582406374",
+                "Máquina de Lavar Mueller Energy Automática 8kg",
+                [
+                    spec("Capacidade (kg de roupas)", "8Kg"),
+                    spec("Capacidade (kg de roupas)", "De 7 a 10kg"),
+                ],
+                "",
+                "8kg",
+            ),
+            (
+                "1577381447",
+                "Máquina De Lavar Midea Healthguard MF200 11kg",
+                [
+                    spec("Capacidade (kg de roupas)", "11 kg"),
+                    spec("Capacidade (kg de roupas)", "De 11 a 15kg"),
+                ],
+                "",
+                "11kg",
+            ),
+            (
+                "1582410067",
+                "Máquina de Lavar Midea Wave Agitator Branca 13Kg",
+                [
+                    spec("Capacidade (kg de roupas)", "13"),
+                    spec("Capacidade (kg de roupas)", "De 11 a 15kg"),
+                ],
+                "",
+                "13Kg",
+            ),
+        )
+        for sku, title, specs, description, expected in cases:
+            with self.subTest(sku=sku):
+                data = source(title, specs, description)
+                self.assertEqual(self.detail("LDY", data)["ldy_capacity"], expected)
+
+    def test_ldy_title_priority_requires_one_unambiguous_exact_capacity(self):
+        qualified = source(
+            "Lavadora acima de 16kg",
+            [spec("Capacidade de lavagem", "14kg")],
+        )
+        self.assertEqual(self.detail("LDY", qualified)["ldy_capacity"], "14kg")
+
+        multiple = source(
+            "Lava e Seca 11kg Lava / 7kg Seca",
+            [spec("Capacidade de lavagem", "10kg")],
+        )
+        self.assertEqual(self.detail("LDY", multiple)["ldy_capacity"], "10kg")
+
+        water_usage = source(
+            "Mini lavadora com economia de 20 litros de água",
+            [spec("Capacidade de lavagem", "2kg")],
+        )
+        self.assertEqual(self.detail("LDY", water_usage)["ldy_capacity"], "2kg")
+
+        approximate = source(
+            "Lavadora com capacidade aproximada de 16kg",
+            [spec("Capacidade de lavagem", "14kg")],
+        )
+        self.assertEqual(self.detail("LDY", approximate)["ldy_capacity"], "14kg")
+        approximate_suffix = source(
+            "Lavadora com capacidade de 16kg aprox.",
+            [spec("Capacidade de lavagem", "14kg")],
+        )
+        self.assertEqual(
+            self.detail("LDY", approximate_suffix)["ldy_capacity"],
+            "14kg",
+        )
+
+        compact_tub = source("Mini lavadora tanque de 12 litros", [])
+        self.assertEqual(self.detail("LDY", compact_tub)["ldy_capacity"], "12L")
+
+        for title in (
+            "Lavadora 11-15kg",
+            "Lavadora 11/15kg",
+            "Lavadora 11~15kg",
+            "Lavadora 11 ou 15kg",
+            "Lavadora 11 ate 15kg",
+            "Lavadora entre 11 e 15kg",
+        ):
+            with self.subTest(title=title):
+                ranged = source(title, [spec("Capacidade de lavagem", "10kg")])
+                self.assertEqual(self.detail("LDY", ranged)["ldy_capacity"], "10kg")
+
+        compact_range = source(
+            "Mini lavadora portatil 11-15L",
+            [spec("Capacidade de lavagem", "2kg")],
+        )
+        self.assertEqual(self.detail("LDY", compact_range)["ldy_capacity"], "2kg")
 
     def test_product_source_html_keeps_label_attached_to_value(self):
         data = source(
@@ -256,6 +408,20 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
         self.assertEqual(self.detail("LDY", data)["ldy_loading_type"], "Top load")
         data = source("Máquina de Lavar Brastemp 15kg", [], "A Lavadora Front Load Brastemp 15 kg")
         self.assertEqual(self.detail("LDY", data)["ldy_loading_type"], "Front load")
+
+    def test_ldy_loading_ignores_unrelated_exact_direction_values(self):
+        data = source(
+            "Máquina de Lavar Consul 15kg com Modo Eco - 110V",
+            [spec("Consumo de água", "Superior")],
+            "Abertura da Tampa: Frontal",
+        )
+        self.assertEqual(self.detail("LDY", data)["ldy_loading_type"], "Front load")
+
+        unrelated_only = source(
+            "Máquina de Lavar Consul 15kg",
+            [spec("Consumo de água", "Superior")],
+        )
+        self.assertEqual(self.detail("LDY", unrelated_only)["ldy_loading_type"], "")
 
     def test_energy_keeps_consumption_and_rejects_efficiency(self):
         data = source(
@@ -359,7 +525,7 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
         }
         html = (
             '<script type="application/ld+json">'
-            + json.dumps({"@type": "Product", "name": "Lavadora automática 15kg"})
+            + json.dumps({"@type": "Product", "name": "Lavadora automática"})
             + '</script><script id="__NEXT_DATA__" type="application/json">'
             + json.dumps(payload, ensure_ascii=False)
             + "</script>"
@@ -392,7 +558,7 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
     def test_html_structured_spec_has_priority_over_meta_description(self):
         payload = {
             "props": {"pageProps": {"product": {
-                "name": "Lavadora automática 15kg",
+                "name": "Lavadora automática",
                 "description": "",
                 "specGroups": [{"specs": [{"name": "Capacidade", "value": "14kg"}]}],
             }}}

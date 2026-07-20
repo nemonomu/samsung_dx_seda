@@ -245,6 +245,150 @@ class MagaluFieldExtractionTests(unittest.TestCase):
         pressure = {"title": "Lavadora Alta Pressão 15kg", "factsheet": [fact("Capacidade", "15kg")]}
         self.assertEqual(extract_fields(pressure, "LDY")["ldy_capacity"], "")
 
+    def test_ldy_mini_liter_capacity_uses_exact_measurement_not_item_count(self):
+        for raw in ("6,5 L", "6,5L"):
+            with self.subTest(raw=raw):
+                item = {
+                    "title": "Mini Maquina de Lavar Portatil",
+                    "path": "/mini-maquina/p/sample/ed/mmlp/",
+                    "factsheet": [fact("Capacidade de Lavagem", raw)],
+                }
+                self.assertEqual(extract_fields(item, "LDY")["ldy_capacity"], raw)
+
+        approximate = {
+            "title": "Mini Maquina de Lavar Portatil",
+            "path": "/mini-maquina/p/sample/ed/mmlp/",
+            "factsheet": [fact("Capacidade de Lavagem", "Ate 6,5 L")],
+        }
+        self.assertEqual(
+            extract_fields(approximate, "LDY")["ldy_capacity"],
+            "Ate 6,5 L",
+        )
+
+        alias = {
+            "title": "Lavadora Mini Portatil Dobravel",
+            "factsheet": [fact("Capacidade", "6,5L")],
+        }
+        self.assertEqual(extract_fields(alias, "LDY")["ldy_capacity"], "6,5L")
+
+        mmlp_without_mini_title = {
+            "title": "Maquina de Lavar Silenciosa Verde",
+            "path": "/maquina-de-lavar/p/sample/ed/mmlp/",
+            "factsheet": [fact("Capacidade de Lavagem", "6,5L")],
+            "description": "Capacidade de Lavagem: 1 toalha de banho de bebe",
+        }
+        self.assertEqual(
+            extract_fields(mmlp_without_mini_title, "LDY")["ldy_capacity"],
+            "6,5L",
+        )
+
+        description = {
+            "title": "Mini Maquina de Lavar Portatil",
+            "path": "/mini-maquina/p/sample/ed/mmlp/",
+            "factsheet": [],
+            "description": (
+                "Capacidade de Lavagem: 6,5L; "
+                "Capacidade de Lavagem: 1 toalha de banho de bebe "
+                "8 roupas de bebe 4 babadores 12 pares de meias"
+            ),
+        }
+        self.assertEqual(
+            extract_fields(description, "LDY")["ldy_capacity"],
+            "6,5L",
+        )
+        for count_text in (
+            "1 toalha de banho de bebe",
+            "1x Mini Maquina de Lavar",
+        ):
+            with self.subTest(count_text=count_text):
+                count_only = {
+                    "title": "Mini Maquina de Lavar Portatil",
+                    "path": "/mini-maquina/p/sample/ed/mmlp/",
+                    "factsheet": [],
+                    "description": f"Capacidade de Lavagem: {count_text}",
+                }
+                self.assertEqual(
+                    extract_fields(count_only, "LDY")["ldy_capacity"],
+                    "",
+                )
+
+        title_only = {
+            "title": "Mini Maquina de Lavar 6,5L Portatil e Dobravel",
+            "path": "/mini-maquina/p/sample/ed/mmlp/",
+            "factsheet": [],
+        }
+        self.assertEqual(extract_fields(title_only, "LDY")["ldy_capacity"], "6,5L")
+        water_title = {
+            "title": "Mini Lavadora com economia de 20 litros de agua",
+            "factsheet": [],
+        }
+        self.assertEqual(extract_fields(water_title, "LDY")["ldy_capacity"], "")
+
+        bare_one = {
+            "title": "Mini Maquina de Lavar Portatil",
+            "path": "/mini-maquina/p/sample/ed/mmlp/",
+            "factsheet": [fact("Capacidade de Lavagem", "1")],
+        }
+        self.assertEqual(extract_fields(bare_one, "LDY")["ldy_capacity"], "1")
+
+        mass_title_boundaries = (
+            ("Lavadora Portatil 1.2Kg", "26 L", "1.2Kg"),
+            ("Tanquinho Maquina de Lavar 10kg", "96 litros", "10kg"),
+            ("Lavadora Ultrassonica 3kg", "20 litros", "3kg"),
+        )
+        for title, target, expected in mass_title_boundaries:
+            with self.subTest(title=title, target=target):
+                item = {
+                    "title": title,
+                    "path": "/maquina-de-lavar/p/sample/ed/mmlp/",
+                    "factsheet": [fact("Capacidade de Lavagem", target)],
+                }
+                self.assertEqual(
+                    extract_fields(item, "LDY")["ldy_capacity"],
+                    expected,
+                )
+
+        weak_portable_context = {
+            "title": "Lavadora Portatil",
+            "factsheet": [fact("Capacidade de Lavagem", "26 L")],
+        }
+        self.assertEqual(
+            extract_fields(weak_portable_context, "LDY")["ldy_capacity"],
+            "",
+        )
+
+    def test_ldy_mini_liter_graphql_and_next_data_paths_match(self):
+        item = {
+            "id": "sample",
+            "title": "Maquina de Lavar Silenciosa Verde",
+            "path": "/mini-maquina/p/sample/ed/mmlp/",
+            "description": (
+                "Capacidade de Lavagem: 6,5L; "
+                "Capacidade de Lavagem: 1 toalha de banho de bebe"
+            ),
+            "factsheet": [fact("Capacidade de Lavagem", "6,5L")],
+            "attributes": [],
+            "offers": [],
+            "rating": {},
+        }
+        next_item = dict(item)
+        next_item.pop("path")
+        payload = {"props": {"pageProps": {"data": {"item": next_item}}}}
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+        )
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "LDY"}):
+            graphql = _detail_from_item(item)
+            next_data = _parse_magalu_next_detail(
+                html,
+                "https://www.magazineluiza.com.br",
+                "https://www.magazineluiza.com.br/p/sample/ed/mmlp/",
+            )
+        self.assertEqual(graphql["ldy_capacity"], "6,5L")
+        self.assertEqual(next_data["ldy_capacity"], "6,5L")
+
     def test_ldy_repeated_target_uses_shared_conflict_policy(self):
         item = {
             'title': 'Lavadora automatica 16kg',

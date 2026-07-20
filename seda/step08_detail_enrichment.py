@@ -1052,6 +1052,7 @@ def _merge_magalu_exact_html_specs(row, html_text, detail=None):
         return False
     synthetic_item = {
         "title": detail.get("retailer_sku_name") or row.get("retailer_sku_name") or "",
+        "path": row.get("product_url") or "",
         "factsheet": [
             {"keyName": label, "value": value}
             for label, value in pairs

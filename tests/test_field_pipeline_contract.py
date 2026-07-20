@@ -212,6 +212,34 @@ class FieldPipelineContractTests(unittest.TestCase):
             _magalu_graphql_detail(row, row["product_url"])
         self.assertEqual(row["screen_size"], "55 polegadas")
 
+    def test_magalu_mini_liter_capacity_survives_merge_final_and_db(self):
+        for value in ("6,5 L", "6,5L"):
+            with self.subTest(value=value):
+                row = {
+                    "retailer": "Magalu",
+                    "product_url": (
+                        "https://www.magazineluiza.com.br/mini-maquina/p/sample/ed/mmlp/"
+                    ),
+                    "ldy_capacity": "stale",
+                }
+                result = {
+                    "success": True,
+                    "detail": {
+                        "retailer_sku_name": "Mini Maquina de Lavar Portatil",
+                        "ldy_capacity": value,
+                    },
+                    "trace": [],
+                }
+                with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "LDY"}), patch(
+                    "seda.magalu.detail_api.fetch_detail",
+                    return_value=result,
+                ):
+                    _magalu_graphql_detail(row, row["product_url"])
+                self.assertEqual(row["ldy_capacity"], value)
+                formatted = self.formatted("LDY", row)
+                self.assertEqual(formatted["ldy_capacity"], value)
+                self.assertEqual(_db_value("ldy_capacity", value), value)
+
     def test_magalu_rendered_detail_success_clears_listing_false_positive(self):
         row = {
             "retailer": "Magalu",
@@ -924,6 +952,26 @@ class FieldPipelineContractTests(unittest.TestCase):
             self.assertTrue(_merge_magalu_exact_html_specs(row, html, detail))
         self.assertEqual(row["screen_size"], "55 polegadas")
         self.assertEqual(row["estimated_annual_electricity_use"], "130W")
+
+    def test_exact_html_path_keeps_mmlp_liter_capacity(self):
+        html = (
+            "<div><span>Capacidade de Lavagem</span><span>6,5 L</span></div>"
+        )
+        row = {
+            "retailer": "Magalu",
+            "product_line": "LDY",
+            "retailer_sku_name": "Maquina de Lavar Silenciosa Verde",
+            "product_url": (
+                "https://www.magazineluiza.com.br/maquina-de-lavar/p/sample/ed/mmlp/"
+            ),
+        }
+        detail = {
+            "retailer_sku_name": row["retailer_sku_name"],
+            "_detail_identity_verified": True,
+        }
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "LDY"}):
+            self.assertTrue(_merge_magalu_exact_html_specs(row, html, detail))
+        self.assertEqual(row["ldy_capacity"], "6,5 L")
 
     def test_exact_html_energy_uses_labeled_target_numeric_contract(self):
         for html_value, expected in (("130", "130"), ("&lt;165", "<165")):
@@ -2006,14 +2054,38 @@ class FieldPipelineContractTests(unittest.TestCase):
                 )
                 self.assertEqual(detail["ldy_loading_type"], expected)
 
-    def test_loading_direction_exact_off_label_fallback(self):
+    def test_ldy_title_first_capacity_is_casas_only(self):
+        title = "Lavadora automática 14kg"
+        magalu = extract_magalu_fields(
+            {
+                "title": title,
+                "factsheet": [{"keyName": "Capacidade de lavagem", "value": "16kg"}],
+            },
+            "LDY",
+        )
+        casas = extract_casas_fields(
+            {"Capacidade de lavagem": ["16kg"]},
+            title,
+            "",
+            "LDY",
+        )
+        casas_without_title_fallback = extract_casas_fields(
+            {"Capacidade de lavagem": ["16kg"]},
+            title,
+            "",
+            "LDY",
+            allow_title_fallback=False,
+        )
+        self.assertEqual(magalu["ldy_capacity"], "16kg")
+        self.assertEqual(casas["ldy_capacity"], "14kg")
+        self.assertEqual(casas_without_title_fallback["ldy_capacity"], "16kg")
+
+    def test_loading_direction_off_label_fallback_is_retailer_specific(self):
         off_label_cases = (
             ("Consumo de água", "Superior", "Top load"),
             ("Capacidade (kg de roupas)", "Superior", "Top load"),
             ("Consumo (kWh)", "Superior", "Top load"),
             ("Velocidade de centrifugação (rpm)", "Frontal", "Front load"),
-            ("Tipo", "Front Loading", "Front load"),
-            ("Abertura da Tampa", "Carga Superior", "Top load"),
         )
         for label, raw, expected in off_label_cases:
             with self.subTest(label=label, raw=raw):
@@ -2031,7 +2103,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                     "LDY",
                 )
                 self.assertEqual(magalu["ldy_loading_type"], expected)
-                self.assertEqual(casas["ldy_loading_type"], expected)
+                self.assertEqual(casas["ldy_loading_type"], "")
 
         installation = "Visão Frontal: Superior Direito, Superior Esquerdo"
         self.assertEqual(
