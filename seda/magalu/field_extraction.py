@@ -4,15 +4,21 @@ import re
 from ..common.field_rules import (
     CAPACITY_QUALIFIER_PATTERN,
     clean_text,
-    combine_capacity_distinct,
     combine_distinct,
     combine_measurement_distinct,
     extract_direct_labeled_energy_tokens,
     extract_ldy_capacity_from_title,
     extract_ref_capacity_components,
     extract_ref_capacity_from_title,
-    extract_screen_size_from_title,
+    extract_ref_capacity_scalar_values,
+    extract_ref_title_capacity_components,
+    filter_ref_capacity_exact_over_qualified_levels,
     is_energy_value,
+    is_auxiliary_water_volume_context,
+    is_negated_loading_context,
+    is_ref_auxiliary_volume_context,
+    is_ref_capacity_category_band,
+    is_safe_tv_size_after_os_label,
     is_ldy_capacity_value,
     is_ref_capacity_value,
     is_screen_size_value,
@@ -20,6 +26,8 @@ from ..common.field_rules import (
     normalize_exact_loading_direction,
     normalize_loading_type,
     sanitize_labeled_energy_target_value,
+    select_ref_capacity_exact_over_qualified,
+    select_ref_title_capacity_component,
     select_ldy_capacity_from_levels,
     trim_labeled_energy_suffix,
 )
@@ -110,6 +118,96 @@ LOADING_ALIAS_LABELS = {
 
 SCREEN_LABELS = {"polegada", "polegadas", "tamanho da tela"}
 
+_SCREEN_TITLE_UNIT = r'(?:polegadas?|pol\.?|inch(?:es)?|in\b|["\u2033])'
+_SCREEN_TITLE_EXPLICIT_RE = re.compile(
+    rf'(?<!\d)(?P<number>\d{{2,3}}(?:[.,]\d+)?)\s*{_SCREEN_TITLE_UNIT}',
+    re.I,
+)
+_SCREEN_TITLE_RANGE_RE = re.compile(
+    rf'(?<!\d)\d{{1,3}}(?:[.,]\d+)?\s*(?:{_SCREEN_TITLE_UNIT})?\s*'
+    rf'(?:a|at[e\u00e9]|[-\u2013\u2014/])\s*\d{{1,3}}(?:[.,]\d+)?\s*{_SCREEN_TITLE_UNIT}',
+    re.I,
+)
+_SCREEN_TITLE_DISPLAY_RE = re.compile(
+    r'\b(?:(?:smart\s*)?tv|televisor|qled|oled|crystal\s+uhd)(?=\d|\b)',
+    re.I,
+)
+_SCREEN_TITLE_IMPLICIT_RE = re.compile(
+    r'(?<![\w/])(?P<number>\d{2,3})(?![\w/%])',
+    re.I,
+)
+_SCREEN_TITLE_COMPACT_RE = re.compile(
+    r'\b(?:smart\s*)?tv(?P<number>\d{2,3})(?![\w/%])',
+    re.I,
+)
+_SCREEN_DISPLAY_PANEL_PREFIX_RE = re.compile(
+    r'\b(?:painel|paineis)\s+(?:mini\s+led|oled|qled|led|lcd|va|ips)'
+    r'(?P<descriptors>(?:\s+[a-z0-9]+){0,4})\s*$',
+    re.I,
+)
+_SCREEN_TITLE_INVALID_SUFFIX_RE = re.compile(
+    r'\s*(?:hz|rpm|nits?|w|watts?|wh|kwh|kw|v|volts?|kg|cm|mm|litros?|lts?|l|'
+    r'bits?|fps|gb|mb|tb|anos?|mes(?:es)?|dias?|garantia)\b',
+    re.I,
+)
+_SCREEN_TITLE_INVALID_PREFIX_RE = re.compile(
+    r'\b(?:webos|android(?:\s+tv)?|google\s+tv|roku\s+tv|titan\s+os|vidaa|'
+    r'versao|geracao|ger|hdmi|usb|modelo|hdr|processador|atualizacao|memoria|'
+    r'armazenamento)\s*$',
+    re.I,
+)
+
+_REF_TITLE_CUBIC_RE = re.compile(
+    r'(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*'
+    r'(?P<unit>p[e\u00e9]s?\s+c[u\u00fa]bicos?)'
+    r'(?:\s*\([^)]*(?:litros?|l\b)[^)]*\))?',
+    re.I,
+)
+_REF_TITLE_VOLUME_RE = re.compile(
+    r'(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*'
+    r'(?P<unit>litros?|lts?|ml|l|quartos?|quarts?)\b',
+    re.I,
+)
+_REF_TITLE_CONTAINER_RE = re.compile(
+    r'(?<!\w)\d+(?:[.,]\d+)?\s*(?:latas?|garrafas?|unidades?|recipientes?)\b'
+    r'(?:'
+    r'\s+(?:de|com|x)\s*(?:\(\s*)?\d+(?:[.,]\d+)?\s*'
+    r'(?:litros?|lts?|ml|l|quartos?|quarts?)\b\s*\)?'
+    r'|\s*[/;:,+&\-\u2013\u2014]\s*(?:\(\s*)?'
+    r'(?:\d+(?:[.,]\d+)?\s*ml|'
+    r'[0-9](?:[.,]\d+)?\s*(?:litros?|lts?|l))\b\s*\)?'
+    r'|\s*(?:\(\s*)?'
+    r'(?:\d+(?:[.,]\d+)?\s*ml|'
+    r'(?:0[.,]\d+|1(?:[.,]\d+)?|2(?:[.,]0+)?)\s*(?:litros?|lts?|l))\b\s*\)?'
+    r')',
+    re.I,
+)
+_REF_TITLE_UNCOUNTED_CONTAINER_RE = re.compile(
+    r'(?<!\w)(?:latas?|garrafas?|unidades?|recipientes?)\b'
+    r'\s+(?:de|com|x)\s*(?:\(\s*)?'
+    r'\d+(?:[.,]\d+)?\s*'
+    r'(?:litros?|lts?|ml|l|quartos?|quarts?)\b\s*\)?',
+    re.I,
+)
+
+_LDY_TITLE_MASS_MENTION_RE = re.compile(
+    r'(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*'
+    r'(?P<unit>kgs?|kg\.?|quilos?|libras?|lbs?)\b',
+    re.I,
+)
+_LDY_TITLE_VOLUME_MENTION_RE = re.compile(
+    r'(?<!\w)(?P<number>\d+(?:[.,]\d+)?)\s*'
+    r'(?P<unit>litros?|lts?|l)\b',
+    re.I,
+)
+_LOADING_TITLE_RE = re.compile(
+    r'(?:top[\s-]+load(?:ing|er)?|front[\s-]+load(?:ing|er)?|'
+    r'carga\s+(?:superior|frontal)|'
+    r'abertura(?:\s+da\s+tampa)?\s+(?:superior|frontal)|'
+    r'(?:m[aá]quina\s+de\s+lavar|lavadora|lava\s+e\s+seca)\s+frontal)',
+    re.I,
+)
+
 _REF_VALUE = (
     rf"(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s+a\s+\d+(?:[.,]\d+)?\s*(?:litros?|lts?|l)\b"
     rf"|(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*p[eé]s?\s*c[uú]bicos?(?:\s*\([^)]*(?:litros?|l\b)[^)]*\))?"
@@ -172,6 +270,29 @@ def _screen_size(item):
     title = clean_text(item.get("title")) if isinstance(item, dict) else ""
     if not _is_tv_title(title):
         return ""
+    title_size = _single_title_screen_size(title)
+    if title_size:
+        for compact_match in _SCREEN_TITLE_COMPACT_RE.finditer(title):
+            if (
+                _screen_title_measurement_is_accessory(
+                    title,
+                    compact_match.start("number"),
+                    compact_match.end("number"),
+                )
+                or not _screen_value_matches_number(
+                    title_size, compact_match.group("number")
+                )
+            ):
+                continue
+            structured_levels = (
+                _attribute_candidates(item, SCREEN_LABELS, is_screen_size_value),
+                _fact_candidates(item.get('factsheet') or [], SCREEN_LABELS, is_screen_size_value),
+            )
+            for values in structured_levels:
+                structured = combine_measurement_distinct(values)
+                if _screen_value_matches_number(structured, compact_match.group('number')):
+                    return structured
+        return title_size
     attributes = _attribute_candidates(item, SCREEN_LABELS, is_screen_size_value)
     if attributes:
         return combine_measurement_distinct(attributes)
@@ -185,7 +306,7 @@ def _screen_size(item):
             bundled.extend(_fact_candidates(bundle.get("factsheet") or [], SCREEN_LABELS, is_screen_size_value))
     if bundled:
         return combine_measurement_distinct(bundled)
-    return extract_screen_size_from_title(title)
+    return ""
 
 
 def _energy_use(item):
@@ -207,11 +328,15 @@ def _energy_use(item):
 
 
 def _ref_capacity(item):
+    title = clean_text(item.get("title")) if isinstance(item, dict) else ""
+    title_capacity = _single_title_ref_capacity(title)
+    if title_capacity:
+        return title_capacity
     facts = _effective_facts(item)
     text = _description_text(item)
     fact_components = _ref_components_from_values(_all_fact_values(facts))
     description_components = extract_ref_capacity_components(text)
-    levels = (
+    raw_levels = (
         _ref_scalar_fact_candidates(facts, REF_LIQUID_TOTAL_LABELS),
         _ref_description_values(text, "liquid_total"),
         _ref_scalar_fact_candidates(facts, REF_TOTAL_LABELS) + fact_components["total"],
@@ -224,18 +349,29 @@ def _ref_capacity(item):
         _ref_scalar_fact_candidates(facts, REF_FREEZER_LABELS) + fact_components["freezer"],
         _ref_description_values(text, "freezer") + description_components["freezer"],
     )
+    raw_levels = filter_ref_capacity_exact_over_qualified_levels(raw_levels)
+    partitioned_levels = [
+        _split_ref_capacity_bands(values) for values in raw_levels
+    ]
+    exact_levels = [exact for exact, _ in partitioned_levels]
+    band_levels = [bands for _, bands in partitioned_levels]
+    levels = (*exact_levels, *band_levels)
     selected = _first_capacity_level(levels)
     if selected:
         return selected
-    title = clean_text(item.get("title")) if isinstance(item, dict) else ""
-    return extract_ref_capacity_from_title(title) if _is_ref_title(title) else ""
+    return _safe_ref_capacity_from_title(title) if _is_ref_title(title) else ""
 
 
 def _ldy_capacity(item):
+    title = clean_text(item.get('title')) if isinstance(item, dict) else ''
+    if _is_standalone_dryer_title(title):
+        return ""
     facts = _effective_facts(item)
     text = _description_text(item)
-    title = clean_text(item.get('title')) if isinstance(item, dict) else ''
-    title_capacity = extract_ldy_capacity_from_title(title) if _is_ldy_title(title) else ''
+    exact_title_capacity = _single_title_ldy_capacity(item)
+    if exact_title_capacity:
+        return exact_title_capacity
+    title_capacity = _safe_ldy_capacity_from_title(title) if _is_ldy_title(title) else ''
     allow_compact_volume = bool(
         not title_capacity and _is_compact_ldy_volume_item(item)
     )
@@ -260,6 +396,10 @@ def _ldy_capacity(item):
 
 
 def _ldy_loading_type(item):
+    title = clean_text(item.get("title")) if isinstance(item, dict) else ""
+    title_loading_type = _single_title_loading_type(title)
+    if title_loading_type:
+        return title_loading_type
     facts = _effective_facts(item)
     levels = (
         _normalized_loading_candidates(_fact_candidates(facts, LOADING_CANONICAL_LABELS)),
@@ -272,11 +412,391 @@ def _ldy_loading_type(item):
     selected = _first_level(levels)
     if selected:
         return selected
+    if not _is_ldy_title(title):
+        return ""
+    return combine_distinct(_title_loading_values(title))
+
+
+def _single_title_screen_size(title):
+    text = clean_text(title)
+    if not _is_tv_title(text):
+        return ""
+
+    range_spans = [match.span() for match in _SCREEN_TITLE_RANGE_RE.finditer(text)]
+    explicit_spans = []
+    candidates = []
+    for match in _SCREEN_TITLE_EXPLICIT_RE.finditer(text):
+        if _span_overlaps_any(match.span(), range_spans):
+            continue
+        if _screen_title_measurement_is_accessory(
+            text, match.start(), match.end()
+        ):
+            explicit_spans.append(match.span())
+            continue
+        if _title_measurement_is_qualified(text, match):
+            return ''
+        raw = clean_text(match.group(0))
+        if not is_screen_size_value(raw):
+            continue
+        explicit_spans.append(match.span())
+        candidates.append((match.start(), _normalized_number(match.group("number")), raw))
+
+    display = _SCREEN_TITLE_DISPLAY_RE.search(text)
+    if display:
+        tail_start = display.end()
+        tail = text[tail_start : tail_start + 100]
+        for match in _SCREEN_TITLE_IMPLICIT_RE.finditer(tail):
+            absolute_span = (tail_start + match.start(), tail_start + match.end())
+            if _span_overlaps_any(absolute_span, range_spans + explicit_spans):
+                continue
+            if _screen_title_measurement_is_accessory(
+                text, absolute_span[0], absolute_span[1]
+            ):
+                continue
+            suffix = tail[match.end() : match.end() + 18]
+            number = match.group("number")
+            prefix = normalize_key(text[max(0, absolute_span[0] - 30) : absolute_span[0]])
+            if _SCREEN_TITLE_INVALID_PREFIX_RE.search(prefix) and not is_safe_tv_size_after_os_label(
+                prefix, suffix, number
+            ):
+                continue
+            if _SCREEN_TITLE_INVALID_SUFFIX_RE.match(suffix):
+                continue
+            if not is_screen_size_value(number):
+                continue
+            candidates.append((absolute_span[0], _normalized_number(number), f'{number}"'))
+
+    keys = {key for _, key, _ in candidates}
+    if len(keys) != 1:
+        return ""
+    return min(candidates, key=lambda item: item[0])[2]
+
+
+def _screen_value_matches_number(value, number):
+    values = {
+        _normalized_number(token)
+        for token in re.findall(r'\d{2,3}(?:[.,]\d+)?', clean_text(value))
+    }
+    return values == {_normalized_number(number)}
+
+
+def _screen_title_measurement_is_accessory(title, start, end=None):
+    source = clean_text(title)
+    prefix = normalize_key(source[max(0, start - 90) : start])
+    suffix = normalize_key(source[end : end + 60]) if end is not None else ""
+    panel_in_prefix = re.search(r'\b(?:painel|paineis)\b', prefix)
+    if panel_in_prefix and re.search(
+        r'\b(?:sala|parede|racks?|suportes?)\b',
+        prefix,
+    ):
+        return True
+    if panel_in_prefix and re.match(
+        r'^(?:para\s+sala|(?:de|para)\s+parede|'
+        r'(?:(?:com|para)\s+)?racks?|'
+        r'(?:(?:com|para)\s+)?suportes?)\b',
+        suffix,
+    ):
+        return True
+    display_panel = _SCREEN_DISPLAY_PANEL_PREFIX_RE.search(prefix)
+    if display_panel and not re.search(
+        r'\b(?:sala|racks?|suportes?|parede)\b',
+        display_panel.group("descriptors"),
+    ):
+        return False
+    return bool(
+        re.search(
+            r'\b(?:suportes?|painel|paineis|racks?|bases?|pedestal|pedestais)\b'
+            r'(?:\s+[a-z0-9]+){0,4}\s*$',
+            prefix,
+        )
+        or re.search(
+            r'\b(?:suportes?|painel|paineis|racks?|bases?|pedestal|pedestais)\b.*'
+            r'\b(?:smart\s+)?tv(?:\s+de)?\s*$',
+            prefix,
+        )
+    )
+
+
+def _single_title_ref_capacity(title):
+    text = clean_text(title)
+    if not _is_ref_title(text):
+        return ""
+
+    title_components = extract_ref_title_capacity_components(text)
+    component_kind, component_capacity = select_ref_title_capacity_component(text)
+    if component_kind == "total":
+        return component_capacity
+    component_keys = {
+        re.sub(r"[^a-z0-9]+", "", normalize_key(value))
+        for values in title_components.values()
+        for value in values
+    }
+
+    candidates = []
+    occupied_spans = [match.span() for match in _REF_TITLE_CONTAINER_RE.finditer(text)]
+    occupied_spans.extend(
+        match.span() for match in _REF_TITLE_UNCOUNTED_CONTAINER_RE.finditer(text)
+    )
+    for match in _REF_TITLE_CUBIC_RE.finditer(text):
+        occupied_spans.append(match.span())
+        raw = clean_text(match.group(0))
+        if re.sub(r"[^a-z0-9]+", "", normalize_key(raw)) in component_keys:
+            continue
+        if (
+            _title_measurement_is_qualified(text, match)
+            or re.search(r"\baprox", normalize_key(raw))
+            or is_ref_auxiliary_volume_context(
+                text, match.start(), match.end()
+            )
+        ):
+            continue
+        if is_ref_capacity_value(raw):
+            candidates.append((match.start(), _measurement_key(match), raw))
+    for match in _REF_TITLE_VOLUME_RE.finditer(text):
+        if _span_overlaps_any(match.span(), occupied_spans):
+            continue
+        if _ref_title_volume_is_freezer_component(text, match):
+            continue
+        if is_ref_auxiliary_volume_context(text, match.start(), match.end()):
+            continue
+        if _title_measurement_is_qualified(text, match):
+            continue
+        raw = clean_text(match.group(0))
+        if re.sub(r"[^a-z0-9]+", "", normalize_key(raw)) in component_keys:
+            continue
+        if is_ref_capacity_value(raw):
+            candidates.append((match.start(), _measurement_key(match), raw))
+
+    keys = {key for _, key, _ in candidates}
+    if len(keys) == 1:
+        return min(candidates, key=lambda item: item[0])[2]
+    if len(keys) > 1:
+        return ""
+    if component_kind in {"refrigerator", "freezer"}:
+        return component_capacity
+    return ""
+
+
+def _safe_ref_capacity_from_title(title):
+    text = clean_text(title)
+    value = extract_ref_capacity_from_title(text)
+    if not value:
+        return ""
+    value_match = _REF_TITLE_VOLUME_RE.fullmatch(clean_text(value))
+    if not value_match:
+        return value
+    occupied_spans = [match.span() for match in _REF_TITLE_CONTAINER_RE.finditer(text)]
+    occupied_spans.extend(
+        match.span() for match in _REF_TITLE_UNCOUNTED_CONTAINER_RE.finditer(text)
+    )
+    for match in _REF_TITLE_VOLUME_RE.finditer(text):
+        if (
+            _measurement_key(match) == _measurement_key(value_match)
+            and _span_overlaps_any(match.span(), occupied_spans)
+        ):
+            return ""
+    return value
+
+
+def _ref_title_volume_is_freezer_component(title, match):
+    key = normalize_key(title)
+    if not re.search(r"\b(?:geladeira|refrigerador|refrigeradora)\b", key):
+        return False
+    prefix = normalize_key(title[max(0, match.start() - 70) : match.start()])
+    return bool(
+        re.search(
+            r"\b(?:freezer|congelador)\b"
+            r"(?:\s+(?:com\s+)?capacidade)?(?:\s+de)?\s*$",
+            prefix,
+        )
+    )
+
+
+def _single_title_ldy_capacity(item):
     title = clean_text(item.get("title")) if isinstance(item, dict) else ""
     if not _is_ldy_title(title):
         return ""
-    explicit = re.findall(r"(?:top\s+load(?:ing)?|front\s+load(?:ing)?|carga\s+superior|abertura\s+(?:superior|frontal))", title, re.I)
-    return combine_distinct([normalize_loading_type(value) for value in explicit])
+
+    mass_matches = [
+        match
+        for match in _LDY_TITLE_MASS_MENTION_RE.finditer(title)
+        if not _ldy_title_mass_is_product_weight(title, match)
+        and not _ldy_title_mass_is_drying_capacity(title, match)
+    ]
+    mass = _single_exact_title_measurement(title, mass_matches)
+    if mass:
+        return mass
+    if mass_matches or not _is_compact_ldy_volume_item(item):
+        return ""
+
+    volume_matches = list(_LDY_TITLE_VOLUME_MENTION_RE.finditer(title))
+    volume = _single_exact_title_measurement(title, volume_matches)
+    if not volume:
+        return ""
+    match = next(
+        (candidate for candidate in volume_matches if clean_text(candidate.group(0)) == volume),
+        None,
+    )
+    if not match:
+        return ""
+    prefix = normalize_key(title[max(0, match.start() - 80) : match.start()])
+    suffix = normalize_key(title[match.end() : match.end() + 40])
+    if (
+        is_auxiliary_water_volume_context(title, match.start(), match.end())
+        or re.search(r"\b(?:agua|consumo|economia|reservatorio)\b", prefix)
+    ):
+        return ""
+    if re.match(r"^(?:de\s+)?agua\b", suffix):
+        return ""
+    return volume
+
+
+def _ldy_title_mass_is_product_weight(title, match):
+    prefix = normalize_key(title[max(0, match.start() - 50) : match.start()])
+    suffix = normalize_key(title[match.end() : match.end() + 30])
+    return bool(
+        re.search(
+            r"\b(?:peso(?:\s+(?:liquido|bruto|total))?"
+            r"(?:\s+(?:do\s+produto|da\s+maquina))?|pesa)"
+            r"(?:\s+de)?\s*$",
+            prefix,
+        )
+        or re.match(r"^de\s+peso\b", suffix)
+    )
+
+
+def _ldy_title_mass_is_drying_capacity(title, match):
+    raw_prefix = clean_text(title)[max(0, match.start() - 60) : match.start()]
+    prefix = normalize_key(raw_prefix)
+    suffix = normalize_key(title[match.end() : match.end() + 35])
+    if (
+        re.search(r"\blavagem(?:\s+de)?\s*$", prefix)
+        and not re.search(r"[/;:,+&\-\u2013\u2014]\s*$", raw_prefix)
+    ):
+        return False
+    if re.search(
+        r"\b(?:capacidade(?:(?:\s+(?:maxima\s+)?de)?\s+secagem|"
+        r"(?:\s+maxima)?\s+para\s+secar)|secagem)"
+        r"(?:\s+de)?\s*$",
+        prefix,
+    ):
+        return True
+    if (
+        re.search(r"\blava\s+e\s+seca\b.*\bseca\s*$", prefix)
+        and not re.search(r"\broupas?\s+secas?\s*$", prefix)
+    ):
+        return True
+    suffix_label = re.match(
+        r"^(?:(?:de|para)\s+)?(?:secagem|secar)\b",
+        suffix,
+    )
+    if not suffix_label:
+        return False
+    following = suffix[suffix_label.end() :]
+    return not re.match(
+        r"^\s*\d+(?:[.,]\d+)?\s*(?:kgs?|kg|quilos?|libras?|lbs?)\b",
+        following,
+    )
+
+
+def _safe_ldy_capacity_from_title(title):
+    value = extract_ldy_capacity_from_title(title)
+    if not value:
+        return ""
+    for match in _LDY_TITLE_MASS_MENTION_RE.finditer(clean_text(title)):
+        if (
+            normalize_key(match.group(0)) == normalize_key(value)
+            and (
+                _ldy_title_mass_is_product_weight(title, match)
+                or _ldy_title_mass_is_drying_capacity(title, match)
+            )
+        ):
+            return ""
+    return value
+
+
+def _single_exact_title_measurement(text, matches):
+    if not matches or any(_title_measurement_is_qualified(text, match) for match in matches):
+        return ""
+    candidates = [
+        (match.start(), _measurement_key(match), clean_text(match.group(0)))
+        for match in matches
+    ]
+    keys = {key for _, key, _ in candidates}
+    if len(keys) != 1:
+        return ""
+    return min(candidates, key=lambda item: item[0])[2]
+
+
+def _single_title_loading_type(title):
+    text = clean_text(title)
+    if not _is_ldy_title(text):
+        return ""
+    values = list(dict.fromkeys(_title_loading_values(text)))
+    return values[0] if len(values) == 1 else ""
+
+
+def _title_loading_values(title):
+    text = clean_text(title)
+    values = []
+    for match in _LOADING_TITLE_RE.finditer(text):
+        if is_negated_loading_context(text, match.start()):
+            continue
+        normalized = normalize_loading_type(match.group(0))
+        if normalized:
+            values.append(normalized)
+    return values
+
+
+def _measurement_key(match):
+    number = _normalized_number(match.group("number"))
+    unit = normalize_key(match.group("unit"))
+    if unit in {"kg", "kgs", "quilo", "quilos"}:
+        unit = "kg"
+    elif unit in {"libra", "libras", "lb", "lbs"}:
+        unit = "lb"
+    elif unit in {"l", "lt", "lts", "litro", "litros"}:
+        unit = "l"
+    elif unit in {"quarto", "quartos", "quart", "quarts"}:
+        unit = "quart"
+    elif "cubico" in unit:
+        unit = "cubic"
+    return number, unit
+
+
+def _normalized_number(value):
+    number = clean_text(value).replace(",", ".")
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    return number.lstrip("0") or "0"
+
+
+def _title_measurement_is_qualified(text, match):
+    source = clean_text(text)
+    raw_prefix = source[max(0, match.start() - 40) : match.start()]
+    prefix = normalize_key(raw_prefix)
+    suffix = normalize_key(source[match.end() : match.end() + 40])
+    return bool(
+        re.search(
+            r"\b(?:acima|abaixo|ate|cerca|mais|menos|aprox|aproximadamente|"
+            r"aproximado|aproximada|estimado|estimada)(?:\s+de)?$",
+            prefix,
+        )
+        or re.search(r"\d+(?:[.,]\d+)?\s*[-\u2013\u2014/~]\s*$", raw_prefix)
+        or re.search(
+            r"\b(?:entre\s+|de\s+)?\d+(?:[.,]\d+)?\s+(?:a|e|ou|ate)\s*$",
+            prefix,
+        )
+        or re.match(
+            r"^(?:aprox|aproximadamente|aproximad[oa]s?|estimad[oa]s?|"
+            r"cerca|mais\s+ou\s+menos|no\s+maximo|maxim[oa]s?)\b",
+            suffix,
+        )
+    )
+
+
+def _span_overlaps_any(span, spans):
+    return any(start < span[1] and span[0] < end for start, end in spans)
 
 
 def _first_level(levels):
@@ -297,10 +817,19 @@ def _first_measurement_level(levels):
 
 def _first_capacity_level(levels):
     for values in levels:
-        selected = combine_capacity_distinct(values)
+        selected = select_ref_capacity_exact_over_qualified(values)
         if selected:
             return selected
     return ""
+
+
+def _split_ref_capacity_bands(values):
+    exact = []
+    bands = []
+    for value in values or []:
+        target = bands if is_ref_capacity_category_band(value) else exact
+        target.append(value)
+    return exact, bands
 
 
 def _effective_facts(item):
@@ -380,11 +909,11 @@ def _ref_components_from_values(values):
 
 def _ref_scalar_fact_candidates(facts, labels):
     output = []
-    for value in _fact_candidates(facts, labels, is_ref_capacity_value):
+    for value in _fact_candidates(facts, labels):
         components = extract_ref_capacity_components(value)
         if any(components.values()):
             continue
-        output.append(value)
+        output.extend(extract_ref_capacity_scalar_values(value))
     return output
 
 
@@ -637,10 +1166,14 @@ def _compact_ldy_volume_from_title(title):
     for match in _LDY_COMPACT_VOLUME_VALUE_RE.finditer(source):
         prefix = normalize_key(source[max(0, match.start() - 40) : match.start()])
         suffix = normalize_key(source[match.end() : match.end() + 24])
-        if re.search(
-            r"\b(?:agua|consumo|economia)(?:\s+de)?$",
-            prefix,
-        ) or re.match(r"^(?:de\s+)?agua\b", suffix):
+        if (
+            is_auxiliary_water_volume_context(source, match.start(), match.end())
+            or re.search(
+                r"\b(?:agua|consumo|economia)(?:\s+de)?$",
+                prefix,
+            )
+            or re.match(r"^(?:de\s+)?agua\b", suffix)
+        ):
             continue
         raw = clean_text(match.group(0))
         key = re.sub(r"\s+", "", raw).casefold()
@@ -656,7 +1189,19 @@ def _is_ldy_description_count(text, match, value):
 
 
 def _normalized_loading_candidates(values):
-    return [normalized for value in values for normalized in [normalize_loading_type(value)] if normalized]
+    return [
+        normalized
+        for value in values
+        for normalized in [_normalize_labeled_loading_value(value)]
+        if normalized
+    ]
+
+
+def _normalize_labeled_loading_value(value):
+    key = normalize_key(value)
+    if key in {"porta frontal", "abertura pela porta frontal"}:
+        return "Front load"
+    return normalize_loading_type(value)
 
 
 def _exact_loading_candidates(values):
@@ -678,10 +1223,32 @@ def _loading_from_description(text):
     )
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.I):
+            if is_negated_loading_context(text, match.start(1)):
+                continue
             normalized = normalize_loading_type(match.group(1))
             if normalized:
                 output.append((match.start(), normalized))
     return [value for _, value in sorted(output, key=lambda item: item[0])]
+
+
+def _title_has_main_display_panel_measurement(title):
+    source = clean_text(title)
+    key = normalize_key(source)
+    if not re.search(
+        r"\b(?:smart\s*)?tv(?=\d|\b)|\btelevisor\b",
+        key,
+    ):
+        return False
+    for match in _SCREEN_TITLE_EXPLICIT_RE.finditer(source):
+        prefix = normalize_key(source[max(0, match.start() - 90) : match.start()])
+        if not _SCREEN_DISPLAY_PANEL_PREFIX_RE.search(prefix):
+            continue
+        if _screen_title_measurement_is_accessory(
+            source, match.start(), match.end()
+        ):
+            continue
+        return True
+    return False
 
 
 def _is_tv_title(title):
@@ -694,6 +1261,8 @@ def _is_tv_title(title):
         key,
     ):
         return False
+    if _title_has_main_display_panel_measurement(title):
+        return True
     return _product_precedes_accessory(
         key,
         r"(?:\bsmart\s*tv(?=\d|\b)|\btv(?=\d|\b)|\b(?:televisor|qled|oled|crystal uhd)\b)",
@@ -739,6 +1308,17 @@ def _is_ldy_title(title):
         r"dispensers?|puxador(?:es)?|almofadas?|limpador(?:es)?|refil|mop|pes?|"
         r"guarnic(?:ao|oes)|tanque|sensor\s+(?:termistor|temperatura)|ajustador(?:es)?|"
         r"prateleiras?|polias?|valvulas?|portas?)\b",
+    )
+
+
+def _is_standalone_dryer_title(title):
+    key = normalize_key(title)
+    return bool(
+        re.search(r"\bsecadora\b", key)
+        and not re.search(
+            r"\b(?:lava\s+e\s+seca|lavadora|maquina\s+de\s+lavar)\b",
+            key,
+        )
     )
 
 

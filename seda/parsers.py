@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
 from .common.field_rules import (
-    extract_screen_size_from_title,
     is_screen_size_value,
     normalize_key as normalize_field_key,
 )
@@ -30,6 +29,7 @@ from .casas_bahia.field_extraction import (
     extract_fields_by_sources as extract_casas_bahia_semantic_fields,
     is_product_title_for_line as is_casas_bahia_product_title_for_line,
     is_tv_product_title as is_casas_bahia_tv_product_title,
+    select_tv_title_screen_size as select_casas_bahia_tv_title_screen_size,
 )
 
 
@@ -1219,10 +1219,12 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
     model = specs.get("modelo", "")
     screen_size = ""
     if is_casas_bahia_tv_product_title(title):
-        screen_size = specs.get("tamanho da tela", "")
-        screen_size = _screen_size_value(screen_size)
-        if not screen_size:
-            screen_size = extract_screen_size_from_title(title)
+        title_screen_size = select_casas_bahia_tv_title_screen_size(title)
+        if title_screen_size:
+            screen_size = title_screen_size
+        else:
+            screen_size = specs.get("tamanho da tela", "")
+            screen_size = _screen_size_value(screen_size)
     if screen_size and screen_size.isdigit():
         screen_size = f'{screen_size}"'
     semantic_fields = extract_casas_bahia_semantic_fields(

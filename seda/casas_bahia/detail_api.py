@@ -9,7 +9,7 @@ from pathlib import Path
 import requests
 
 from ._net import is_retryable_exc, request_with_retry, retry_after_seconds, sleep_backoff, throttle
-from ..common.field_rules import extract_screen_size_from_title, is_screen_size_value
+from ..common.field_rules import is_screen_size_value
 from ..parsers import (
     _html_break_text,
     appliance_model_number_from_text,
@@ -24,6 +24,7 @@ from ..step00_config import product_line, run_root
 from .field_extraction import (
     extract_fields as extract_semantic_fields,
     is_tv_product_title,
+    select_tv_title_screen_size,
 )
 
 
@@ -473,6 +474,9 @@ def _first_group_spec(grouped_specs, group_labels, spec_labels):
 def _screen_size_from_specs(specs, title):
     if not is_tv_product_title(title):
         return ""
+    title_size = select_tv_title_screen_size(title)
+    if title_size:
+        return title_size
     values = []
     wanted = _normalize_key("tamanho da tela")
     for key, items in specs.items():
@@ -482,7 +486,7 @@ def _screen_size_from_specs(specs, title):
         extracted = _screen_size_from_tamanho_tela(value)
         if extracted:
             return extracted
-    return extract_screen_size_from_title(title)
+    return ""
 
 def _screen_size_from_tamanho_tela(value):
     text = _known_text(value)

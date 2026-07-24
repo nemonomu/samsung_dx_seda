@@ -215,7 +215,10 @@ def _translate_ref_refrigerator_type(text):
     return text
 
 def _translate_ldy_loading_type(text):
-    return normalize_loading_type(text) or text
+    # This field is a closed semantic set.  Passing unknown source text through
+    # would turn operation/type words such as Automatica or Roupa into loading
+    # directions at the CSV/DB boundary.
+    return normalize_loading_type(text)
 
 
 def translate_weekday(value):

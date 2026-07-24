@@ -156,6 +156,8 @@ CAPACITY_QUALIFIER_PATTERN = (
     r"(?:(?:acima|abaixo|menos|mais|cerca)\s+de\s+|at[eé]\s+|"
     r"aprox(?:imadamente)?\.?\s*|[<>~]\s*)"
 )
+_REF_CONTAINER_COUNT_PATTERN = r"(?:latas?|garrafas?|unidades?|recipientes?)"
+_REF_CONTAINER_CONNECTOR_PATTERN = r"(?:\s+(?:de|com|x)|\s*[/;:,+&\-\u2013\u2014])"
 
 _REF_COMPONENT_VALUE = (
     r"(?<!\w)(?:"
@@ -220,6 +222,12 @@ def extract_ref_capacity_components(value):
                     normalize_key(text[max(0, match.start() - 20) : match.start()]),
                 ):
                     continue
+                if is_ref_auxiliary_volume_context(
+                    text,
+                    match.start('value'),
+                    match.end('value'),
+                ):
+                    continue
                 raw = clean_text(match.group('value'))
                 if is_ref_capacity_value(raw):
                     candidates.append(
@@ -252,11 +260,226 @@ def extract_ref_capacity_components(value):
     return output
 
 
+_REF_TITLE_EXACT_COMPONENT_VALUE = (
+    r"\d+(?:[.,]\d+)?\s*(?:litros?|lts?|ml|l|quartos?|quarts?)?\b"
+)
+_REF_TITLE_COMPARTMENT_LABEL = r"(?:freezer|congelador|refrigerador|refrigeradora)"
+
+
+def extract_ref_title_capacity_components(value):
+    """Extract title compartments without cross-pairing adjacent value/labels."""
+    output, _ = _extract_ref_title_capacity_component_matches(value)
+    return output
+
+
+def _extract_ref_title_capacity_component_matches(value):
+    """Return locally-owned title components and their selected value spans."""
+    text = clean_text(value)
+    output = {"total": [], "refrigerator": [], "freezer": []}
+    if not text:
+        return output, []
+
+    for total in extract_ref_capacity_components(text)["total"]:
+        if re.fullmatch(_REF_TITLE_EXACT_COMPONENT_VALUE, total, re.I):
+            output["total"].append(total)
+
+    def kind_for(label):
+        return "freezer" if normalize_key(label) in {"freezer", "congelador"} else "refrigerator"
+
+    def usable_component_match(match):
+        raw = clean_text(match.group("value"))
+        if not is_ref_capacity_value(raw):
+            return False
+        if is_ref_auxiliary_volume_context(
+            text,
+            match.start("value"),
+            match.end("value"),
+        ):
+            return False
+        if not re.fullmatch(r"\d+(?:[.,]\d+)?", raw):
+            return True
+        suffix = normalize_key(text[match.end("value") : match.end("value") + 24])
+        if re.match(r"^portas?\b", suffix):
+            return False
+        gap = clean_text(match.group("gap"))
+        prefix = normalize_key(
+            text[max(0, match.start("label") - 48) : match.start("label")]
+        )
+        return bool(
+            gap
+            or re.search(
+                r"\bcapacidade(?:\s+(?:liquida|de\s+armazenagem))?\s+(?:do|da)\s*$",
+                prefix,
+            )
+        )
+
+    candidates = {}
+
+    def add_candidate(match, direction):
+        if not usable_component_match(match):
+            return
+        raw = clean_text(match.group("value"))
+        label_span = match.span("label")
+        value_span = match.span("value")
+        gap = clean_text(match.group("gap"))
+        prefix = normalize_key(
+            text[max(0, label_span[0] - 48) : label_span[0]]
+        )
+        explicit = bool(gap) or bool(
+            re.search(
+                r"\bcapacidade(?:\s+(?:liquida|de\s+armazenagem))?\s+(?:do|da)\s*$",
+                prefix,
+            )
+        )
+        score = (30 if explicit else 10) + (1 if direction == "forward" else 0)
+        key = (label_span, value_span, kind_for(match.group("label")))
+        candidate = (score, label_span, value_span, key[2], raw)
+        current = candidates.get(key)
+        if current is None or candidate[0] > current[0]:
+            candidates[key] = candidate
+
+    forward_pattern = (
+        rf"\b(?P<label>{_REF_TITLE_COMPARTMENT_LABEL})\b"
+        r"(?P<gap>(?:\s+(?:com\s+)?capacidade(?:\s+de)?|"
+        r"\s+com(?:\s+capacidade)?(?:\s+de)?|\s*[:=\-]|\s+de)?)\s*"
+        rf"(?P<value>{_REF_TITLE_EXACT_COMPONENT_VALUE})"
+    )
+    for match in re.finditer(forward_pattern, text, re.I):
+        add_candidate(match, "forward")
+
+    reverse_pattern = (
+        rf"(?<!\w)(?P<value>{_REF_TITLE_EXACT_COMPONENT_VALUE})\s*"
+        r"(?P<gap>(?:(?:de\s+capacidade\s+)?(?:de|do|da|no|na)\s+)?)"
+        rf"\b(?P<label>{_REF_TITLE_COMPARTMENT_LABEL})\b"
+    )
+    for match in re.finditer(reverse_pattern, text, re.I):
+        add_candidate(match, "reverse")
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda item: (min(item[1][0], item[2][0]), -item[0]),
+    )
+    selected = _maximum_ref_title_component_matching(ordered)
+
+    seen = {"refrigerator": set(), "freezer": set()}
+    owned_spans = []
+    for _, _, value_span, kind, raw in sorted(selected, key=lambda item: item[2][0]):
+        key = _measurement_comparison_key(raw)
+        if key and key not in seen[kind]:
+            seen[kind].add(key)
+            output[kind].append(raw)
+            owned_spans.append(value_span)
+    return output, owned_spans
+
+
+def _maximum_ref_title_component_matching(candidates):
+    """Return the deterministic maximum-cardinality, maximum-score matching."""
+    if not candidates:
+        return []
+
+    label_spans = sorted({candidate[1] for candidate in candidates})
+    value_spans = sorted({candidate[2] for candidate in candidates})
+    label_nodes = {span: index + 1 for index, span in enumerate(label_spans)}
+    value_offset = 1 + len(label_spans)
+    value_nodes = {
+        span: value_offset + index for index, span in enumerate(value_spans)
+    }
+    source = 0
+    sink = value_offset + len(value_spans)
+    graph = [[] for _ in range(sink + 1)]
+
+    def add_edge(start, end, capacity, cost):
+        forward = [end, len(graph[end]), capacity, cost]
+        reverse = [start, len(graph[start]), 0, -cost]
+        graph[start].append(forward)
+        graph[end].append(reverse)
+        return forward
+
+    for span in label_spans:
+        add_edge(source, label_nodes[span], 1, 0)
+    for span in value_spans:
+        add_edge(value_nodes[span], sink, 1, 0)
+
+    # One score point must outweigh every possible source-order preference.
+    # Powers of two then make the earliest differing candidate deterministic.
+    preference_base = 1 << len(candidates)
+    candidate_edges = []
+    for index, candidate in enumerate(candidates):
+        score, label_span, value_span = candidate[:3]
+        source_preference = 1 << (len(candidates) - index - 1)
+        utility = score * preference_base + source_preference
+        edge = add_edge(
+            label_nodes[label_span],
+            value_nodes[value_span],
+            1,
+            -utility,
+        )
+        candidate_edges.append((candidate, edge))
+
+    node_count = len(graph)
+    while True:
+        distances = [None] * node_count
+        previous = [None] * node_count
+        distances[source] = 0
+        for _ in range(node_count - 1):
+            updated = False
+            for node, edges in enumerate(graph):
+                if distances[node] is None:
+                    continue
+                for edge_index, edge in enumerate(edges):
+                    if edge[2] <= 0:
+                        continue
+                    distance = distances[node] + edge[3]
+                    if distances[edge[0]] is None or distance < distances[edge[0]]:
+                        distances[edge[0]] = distance
+                        previous[edge[0]] = (node, edge_index)
+                        updated = True
+            if not updated:
+                break
+        if distances[sink] is None:
+            break
+
+        node = sink
+        while node != source:
+            previous_node, edge_index = previous[node]
+            edge = graph[previous_node][edge_index]
+            edge[2] -= 1
+            graph[node][edge[1]][2] += 1
+            node = previous_node
+
+    return [candidate for candidate, edge in candidate_edges if edge[2] == 0]
+
+
+def select_ref_title_capacity_component(value):
+    """Return the highest-priority unambiguous exact title compartment."""
+    components = extract_ref_title_capacity_components(value)
+    for kind in ("total", "refrigerator", "freezer"):
+        unique = {}
+        for raw in components[kind]:
+            key = _measurement_comparison_key(raw)
+            if key:
+                unique.setdefault(key, raw)
+        if len(unique) == 1:
+            return kind, next(iter(unique.values()))
+        if len(unique) > 1:
+            return kind, ""
+    return "", ""
+
+
 def is_ref_capacity_value(value):
     """Accept any numeric refrigerator-capacity notation with the right meaning."""
     text = clean_text(value)
     key = normalize_key(text)
     if not text or not re.search(r"\d", text):
+        return False
+    # A container count describes how many items fit in the appliance, not the
+    # appliance's physical storage volume.  Even a phrase such as
+    # ``12 garrafas de 750 ml`` must not be treated as a 750 ml refrigerator.
+    if re.search(
+        rf"\d+(?:[.,]\d+)?\s*{_REF_CONTAINER_COUNT_PATTERN}\b",
+        text,
+        re.I,
+    ) or re.search(rf"\b{_REF_CONTAINER_COUNT_PATTERN}\b", key):
         return False
     if re.search(r"(?:^|[^a-z])(?:rpm|w|watts?|wh|kwh|kw|v|volts?|voltagem|hz)\b", key):
         return False
@@ -270,6 +493,215 @@ def is_ref_capacity_value(value):
     ):
         return False
     return True
+
+
+def is_ref_capacity_category_band(value):
+    """Identify broad catalog bands without treating practical limits as bands.
+
+    ``ate 260 litros`` can be the seller's only statement of an appliance's
+    usable capacity, so it deliberately remains an ordinary capacity. Explicit
+    lower/upper bands are marked so callers can demote them only when a more
+    exact capacity is also available.
+    """
+    text = clean_text(value).casefold()
+    unit = r"(?:litros?|lts?|l)"
+    number = r"\d+(?:[.,]\d+)?"
+    return bool(
+        re.fullmatch(rf"de\s+{number}\s+a\s+{number}\s*{unit}", text)
+        or re.fullmatch(
+            rf"{number}\s*(?:{unit}\s*)?"
+            rf"(?:\s+a\s+|\s*(?:-|\u2013|\u2014|/)\s*)"
+            rf"{number}\s*{unit}",
+            text,
+        )
+        or re.fullmatch(rf"(?:acima|abaixo)\s+de\s+{number}\s*{unit}", text)
+    )
+
+
+def _ref_single_capacity_signature(value):
+    """Return (number, unit, qualified) only for a single scalar capacity."""
+    match = re.fullmatch(
+        r"(?:(?P<qualifier>(?:(?:acima|abaixo|menos|mais|cerca)\s+de|"
+        r"at[eé]|aprox(?:imadamente)?\.?|[<>~]))\s*)?"
+        r"(?:de\s+)?(?P<number>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>ml|l|lts?|litros?|quartos?|quarts?)?",
+        clean_text(value),
+        re.I,
+    )
+    if not match:
+        return None
+    parts = _measurement_parts(match.group("number") + (match.group("unit") or ""))
+    if not parts:
+        return None
+    return parts[0], parts[1], bool(match.group("qualifier"))
+
+
+def select_ref_capacity_exact_over_qualified(values):
+    """Prefer an exact REF scalar over the same qualified scalar only."""
+    filtered_levels = filter_ref_capacity_exact_over_qualified_levels([values])
+    return combine_capacity_distinct(filtered_levels[0] if filtered_levels else [])
+
+
+def _ref_capacity_signatures_equivalent(left, right):
+    """Treat a missing unit as inherited, but never merge explicit units."""
+    return left[0] == right[0] and (
+        left[1] == right[1] or not left[1] or not right[1]
+    )
+
+
+def filter_ref_capacity_exact_over_qualified_levels(levels):
+    """Remove same-scalar qualifiers across levels while preserving level shape."""
+    candidates_by_level = [
+        [clean_text(value) for value in values or [] if clean_text(value)]
+        for values in levels or []
+    ]
+    parsed_by_level = [
+        [_ref_single_capacity_signature(value) for value in values]
+        for values in candidates_by_level
+    ]
+    exact_signatures = [
+        signature[:2]
+        for signatures in parsed_by_level
+        for signature in signatures
+        if signature is not None and not signature[2]
+    ]
+    return [
+        [
+            value
+            for value, signature in zip(values, signatures)
+            if not (
+                signature is not None
+                and signature[2]
+                and any(
+                    _ref_capacity_signatures_equivalent(
+                        signature[:2],
+                        exact_signature,
+                    )
+                    for exact_signature in exact_signatures
+                )
+            )
+        ]
+        for values, signatures in zip(candidates_by_level, parsed_by_level)
+    ]
+
+
+def is_auxiliary_water_volume_context(value, start, end):
+    """Return whether one volume belongs to water storage/use, not capacity."""
+    text = clean_text(value)
+    prefix = normalize_key(text[max(0, start - 90) : start])
+    raw_suffix = text[end : end + 60]
+    suffix = (
+        ""
+        if re.match(r"^\s*[+;,|:]", raw_suffix)
+        else normalize_key(raw_suffix)
+    )
+    return bool(
+        re.search(
+            r"\b(?:(?:dispenser|reservatorio)(?:\s+(?:de|para)\s+agua)?|"
+            r"tanque\s+(?:de|para)\s+agua)"
+            r"(?:\s+(?:com\s+)?capacidade)?(?:\s+de)?\s*$",
+            prefix,
+        )
+        or re.search(r"\bconsumo(?:\s+de)?\s+agua(?:\s+de)?\s*$", prefix)
+        or re.match(
+            r"^(?:de|para)?\s*agua\b",
+            suffix,
+        )
+        or re.match(
+            r"^(?:de\s+)?(?:reservatorio|dispenser|tanque)(?:\s+de)?\s+agua\b",
+            suffix,
+        )
+        or re.match(r"^(?:de\s+)?consumo(?:\s+de)?\s+agua\b", suffix)
+    )
+
+
+def is_ref_auxiliary_volume_context(value, start, end):
+    """Reject water-storage and tank volumes only on refrigerator paths."""
+    if is_auxiliary_water_volume_context(value, start, end):
+        return True
+    text = clean_text(value)
+    prefix = normalize_key(text[max(0, start - 120) : start])
+    raw_suffix = text[end : end + 80]
+    suffix = (
+        ""
+        if re.match(r"^\s*[+;,|:]", raw_suffix)
+        else normalize_key(raw_suffix)
+    )
+    appliance = r"(?:refrigerador|refrigeradora|geladeira|freezer|congelador)"
+    auxiliary = (
+        r"(?:(?:reservatorio|dispenser)(?:\s+(?:de|para)\s+agua)?|"
+        r"tanque(?:\s+(?:de|para)\s+agua)?)"
+    )
+    return bool(
+        re.search(
+            rf"\b{auxiliary}"
+            rf"(?:\s+(?:do|da|de)\s+{appliance})?"
+            r"(?:\s+(?:com\s+)?capacidade)?(?:\s+de)?\s*[:=\-]?\s*$",
+            prefix,
+        )
+        or re.match(
+            rf"^(?:de|do|da|para)?\s*{auxiliary}\b",
+            suffix,
+        )
+    )
+
+
+def is_negated_loading_context(value, start):
+    """Detect a nearby loading negation, resetting scope at contrast clauses."""
+    prefix = clean_text(value)[:start]
+    scope = re.split(
+        r"[,;|]|\b(?:loadingreset|mas|por[eé]m|contudo)\b",
+        prefix,
+        flags=re.I,
+    )[-1]
+    scope = re.split(
+        r"\be\s+(?:possui|tem|com|sim)\b",
+        scope,
+        flags=re.I,
+    )[-1]
+    key = normalize_key(scope)
+    return bool(
+        re.search(r"\bsem(?:\s+[a-z0-9]+){0,7}\s*$", key)
+        or re.search(
+            r"\bnao(?:\s+(?:e|possui|tem))?(?:\s+[a-z0-9]+){0,8}\s*$",
+            key,
+        )
+    )
+
+
+def is_safe_tv_size_after_os_label(prefix, suffix, number):
+    """Allow Google/Roku TV sizes only when a resolution confirms the number."""
+    if not re.search(r"\b(?:google|roku)\s+tv\s*$", normalize_key(prefix)):
+        return False
+    try:
+        numeric = float(str(number).replace(",", "."))
+    except (TypeError, ValueError):
+        return False
+    return numeric >= 19 and bool(
+        re.match(r"^(?:4k|8k|uhd|full\s+hd|fhd|hd)\b", normalize_key(suffix))
+    )
+
+
+def _is_probable_container_unit_volume(
+    value,
+    max_liters=2,
+    upper_inclusive=True,
+):
+    match = re.fullmatch(
+        r"(?P<number>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<unit>ml|litros?|lts?|l)\b",
+        clean_text(value),
+        re.I,
+    )
+    if not match:
+        return False
+    unit = normalize_key(match.group("unit"))
+    if unit == "ml":
+        return True
+    number = float(match.group("number").replace(",", "."))
+    if upper_inclusive:
+        return 0 < number <= max_liters
+    return 0 < number < max_liters
 
 
 def is_ldy_capacity_value(value):
@@ -304,12 +736,17 @@ def select_ldy_capacity_level(values):
 def select_ldy_capacity_from_levels(levels):
     '''Apply LDY conflict policy while retaining same-level corroboration.'''
     tentative = ''
+    range_tentative = ''
     for values in levels or []:
         selected, corroborated = _resolve_ldy_capacity_level(values)
         if not selected:
             continue
         suspicious = _is_suspicious_unitless_ldy_capacity(selected)
         if not suspicious:
+            if _is_ldy_capacity_range(selected):
+                if not range_tentative:
+                    range_tentative = selected
+                continue
             if tentative and _capacity_numbers_are_distinct(tentative, selected):
                 return selected
             return tentative or selected
@@ -317,7 +754,7 @@ def select_ldy_capacity_from_levels(levels):
             return selected
         if not tentative:
             tentative = selected
-    return tentative
+    return range_tentative or tentative
 
 
 def _resolve_ldy_capacity_level(values):
@@ -333,6 +770,11 @@ def _resolve_ldy_capacity_level(values):
             if any(_capacity_numbers_are_distinct(candidate, value) for value in credible):
                 continue
         filtered.append(candidate)
+    exact_candidates = [
+        candidate for candidate in filtered if not _is_ldy_capacity_range(candidate)
+    ]
+    if exact_candidates and len(exact_candidates) != len(filtered):
+        filtered = exact_candidates
     selected = combine_capacity_distinct(filtered)
     corroborated = False
     if _is_suspicious_unitless_ldy_capacity(selected):
@@ -362,6 +804,26 @@ def select_priority_ldy_capacity(candidates):
 
 def _is_suspicious_unitless_ldy_capacity(value):
     return bool(re.fullmatch(r'0[.,]\d+', clean_text(value)))
+
+
+def _is_ldy_capacity_range(value):
+    text = clean_text(value)
+    unit = r"(?:kg|kgs|quilos?|libras?|lbs?)"
+    number = r"\d+(?:[.,]\d+)?"
+    return bool(
+        re.fullmatch(
+            rf"(?:de\s+)?{number}\s*(?:{unit}\s*)?"
+            rf"(?:a|-|\u2013|\u2014|/)\s*{number}\s*{unit}",
+            text,
+            re.I,
+        )
+        or re.fullmatch(
+            rf"(?:(?:acima|abaixo|menos|mais)\s+de|at[eé]|[<>])\s*"
+            rf"{number}\s*{unit}",
+            text,
+            re.I,
+        )
+    )
 
 
 def _capacity_numbers_are_distinct(left, right):
@@ -550,14 +1012,21 @@ def sanitize_labeled_energy_target_value(value):
 def normalize_loading_type(value):
     """Return normalized loading directions in their first source order."""
     text = clean_text(value)
-    key = normalize_key(text)
+    key = normalize_key(re.sub(r"[,;|]", " loadingreset ", text))
     matches = []
     patterns = (
-        (r"\b(?:top\s+load(?:ing)?|superior)\b", "Top load"),
-        (r"\b(?:front\s+load(?:ing)?|frontal)\b", "Front load"),
+        (r"\b(?:top\s+load(?:ing|er)?|superior)\b", "Top load"),
+        (r"\b(?:front\s+load(?:ing|er)?|frontal)\b", "Front load"),
     )
     for pattern, normalized in patterns:
         for match in re.finditer(pattern, key):
+            if is_negated_loading_context(key, match.start()):
+                continue
+            if normalized == "Front load" and re.search(
+                    r"\b(?:painel|porta)\s+$",
+                    key[max(0, match.start() - 45) : match.start()],
+                ):
+                continue
             matches.append((match.start(), normalized))
     matches.sort(key=lambda item: item[0])
     return combine_distinct([normalized for _, normalized in matches])
@@ -567,8 +1036,8 @@ def normalize_exact_loading_direction(value):
     """Normalize only a complete loading-direction value, never prose fragments."""
     text = clean_text(value)
     if not re.fullmatch(
-        r"(?:superior|frontal|top\s+load(?:ing)?|front\s+load(?:ing)?|"
-        r"(?:abertura|carga)\s+(?:superior|frontal))",
+        r"(?:superior|frontal|top[\s-]+load(?:ing|er)?|front[\s-]+load(?:ing|er)?|"
+        r"(?:abertura(?:\s+da\s+tampa)?|carga)\s+(?:superior|frontal))",
         text,
         re.I,
     ):
@@ -579,15 +1048,16 @@ def normalize_exact_loading_direction(value):
 _REF_TITLE_PATTERNS = (
     rf"(?<!\w)(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*p[eé]s?\s*c[uú]bicos?(?:\s*\([^)]*(?:litros?|l\b)[^)]*\))?",
     rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s+a\s+\d+(?:[.,]\d+)?\s*(?:litros?|lts?|l)\b",
+    rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*(?:litros?|lts?|l)?(?:\s+a\s+|\s*(?:-|\u2013|\u2014|/)\s*)\d+(?:[.,]\d+)?\s*(?:litros?|lts?|l)\b",
     rf"(?<!\w)(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*(?:litros?|lts?|ml|l)\b",
     rf"(?<!\w)(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*(?:quartos?|quarts?)\b",
-    rf"(?<!\w)(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*latas?(?:\s+de\s+\d+(?:[.,]\d+)?\s*ml)?\b",
+    rf"(?<!\w)(?:{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*latas?(?:{_REF_CONTAINER_CONNECTOR_PATTERN}\s*\d+(?:[.,]\d+)?\s*ml)?\b",
 )
 
 
 def extract_ref_capacity_from_title(title):
     text = clean_text(title)
-    components = extract_ref_capacity_components(text)
+    components, component_spans = _extract_ref_title_capacity_component_matches(text)
     key = normalize_key(text)
     compartment_count = len(
         re.findall(r"\b(?:geladeira|refrigerador|refrigeradora|freezer|congelador)\b", key)
@@ -609,11 +1079,59 @@ def extract_ref_capacity_from_title(title):
     total = selected_component("total")
     if total:
         return total
-
     matches = []
     for pattern in _REF_TITLE_PATTERNS:
         for match in re.finditer(pattern, text, re.I):
             raw = clean_text(match.group(0))
+            # The volume following a container count is the size of each can,
+            # bottle, or container, not the refrigerator capacity.  The full
+            # count is rejected by is_ref_capacity_value(); this guard also
+            # rejects a nested ``750 ml`` standalone-volume title match.
+            prefix = text[max(0, match.start() - 60) : match.start()]
+            container_prefix_match = re.search(
+                rf"\b\d+(?:[.,]\d+)?\s*"
+                rf"(?P<container>{_REF_CONTAINER_COUNT_PATTERN})"
+                rf"(?P<connector>{_REF_CONTAINER_CONNECTOR_PATTERN})?"
+                r"\s*(?:\(\s*)?$",
+                prefix,
+                re.I,
+            )
+            if not container_prefix_match:
+                container_prefix_match = re.search(
+                    rf"\b(?P<container>{_REF_CONTAINER_COUNT_PATTERN})"
+                    r"(?P<connector>\s+(?:de|com|x))"
+                    r"\s*(?:\(\s*)?$",
+                    prefix,
+                    re.I,
+                )
+            if container_prefix_match:
+                connector = clean_text(container_prefix_match.group("connector"))
+                word_connector = normalize_key(connector) in {"de", "com", "x"}
+                punctuation_connector = bool(
+                    re.search(r"[/;:,+&\-\u2013\u2014]", connector)
+                )
+                container = normalize_key(container_prefix_match.group("container"))
+                if word_connector:
+                    continue
+                if punctuation_connector and _is_probable_container_unit_volume(
+                    raw,
+                    max_liters=10,
+                    upper_inclusive=False,
+                ):
+                    continue
+                no_connector_limit = 2 if container.startswith("lata") else 5
+                if not connector and _is_probable_container_unit_volume(
+                    raw,
+                    max_liters=no_connector_limit,
+                ):
+                    continue
+            if is_ref_auxiliary_volume_context(text, match.start(), match.end()):
+                continue
+            if any(
+                start < match.end() and match.start() < end
+                for start, end in component_spans
+            ):
+                continue
             if is_ref_capacity_value(raw):
                 matches.append((match.start(), -(match.end() - match.start()), match, raw))
 
@@ -645,12 +1163,32 @@ def extract_ref_capacity_from_title(title):
     return ""
 
 
+def extract_ref_capacity_scalar_values(value):
+    """Return physical-capacity scalars from one structured target value.
+
+    Some retailer targets mix the appliance volume with a container count,
+    for example ``18 litros / 22 latas``. The full string is not a valid
+    refrigerator capacity, but discarding it would also lose the meaningful
+    volume. Compartment composites remain owned by
+    :func:`extract_ref_capacity_components` and are intentionally excluded.
+    """
+    text = clean_text(value)
+    if not text or any(extract_ref_capacity_components(text).values()):
+        return []
+    extracted = extract_ref_capacity_from_title(text)
+    if extracted and is_ref_capacity_value(extracted):
+        return [extracted]
+    if re.fullmatch(r"[<>~]?\s*\d+(?:[.,]\d+)?", text) and is_ref_capacity_value(text):
+        return [text]
+    return []
+
+
 def extract_ldy_capacity_from_title(title):
     text = clean_text(title)
     match = re.search(
-        rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*(?:kg|kgs|quilos?|libras?|lbs?)\s*(?:a|-|\u2013|\u2014)\s*"
+        rf"(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*(?:kg|kgs|quilos?|libras?|lbs?)?\s*(?:a|-|\u2013|\u2014|/)\s*"
         r"\d+(?:[.,]\d+)?\s*(?:kg|kgs|quilos?|libras?|lbs?)\b"
-        rf"|(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?(?:\s+a\s+\d+(?:[.,]\d+)?)?\s*"
+        rf"|(?<!\w)(?:de\s+|{CAPACITY_QUALIFIER_PATTERN})?\d+(?:[.,]\d+)?\s*"
         r"(?:kg|kgs|quilos?|libras?|lbs?)\b",
         text,
         re.I,

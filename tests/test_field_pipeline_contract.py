@@ -89,6 +89,18 @@ class FieldPipelineContractTests(unittest.TestCase):
         self.assertEqual(saved["ldy_loading_type"], "Top load,Front load")
         self.assertEqual(saved["ldy_capacity"], "De 11 a 15kg")
 
+    def test_invalid_loading_values_become_blank_before_database(self):
+        for raw in ("Automática", "Roupa"):
+            with self.subTest(raw=raw):
+                translated = translate_row({"ldy_loading_type": raw})
+                self.assertEqual(translated["ldy_loading_type"], "")
+                self.assertIsNone(
+                    _db_value(
+                        "ldy_loading_type",
+                        translated["ldy_loading_type"],
+                    )
+                )
+
     def test_blank_only_becomes_database_null(self):
         self.assertIsNone(_db_value("ref_capacity", ""))
         self.assertEqual(_db_value("ref_capacity", "0"), "0")
@@ -1036,7 +1048,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             {"SEDA_PRODUCT_LINE": "REF", "SEDA_MAGALU_ZENROWS_PDP_FALLBACK": "1"},
         ), patch("seda.magalu.zenrows_client.fetch_next_data_html", return_value=result):
             self.assertTrue(_merge_magalu_zenrows_pdp_html(row, result.url))
-        self.assertEqual(row["ref_capacity"], "305")
+        self.assertEqual(row["ref_capacity"], "395L")
 
     def test_zenrows_pdp_auxiliary_fallback_keeps_blank_only_policy(self):
         result = ZenRowsResult(
@@ -2054,7 +2066,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                 )
                 self.assertEqual(detail["ldy_loading_type"], expected)
 
-    def test_ldy_title_first_capacity_is_casas_only(self):
+    def test_ldy_title_first_capacity_is_retailer_common(self):
         title = "Lavadora automática 14kg"
         magalu = extract_magalu_fields(
             {
@@ -2076,9 +2088,64 @@ class FieldPipelineContractTests(unittest.TestCase):
             "LDY",
             allow_title_fallback=False,
         )
-        self.assertEqual(magalu["ldy_capacity"], "16kg")
+        self.assertEqual(magalu["ldy_capacity"], "14kg")
         self.assertEqual(casas["ldy_capacity"], "14kg")
         self.assertEqual(casas_without_title_fallback["ldy_capacity"], "16kg")
+
+    def test_ref_title_first_capacity_is_retailer_common_through_output_and_db(self):
+        title = "Geladeira Refrigerador HQ Multidoor 426 Litros"
+        expected = "426 Litros"
+        details = (
+            (
+                "magalu",
+                "https://www.magazineluiza.com.br/p/sample/ed/refr/",
+                extract_magalu_fields(
+                    {
+                        "title": title,
+                        "factsheet": [
+                            {
+                                "keyName": "Capacidade total",
+                                "value": "De 401 a 500 litros",
+                            }
+                        ],
+                    },
+                    "REF",
+                ),
+            ),
+            (
+                "casas_bahia",
+                "https://www.casasbahia.com.br/p/sample",
+                extract_casas_fields(
+                    {"Capacidade total": ["De 401 a 500 litros"]},
+                    title,
+                    "",
+                    "REF",
+                ),
+            ),
+        )
+        for retailer, product_url, detail in details:
+            with self.subTest(retailer=retailer):
+                self.assertEqual(detail["ref_capacity"], expected)
+                with patch.dict(
+                    os.environ,
+                    {
+                        "SEDA_PRODUCT_LINE": "REF",
+                        "SEDA_ACTIVE_RETAILER": retailer,
+                    },
+                ):
+                    formatted = _format_row(
+                        {
+                            "product_url": product_url,
+                            "retailer_sku_name": title,
+                            "ref_capacity": detail["ref_capacity"],
+                        },
+                        datetime(2026, 7, 23, 9, 30, 0),
+                    )
+                self.assertEqual(formatted["ref_capacity"], expected)
+                self.assertEqual(
+                    _db_value("ref_capacity", formatted["ref_capacity"]),
+                    expected,
+                )
 
     def test_loading_direction_off_label_fallback_is_retailer_specific(self):
         off_label_cases = (
