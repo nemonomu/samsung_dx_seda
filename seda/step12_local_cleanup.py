@@ -443,9 +443,13 @@ def _detail_publish_protection_reason(journal_path):
     status = str(payload.get("status") or "")
     if status not in {"committed", "rolled_back"}:
         return f"journal_unresolved:{status or 'blank'}"
+    run_root_path = journal_path.parents[2]
     completion_error = detail_publish_completion_error(
-        journal_path.parents[2],
+        run_root_path,
         payload,
+        expected_product_path=(
+            run_root_path / "output" / "final_output_enriched.csv"
+        ),
     )
     if completion_error:
         return f"journal_incomplete:status={status}"

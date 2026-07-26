@@ -17,7 +17,6 @@ from .step00_config import (
     OUTPUT_COLUMNS,
     csv_header_contract_error,
     csv_rows_contract_error,
-    product_identity,
     product_line,
     read_csv,
     run_root,
@@ -158,13 +157,20 @@ def _detail_target_path(root):
     )
 
 
+def _detail_source_identity(row):
+    return (
+        str(row.get("item") or ""),
+        str(row.get("product_url") or ""),
+    )
+
+
 def _source_completeness_error(target_rows, candidate_rows):
     if not candidate_rows:
         return "empty"
     if len(candidate_rows) != len(target_rows):
         return f"row_count:{len(candidate_rows)}!={len(target_rows)}"
-    expected = [product_identity(row) for row in target_rows]
-    actual = [product_identity(row) for row in candidate_rows]
+    expected = [_detail_source_identity(row) for row in target_rows]
+    actual = [_detail_source_identity(row) for row in candidate_rows]
     if actual != expected:
         mismatch = next(
             (

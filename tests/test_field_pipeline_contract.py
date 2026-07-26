@@ -2776,6 +2776,51 @@ class FieldPipelineContractTests(unittest.TestCase):
         self.assertIn("identity_at:0", _source_completeness_error(rows, list(reversed(rows))))
         self.assertIn("missing_columns", _source_completeness_error(rows, rows))
 
+    def test_final_source_requires_exact_item_and_url_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "output"
+            targets = output_dir / "seda_final_targets.csv"
+            badged = output_dir / "final_output_badged.csv"
+            enriched = output_dir / "final_output_enriched.csv"
+            target_row = {
+                "retailer": "Magalu",
+                "item": "item-a",
+                "product_url": "https://example/p/same",
+            }
+            write_csv(targets, [target_row])
+            write_csv(enriched, [{**target_row, "parse_status": "valid"}])
+            write_csv(
+                badged,
+                [{
+                    **target_row,
+                    "item": "item-b",
+                    "parse_status": "wrong-item",
+                }],
+            )
+            os.utime(targets, ns=(500_000_000, 500_000_000))
+            os.utime(enriched, ns=(1_000_000_000, 1_000_000_000))
+            os.utime(badged, ns=(2_000_000_000, 2_000_000_000))
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("SEDA_FINAL_SOURCE_CSV", None)
+                self.assertEqual(_source_path(root), enriched)
+
+            self.assertIn(
+                "identity_at:0",
+                _source_completeness_error(
+                    [target_row],
+                    [{**target_row, "item": "item-b"}],
+                ),
+            )
+            self.assertIn(
+                "identity_at:0",
+                _source_completeness_error(
+                    [target_row],
+                    [{**target_row, "product_url": "https://example/p/other"}],
+                ),
+            )
+
     def test_final_source_skips_newer_duplicate_header_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

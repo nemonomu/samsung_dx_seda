@@ -12,6 +12,7 @@ from unittest.mock import patch
 from seda import step12_local_cleanup
 from seda.detail_publish import (
     assert_detail_publish_complete,
+    detail_publish_completion_error,
     detail_run_lock,
     file_sha256,
 )
@@ -448,6 +449,76 @@ class LocalCleanupTests(unittest.TestCase):
                         "detail_publish_transaction.json",
                     }
                 },
+            )
+
+    def test_noncanonical_product_journal_keeps_expired_trace_evidence(self):
+        fixed_now = datetime(2026, 7, 26, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            current = base / "magalu" / "tv" / "20260726"
+            old_run = base / "magalu" / "tv" / "20260720"
+            current.mkdir(parents=True)
+            trace_dir = old_run / "detail" / "trace"
+            output_dir = old_run / "output"
+            trace_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+
+            target = output_dir / "seda_final_targets.csv"
+            custom_product = output_dir / "custom_enriched.csv"
+            expected_product = output_dir / "final_output_enriched.csv"
+            csv_text = "item,product_url\none,https://example/p/one\n"
+            target.write_text(csv_text, encoding="utf-8")
+            custom_product.write_text(csv_text, encoding="utf-8")
+            trace = trace_dir / "subcall_trace.csv"
+            trace.write_text("trace", encoding="utf-8")
+            journal = trace_dir / "detail_publish_transaction.json"
+            payload = {
+                "status": "committed",
+                "metadata": {
+                    "complete": True,
+                    "product_row_count": 1,
+                    "expected_row_count": 1,
+                    "target_sha256": file_sha256(target),
+                    "target_path": str(target.resolve()),
+                },
+                "files": [
+                    {
+                        "order": 0,
+                        "name": "product",
+                        "canonical": "output/custom_enriched.csv",
+                        "staged": "output/.custom.stage",
+                        "backup": "output/.custom.backup",
+                        "old_exists": False,
+                        "old_sha256": "",
+                        "new_sha256": file_sha256(custom_product),
+                    }
+                ],
+            }
+            journal.write_text(json.dumps(payload), encoding="utf-8")
+            for path in (trace, journal):
+                self._mtime(path, fixed_now - timedelta(days=10))
+
+            completion_error = detail_publish_completion_error(
+                old_run,
+                payload,
+                expected_product_path=expected_product,
+            )
+            self.assertIn("product_path_mismatch", completion_error)
+
+            result = step12_local_cleanup._cleanup_detail_trace_files(
+                [old_run],
+                current=current,
+                base=base,
+                retention_days=3,
+                now=fixed_now,
+            )
+
+            self.assertTrue(trace.is_file())
+            self.assertTrue(journal.is_file())
+            self.assertEqual(result["deleted_files"], [])
+            self.assertEqual(
+                result["protected_transactions"][0]["reason"],
+                "journal_incomplete:status=committed",
             )
 
     def test_active_publisher_lock_protects_expired_trace_bundle(self):
