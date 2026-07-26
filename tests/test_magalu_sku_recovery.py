@@ -114,7 +114,7 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertIn("detail_blank_retry", row["parse_status"])
 
-    def test_failed_retries_use_title_fallback_and_forward_trace_context(self):
+    def test_failed_retries_preserve_item_sentinel_and_forward_trace_context(self):
         row = _failed_row()
         trace_rows = []
         with patch.dict(os.environ, {"SEDA_MAGALU_DETAIL_BLANK_RETRY_ATTEMPTS": "1"}), patch(
@@ -128,8 +128,8 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
                 trace_rows=trace_rows,
                 row_index_offset=38,
             )
-        self.assertEqual(rows[0]["sku"], "75P7K")
-        self.assertIn("sku_title_fallback_after_detail_retry", rows[0]["parse_status"])
+        self.assertEqual(rows[0]["sku"], "240144500")
+        self.assertNotIn("sku_title_fallback_after_detail_retry", rows[0]["parse_status"])
         self.assertEqual(call.call_args.kwargs["trace_rows"], trace_rows)
         self.assertEqual(call.call_args.kwargs["row_index"], 39)
         self.assertEqual(call.call_args.kwargs["trace_subcall"], "detail_graphql_retry")
@@ -183,19 +183,19 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
                 'Smart TV Samsung 32" HD Wi-Fi Tizen LS32H5000FGXZD',
                 "2729",
                 "",
-                "LS32H5000FGXZD",
+                "2729",
             ),
             (
                 'Smart TV AIWA 32" Android HD Borda Ultrafina HDR10 AWS-TV-32-BL-02-A',
                 "",
                 "",
-                "AWS-TV-32-BL-02-A",
+                "",
             ),
             (
                 'Smart TV Philco 32" P32CRB Roku TV',
                 "",
                 "",
-                "P32CRB",
+                "",
             ),
             (
                 "Smart TV 43 Full HD AOC Roku TV HDMI 1 USB WiFi",
@@ -213,7 +213,7 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
                 'Smart TV Samsung 55" 55U8600F + Soundbar HW55Q600B',
                 "UN55U8600FGXZD",
                 "",
-                "55U8600F",
+                "UN55U8600FGXZD",
             ),
         )
         for title, reference, model, expected in cases:
@@ -273,11 +273,11 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
             self.assertEqual(graphql["sku"], "REF-ORIGINAL")
             self.assertEqual(next_data["sku"], "REF-ORIGINAL")
 
-    def test_title_fallback_only_replaces_blank_or_item_sentinel(self):
+    def test_title_fallback_hook_is_disconnected(self):
         row = _failed_row()
-        self.assertTrue(_backfill_magalu_tv_sku_from_title(row))
-        self.assertEqual(row["sku"], "75P7K")
-        self.assertIn("sku_title_fallback_after_detail_retry", row["parse_status"])
+        self.assertFalse(_backfill_magalu_tv_sku_from_title(row))
+        self.assertEqual(row["sku"], row["item"])
+        self.assertNotIn("sku_title_fallback_after_detail_retry", row["parse_status"])
 
         authoritative = _failed_row()
         authoritative["sku"] = "UN75U8600FGXZD"
@@ -527,14 +527,28 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
                             ],
                             [],
                         )
-                _merge_parallel_detail_traces(root, tags)
+                expected_rows = [
+                    {"item": "item-0", "product_url": ""},
+                    {"item": "item-1", "product_url": ""},
+                ]
+                parts = [
+                    (0, 0, 1, "unused-0.csv", tags[0]),
+                    (1, 1, 2, "unused-1.csv", tags[1]),
+                ]
+                merged, reviews = _merge_parallel_detail_traces(
+                    root,
+                    parts,
+                    expected_rows,
+                    "run",
+                )
 
             trace_dir = root / "detail" / "trace"
             self.assertTrue((trace_dir / "subcall_trace_run_w0.csv").exists())
             self.assertTrue((trace_dir / "subcall_trace_run_w1.csv").exists())
-            merged = read_csv(str(trace_dir / "subcall_trace.csv"))
             self.assertEqual([row["item"] for row in merged], ["item-0", "item-1"])
             self.assertEqual([row["worker_id"] for row in merged], ["0", "1"])
+            self.assertEqual(reviews, [])
+            self.assertFalse((trace_dir / "subcall_trace.csv").exists())
 
     def test_trace_write_is_atomic_and_missing_parts_preserve_canonical(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -550,17 +564,17 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
             self.assertEqual(read_csv(str(trace_path)), [{"item": "old-complete"}])
             self.assertEqual(list(trace_path.parent.glob(".*.tmp")), [])
 
-            with patch.dict(os.environ, {"SEDA_DETAIL_TRACE": "1"}):
-                _merge_parallel_detail_traces(root, ["missing-worker"])
+            with patch.dict(os.environ, {"SEDA_DETAIL_TRACE": "1"}), self.assertRaisesRegex(
+                RuntimeError,
+                "subcall_trace:missing",
+            ):
+                _merge_parallel_detail_traces(
+                    root,
+                    [(0, 0, 1, "unused.csv", "missing-worker")],
+                    [{"item": "item", "product_url": ""}],
+                    "run",
+                )
             self.assertEqual(read_csv(str(trace_path)), [{"item": "old-complete"}])
-
-            review_path = trace_path.parent / "magalu_review_page_trace.csv"
-            _write_trace_csv(review_path, [{"item": "stale-review"}], ["item"])
-            empty_part = trace_path.parent / "magalu_review_page_trace_empty-worker.csv"
-            _write_trace_csv(empty_part, [], ["item"])
-            with patch.dict(os.environ, {"SEDA_DETAIL_TRACE": "1"}):
-                _merge_parallel_detail_traces(root, ["empty-worker"])
-            self.assertEqual(read_csv(str(review_path)), [])
 
 
 if __name__ == "__main__":

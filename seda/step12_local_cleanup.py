@@ -1,13 +1,23 @@
+import json
 import os
 import re
 import stat
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .detail_publish import (
+    detail_publish_completion_error,
+    detail_publish_lock,
+    detail_run_lock,
+)
 from .step00_config import DEFAULT_RUNS_BASE, run_root, write_json
 
 
 _RUN_DIRECTORY_RE = re.compile(r"^\d{8}$")
+_CLEANUP_TOMBSTONE_RE = re.compile(
+    r"^\d{8}\.\d+\.\d+\.deleting$"
+)
 _RETAILER_DIRECTORIES = ("magalu", "casas_bahia")
 _PRODUCT_LINE_DIRECTORIES = ("tv", "ref", "ldy")
 _DETAIL_TRACE_FILE_RE = re.compile(
@@ -16,6 +26,16 @@ _DETAIL_TRACE_FILE_RE = re.compile(
 _DETAIL_TRACE_TEMP_RE = re.compile(
     r"^\.(?:subcall_trace|magalu_review_page_trace)"
     r"(?:_[A-Za-z0-9_.-]+)?\.csv\.\d+\.\d+\.tmp$"
+)
+_DETAIL_PUBLISH_TRACE_FILE_RE = re.compile(
+    r"^(?:\..+\.detail_publish\.(?:backup|stage)(?:\.\d+\.\d+\.tmp)?|"
+    r"\..+\.detail_publish\.tmp|"
+    r"\.detail_publish_transaction\.json\.\d+\.\d+\.tmp)$"
+)
+_DETAIL_PUBLISH_OUTPUT_FILE_RE = re.compile(
+    r"^(?:_detail_part_[A-Za-z0-9_.-]+_\d+\.csv|"
+    r"\..+\.detail_publish\.(?:backup|stage)(?:\.\d+\.\d+\.tmp)?|"
+    r"\..+\.detail_publish\.tmp)$"
 )
 
 
@@ -34,7 +54,10 @@ def main():
         "deleted_files": [],
         "deleted_bytes": 0,
         "errors": [],
+        "protected_transactions": [],
+        "deleted_publish_files": [],
     }
+    deleted_tombstones = []
     skip_reason = ""
     try:
         if run_cleanup_enabled:
@@ -76,6 +99,11 @@ def main():
             skip_reason = "detail_trace_cleanup_discovery_failed"
             run_directories = []
         if run_cleanup_enabled:
+            deleted_tombstones = _cleanup_detached_run_directories(
+                base,
+                skipped_reparse,
+                detail_trace_cleanup["errors"],
+            )
             cutoff = now - timedelta(days=retention_days)
             for child in run_directories:
                 if _is_reparse_point(child):
@@ -90,7 +118,42 @@ def main():
                     continue
                 if modified >= cutoff:
                     continue
-                _remove_run_directory(child, base)
+                try:
+                    with detail_run_lock(resolved), detail_publish_lock(resolved):
+                        if not child.is_dir() or _is_reparse_point(child):
+                            if _is_reparse_point(child):
+                                _record_skipped_reparse(skipped_reparse, child)
+                            continue
+                        locked_resolved = child.resolve()
+                        if locked_resolved != resolved or _paths_overlap(
+                            locked_resolved,
+                            current,
+                        ):
+                            continue
+                        locked_modified = datetime.fromtimestamp(
+                            child.stat().st_mtime
+                        )
+                        if locked_modified >= cutoff:
+                            continue
+                        _remove_run_directory(child, base)
+                except RuntimeError as exc:
+                    if str(exc).startswith(
+                        ("detail_run_locked:", "detail_publish_locked:")
+                    ):
+                        detail_trace_cleanup["protected_transactions"].append(
+                            {
+                                "run_root": str(resolved),
+                                "journal": str(
+                                    resolved
+                                    / "detail"
+                                    / "trace"
+                                    / "detail_publish_transaction.json"
+                                ),
+                                "reason": "publisher_locked",
+                            }
+                        )
+                        continue
+                    raise
                 deleted.append(str(resolved))
         if trace_cleanup_enabled and not skip_reason:
             try:
@@ -112,6 +175,7 @@ def main():
             "deleted": deleted,
             "skipped_reparse": skipped_reparse,
             "detail_trace_cleanup": detail_trace_cleanup,
+            "deleted_tombstones": deleted_tombstones,
             "error": f"{type(exc).__name__}:{exc}",
         }
         if retention_days is not None:
@@ -123,6 +187,7 @@ def main():
         "deleted": deleted,
         "skipped_reparse": skipped_reparse,
         "detail_trace_cleanup": detail_trace_cleanup,
+        "deleted_tombstones": deleted_tombstones,
     }
     if retention_days is not None:
         payload["retention_days"] = retention_days
@@ -161,6 +226,8 @@ def _cleanup_detail_trace_files(
     deleted_files = result.setdefault("deleted_files", [])
     result.setdefault("deleted_bytes", 0)
     errors = result.setdefault("errors", [])
+    protected_transactions = result.setdefault("protected_transactions", [])
+    deleted_publish_files = result.setdefault("deleted_publish_files", [])
     current = Path(current).resolve()
     base = Path(base)
 
@@ -188,64 +255,154 @@ def _cleanup_detail_trace_files(
         if not trace_directory.is_dir():
             continue
         try:
-            children = list(trace_directory.iterdir())
-        except FileNotFoundError:
-            continue
+            with detail_run_lock(resolved_run), detail_publish_lock(resolved_run):
+                _cleanup_detail_trace_run_locked(
+                    run_directory=run_directory,
+                    resolved_run=resolved_run,
+                    trace_directory=trace_directory,
+                    base=base,
+                    cutoff=cutoff,
+                    skipped_reparse=skipped_reparse,
+                    result=result,
+                )
+        except RuntimeError as exc:
+            if str(exc).startswith(
+                ("detail_run_locked:", "detail_publish_locked:")
+            ):
+                protected_transactions.append(
+                    {
+                        "run_root": str(resolved_run),
+                        "journal": str(
+                            trace_directory / "detail_publish_transaction.json"
+                        ),
+                        "reason": "publisher_locked",
+                    }
+                )
+            else:
+                _record_trace_cleanup_error(errors, trace_directory, exc)
         except OSError as exc:
             _record_trace_cleanup_error(errors, trace_directory, exc)
-            continue
-        if any(_is_reparse_point(path) for path in children):
-            for path in children:
-                if _is_reparse_point(path):
-                    _record_skipped_reparse(skipped_reparse, path)
-            continue
-
-        trace_files = [
-            path
-            for path in children
-            if path.is_file() and _is_detail_trace_file(path.name)
-        ]
-        if not trace_files:
-            continue
-        trace_stats = []
-        stat_failed = False
-        for path in trace_files:
-            try:
-                trace_stats.append((path, path.stat()))
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                _record_trace_cleanup_error(errors, path, exc)
-                stat_failed = True
-        if stat_failed:
-            continue
-        if not trace_stats:
-            continue
-        latest_modified = max(
-            datetime.fromtimestamp(file_stat.st_mtime)
-            for _path, file_stat in trace_stats
-        )
-        if latest_modified > cutoff:
-            continue
-
-        for path, file_stat in trace_stats:
-            try:
-                _assert_non_reparse_ancestry(path, base)
-                resolved_path = path.resolve()
-                path.unlink()
-            except FileNotFoundError:
-                continue
-            except (OSError, RuntimeError) as exc:
-                _record_trace_cleanup_error(errors, path, exc)
-                continue
-            deleted_files.append(str(resolved_path))
-            result["deleted_bytes"] += file_stat.st_size
 
     return {
         "deleted_files": deleted_files,
         "deleted_bytes": result["deleted_bytes"],
         "errors": errors,
+        "protected_transactions": protected_transactions,
+        "deleted_publish_files": deleted_publish_files,
     }
+
+
+def _cleanup_detail_trace_run_locked(
+    *,
+    run_directory,
+    resolved_run,
+    trace_directory,
+    base,
+    cutoff,
+    skipped_reparse,
+    result,
+):
+    deleted_files = result["deleted_files"]
+    errors = result["errors"]
+    protected_transactions = result["protected_transactions"]
+    deleted_publish_files = result["deleted_publish_files"]
+    try:
+        children = list(trace_directory.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _record_trace_cleanup_error(errors, trace_directory, exc)
+        return
+    if any(_is_reparse_point(path) for path in children):
+        for path in children:
+            if _is_reparse_point(path):
+                _record_skipped_reparse(skipped_reparse, path)
+        return
+
+    journal_path = trace_directory / "detail_publish_transaction.json"
+    protection_reason = _detail_publish_protection_reason(journal_path)
+    if protection_reason:
+        protected_transactions.append(
+            {
+                "run_root": str(resolved_run),
+                "journal": str(journal_path),
+                "reason": protection_reason,
+            }
+        )
+        return
+
+    trace_files = [
+        path
+        for path in children
+        if path.is_file()
+        and (
+            _is_detail_trace_file(path.name)
+            or _is_detail_publish_trace_file(path.name)
+        )
+    ]
+    output_directory = run_directory / "output"
+    output_files = []
+    output_reparse_point = _ancestry_reparse_point(output_directory, base)
+    if output_reparse_point is not None:
+        _record_skipped_reparse(skipped_reparse, output_reparse_point)
+    elif output_directory.is_dir():
+        try:
+            output_children = list(output_directory.iterdir())
+        except FileNotFoundError:
+            output_children = []
+        except OSError as exc:
+            _record_trace_cleanup_error(errors, output_directory, exc)
+            return
+        if any(_is_reparse_point(path) for path in output_children):
+            for path in output_children:
+                if _is_reparse_point(path):
+                    _record_skipped_reparse(skipped_reparse, path)
+            return
+        output_files = [
+            path
+            for path in output_children
+            if path.is_file() and _is_detail_publish_output_file(path.name)
+        ]
+    cleanup_files = trace_files + output_files
+    if not cleanup_files:
+        return
+    trace_stats = []
+    stat_failed = False
+    for path in cleanup_files:
+        try:
+            trace_stats.append((path, path.stat()))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _record_trace_cleanup_error(errors, path, exc)
+            stat_failed = True
+    if stat_failed or not trace_stats:
+        return
+    latest_modified = max(
+        datetime.fromtimestamp(file_stat.st_mtime)
+        for _path, file_stat in trace_stats
+    )
+    if latest_modified > cutoff:
+        return
+
+    for path, file_stat in trace_stats:
+        try:
+            _assert_non_reparse_ancestry(path, base)
+            resolved_path = path.resolve()
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as exc:
+            if errors is not None:
+                _record_trace_cleanup_error(errors, path, exc)
+            continue
+        deleted_files.append(str(resolved_path))
+        if (
+            _is_detail_publish_trace_file(path.name)
+            or _is_detail_publish_output_file(path.name)
+        ):
+            deleted_publish_files.append(str(resolved_path))
+        result["deleted_bytes"] += file_stat.st_size
 
 
 def _record_trace_cleanup_error(errors, path, exc):
@@ -263,6 +420,36 @@ def _is_detail_trace_file(name):
         _DETAIL_TRACE_FILE_RE.fullmatch(value)
         or _DETAIL_TRACE_TEMP_RE.fullmatch(value)
     )
+
+
+def _is_detail_publish_trace_file(name):
+    return bool(_DETAIL_PUBLISH_TRACE_FILE_RE.fullmatch(str(name or "")))
+
+
+def _is_detail_publish_output_file(name):
+    return bool(_DETAIL_PUBLISH_OUTPUT_FILE_RE.fullmatch(str(name or "")))
+
+
+def _detail_publish_protection_reason(journal_path):
+    journal_path = Path(journal_path)
+    if not journal_path.is_file():
+        return ""
+    try:
+        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"journal_invalid:{type(exc).__name__}"
+    if not isinstance(payload, dict):
+        return "journal_invalid:not_object"
+    status = str(payload.get("status") or "")
+    if status not in {"committed", "rolled_back"}:
+        return f"journal_unresolved:{status or 'blank'}"
+    completion_error = detail_publish_completion_error(
+        journal_path.parents[2],
+        payload,
+    )
+    if completion_error:
+        return f"journal_incomplete:status={status}"
+    return ""
 
 
 def _run_directories(base, skipped_reparse=None):
@@ -328,7 +515,48 @@ def _remove_run_directory(path, base):
     if resolved_path == resolved_base or resolved_base not in resolved_path.parents:
         raise RuntimeError(f"cleanup_path_outside_base:{resolved_path}")
     _assert_tree_has_no_reparse_points(raw_path)
-    _remove_tree_without_reparse_points(raw_path)
+    tombstone_root = raw_base / ".seda_cleanup"
+    tombstone_root.mkdir(parents=True, exist_ok=True)
+    _assert_non_reparse_ancestry(tombstone_root, raw_base)
+    tombstone = tombstone_root / (
+        f"{raw_path.name}.{os.getpid()}.{time.time_ns()}.deleting"
+    )
+    os.replace(raw_path, tombstone)
+    _remove_tree_without_reparse_points(tombstone)
+
+
+def _cleanup_detached_run_directories(
+    base,
+    skipped_reparse=None,
+    errors=None,
+):
+    raw_base = Path(base)
+    tombstone_root = raw_base / ".seda_cleanup"
+    if not tombstone_root.exists():
+        return []
+    _assert_non_reparse_ancestry(tombstone_root, raw_base)
+    deleted = []
+    for path in list(tombstone_root.iterdir()):
+        if _is_reparse_point(path):
+            _record_skipped_reparse(skipped_reparse, path)
+            continue
+        if (
+            not path.is_dir()
+            or not _CLEANUP_TOMBSTONE_RE.fullmatch(path.name)
+        ):
+            continue
+        resolved = path.resolve()
+        try:
+            _assert_tree_has_no_reparse_points(path)
+            _remove_tree_without_reparse_points(path)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as exc:
+            if errors is not None:
+                _record_trace_cleanup_error(errors, path, exc)
+            continue
+        deleted.append(str(resolved))
+    return deleted
 
 
 def _assert_non_reparse_ancestry(path, base):
@@ -376,7 +604,11 @@ def _remove_tree_without_reparse_points(root):
         if _is_reparse_point(path):
             raise RuntimeError(f"cleanup_reparse_point:{path}")
         if visited:
-            path.rmdir()
+            try:
+                path.rmdir()
+            except PermissionError:
+                os.chmod(path, stat.S_IWRITE)
+                path.rmdir()
             continue
         pending.append((path, True))
         with os.scandir(path) as entries:
@@ -387,7 +619,11 @@ def _remove_tree_without_reparse_points(root):
                 if entry.is_dir(follow_symlinks=False):
                     pending.append((child, False))
                 else:
-                    child.unlink()
+                    try:
+                        child.unlink()
+                    except PermissionError:
+                        os.chmod(child, stat.S_IWRITE)
+                        child.unlink()
 
 
 def _is_reparse_point(path):

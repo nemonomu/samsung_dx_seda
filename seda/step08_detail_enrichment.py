@@ -11,6 +11,14 @@ from pathlib import Path
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .detail_publish import (
+    detail_run_lock,
+    file_sha256,
+    mark_detail_publish_incomplete,
+    publish_detail_files,
+    recover_detail_publish_transaction,
+)
+
 from .magalu.field_extraction import (
     ENERGY_ALIAS_LABELS as MAGALU_ENERGY_ALIAS_LABELS,
     ENERGY_CANONICAL_LABELS as MAGALU_ENERGY_CANONICAL_LABELS,
@@ -32,7 +40,6 @@ from .parsers import (
     clean_text,
     compact_json,
     extract_next_data,
-    high_confidence_tv_model_number_from_text,
     parse_detail,
     remove_accents,
     sku_from_url,
@@ -40,9 +47,7 @@ from .parsers import (
 from .step00_config import (
     OUTPUT_COLUMNS,
     RETAILERS,
-    csv_header_contract_error,
     csv_rows_contract_error,
-    product_identity,
     product_line,
     read_csv,
     run_root,
@@ -356,37 +361,151 @@ def _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows):
     )
 
 
-def _merge_parallel_detail_traces(root, trace_tags):
+def _exact_csv_header_error(path, expected_columns):
+    path = Path(path)
+    if not path.is_file():
+        return "missing"
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            header = next(csv.reader(handle), None)
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+    if header is None:
+        return "missing_header"
+    duplicates = sorted(
+        {column for column in header if header.count(column) > 1}
+    )
+    if duplicates:
+        return f"duplicate_columns:{','.join(duplicates)}"
+    missing = [column for column in expected_columns if column not in header]
+    if missing:
+        return f"missing_columns:{','.join(missing)}"
+    unexpected = [column for column in header if column not in expected_columns]
+    if unexpected:
+        return f"unexpected_columns:{','.join(unexpected)}"
+    if header != list(expected_columns):
+        return "column_order"
+    return ""
+
+
+def _trace_identity_error(
+    trace_rows,
+    expected_rows,
+    *,
+    start_index,
+    require_coverage,
+    run_token=None,
+    worker_id=None,
+):
+    first_index = start_index + 1
+    last_index = start_index + len(expected_rows)
+    covered = set()
+    for position, trace_row in enumerate(trace_rows, start=1):
+        try:
+            row_index = int(trace_row.get("row_index") or 0)
+        except (TypeError, ValueError):
+            return f"row_index_invalid:trace_row={position}"
+        if row_index < first_index or row_index > last_index:
+            return f"row_index_out_of_slice:{row_index}:{first_index}-{last_index}"
+        if run_token is not None and str(trace_row.get("run_token") or "") != str(run_token):
+            return f"run_token:row={row_index}"
+        if worker_id is not None and str(trace_row.get("worker_id") or "") != str(worker_id):
+            return f"worker_id:row={row_index}"
+        expected = expected_rows[row_index - first_index]
+        if str(trace_row.get("item") or "") != str(expected.get("item") or ""):
+            return f"item_identity:row={row_index}"
+        if str(trace_row.get("product_url") or "") != str(expected.get("product_url") or ""):
+            return f"url_identity:row={row_index}"
+        covered.add(row_index)
+    if require_coverage:
+        missing = [
+            str(index)
+            for index in range(first_index, last_index + 1)
+            if index not in covered
+        ]
+        if missing:
+            return f"coverage_missing:{','.join(missing)}"
+    return ""
+
+
+def _merge_parallel_detail_traces(root, parts, rows, run_token):
+    """Collect and validate every trace part without publishing canonicals."""
     if not _trace_enabled():
-        return
+        return [], []
     subcall_rows = []
     review_rows = []
-    subcall_sources = 0
-    review_sources = 0
-    missing = []
-    for tag in trace_tags:
-        subcall_path = _detail_trace_path(root, "subcall_trace", tag=tag)
-        review_path = _detail_trace_path(root, "magalu_review_page_trace", tag=tag)
-        if subcall_path.exists():
-            subcall_sources += 1
-            subcall_rows.extend(read_csv(str(subcall_path)))
-        else:
-            missing.append(str(subcall_path))
-        if review_path.exists():
-            review_sources += 1
-            review_rows.extend(read_csv(str(review_path)))
-        else:
-            missing.append(str(review_path))
-    if subcall_sources:
-        _write_trace_csv(_detail_trace_path(root, "subcall_trace", tag=""), subcall_rows, SUBCALL_TRACE_COLUMNS)
-    if review_sources:
-        _write_trace_csv(
-            _detail_trace_path(root, "magalu_review_page_trace", tag=""),
-            review_rows,
-            REVIEW_PAGE_TRACE_COLUMNS,
+    for worker_id, start, end, _part, tag in parts:
+        expected_rows = rows[start:end]
+        for stem, columns, target, require_coverage in (
+            ("subcall_trace", SUBCALL_TRACE_COLUMNS, subcall_rows, True),
+            (
+                "magalu_review_page_trace",
+                REVIEW_PAGE_TRACE_COLUMNS,
+                review_rows,
+                False,
+            ),
+        ):
+            path = _detail_trace_path(root, stem, tag=tag)
+            header_error = _exact_csv_header_error(path, columns)
+            if header_error:
+                raise RuntimeError(
+                    f"detail_parallel_invalid_trace:worker={worker_id}:"
+                    f"{stem}:{header_error}:path={path}"
+                )
+            part_rows = read_csv(str(path))
+            error = _trace_identity_error(
+                part_rows,
+                expected_rows,
+                start_index=start,
+                require_coverage=require_coverage,
+                run_token=run_token,
+                worker_id=worker_id,
+            )
+            if error:
+                raise RuntimeError(
+                    f"detail_parallel_invalid_trace:worker={worker_id}:"
+                    f"{stem}:{error}"
+                )
+            target.extend(part_rows)
+    return subcall_rows, review_rows
+
+
+def _resume_detail_trace_prefix(root, expected_rows):
+    """Load the canonical trace prefix and validate it before any new request."""
+    if not expected_rows or not _trace_enabled():
+        return [], []
+    loaded = []
+    for stem, columns, require_coverage in (
+        ("subcall_trace", SUBCALL_TRACE_COLUMNS, True),
+        ("magalu_review_page_trace", REVIEW_PAGE_TRACE_COLUMNS, False),
+    ):
+        path = _detail_trace_path(root, stem, tag="")
+        header_error = _exact_csv_header_error(path, columns)
+        if header_error:
+            raise RuntimeError(
+                f"detail_resume_invalid_trace:{stem}:{header_error}:path={path}"
+            )
+        all_rows = read_csv(str(path))
+        prefix = []
+        for trace_row in all_rows:
+            try:
+                row_index = int(trace_row.get("row_index") or 0)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"detail_resume_invalid_trace:{stem}:row_index_invalid"
+                ) from exc
+            if row_index <= len(expected_rows):
+                prefix.append(trace_row)
+        error = _trace_identity_error(
+            prefix,
+            expected_rows,
+            start_index=0,
+            require_coverage=require_coverage,
         )
-    if missing:
-        print(f"[seda] detail trace warning missing={len(missing)}", flush=True)
+        if error:
+            raise RuntimeError(f"detail_resume_invalid_trace:{stem}:{error}")
+        loaded.append(prefix)
+    return tuple(loaded)
 
 
 def _remove_parallel_detail_trace_parts(root, trace_tags):
@@ -709,6 +828,53 @@ def _merge_non_empty(row, detail):
     )
 
 
+def _is_magalu_tv_row(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return row.get("retailer") == "Magalu" and line == "TV"
+
+
+def _magalu_tv_sku_is_recovery_target(row):
+    current = str(row.get("sku") or "").strip().casefold()
+    if not current:
+        return True
+    sentinels = {
+        str(row.get("item") or "").strip().casefold(),
+        str(sku_from_url(row.get("product_url", "")) or "").strip().casefold(),
+    }
+    return current in {value for value in sentinels if value}
+
+
+def _merge_magalu_tv_reference_sku(row, detail, *, identity_verified):
+    """Apply the approved blank/item-sentinel -> factsheet Referencia write."""
+    if not _is_magalu_tv_row(row):
+        return False
+    reference = str(detail.get("_magalu_factsheet_reference") or "").strip()
+    actual_item = str(detail.get("_detail_item_id") or "").strip().casefold()
+    expected_items = {
+        str(row.get("item") or "").strip().casefold(),
+        str(sku_from_url(row.get("product_url", "")) or "").strip().casefold(),
+    }
+    expected_items.discard("")
+    identity_matches = bool(actual_item) and bool(expected_items) and all(
+        actual_item == expected for expected in expected_items
+    )
+    if not identity_verified or not identity_matches or not reference:
+        return False
+    if not _magalu_tv_sku_is_recovery_target(row):
+        if str(row.get("sku") or "").strip() != reference:
+            row["parse_status"] = _append_token(
+                row.get("parse_status", ""),
+                "sku_reference_conflict_preserved",
+            )
+        return False
+    row["sku"] = reference
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        "sku_factsheet_reference_recovered",
+    )
+    return True
+
+
 def _normalized_detail_name(value):
     text = remove_accents(clean_text(value)).casefold()
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
@@ -726,7 +892,7 @@ def _detail_identity_mode(row, detail):
     return ""
 
 
-def _merge_authoritative_detail(row, detail):
+def _merge_authoritative_detail(row, detail, *, identity_verified=False):
     """Merge a verified product-detail payload, including explicit audited blanks.
 
     Listing values are only hints.  Once an authoritative detail producer has
@@ -734,7 +900,15 @@ def _merge_authoritative_detail(row, detail):
     was not valid for the product and must be cleared rather than retained.
     Fields omitted from the payload remain untouched.
     """
-    _merge_non_empty(row, detail)
+    if _is_magalu_tv_row(row):
+        _merge_non_empty(row, {key: value for key, value in detail.items() if key != "sku"})
+        _merge_magalu_tv_reference_sku(
+            row,
+            detail,
+            identity_verified=identity_verified,
+        )
+    else:
+        _merge_non_empty(row, detail)
     for key in AUTHORITATIVE_AUDITED_FIELDS:
         if key not in detail:
             continue
@@ -746,10 +920,15 @@ def _merge_generic_product_detail(row, detail):
     """Apply product detail according to its identity proof strength."""
     mode = _detail_identity_mode(row, detail)
     if mode == "verified":
-        _merge_authoritative_detail(row, detail)
+        _merge_authoritative_detail(row, detail, identity_verified=True)
         return True
     if mode == "same_name":
-        fields = tuple(key for key in detail if not str(key).startswith("_"))
+        fields = tuple(
+            key
+            for key in detail
+            if not str(key).startswith("_")
+            and not (_is_magalu_tv_row(row) and key == "sku")
+        )
         return _merge_missing_detail_fields(row, detail, fields)
     # Explicit conflict or absent identity: merge no product-bound fields.
     return False
@@ -795,7 +974,11 @@ def _magalu_graphql_detail(
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
-    _merge_authoritative_detail(row, result.get("detail") or {})
+    _merge_authoritative_detail(
+        row,
+        result.get("detail") or {},
+        identity_verified=True,
+    )
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), "graphql_item")
     row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_item_graphql")
     return result
@@ -879,7 +1062,7 @@ def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""
         )
         return False
     if identity_mode == "verified":
-        _merge_authoritative_detail(row, detail)
+        _merge_authoritative_detail(row, detail, identity_verified=True)
         merged = True
     else:
         merged = _merge_generic_product_detail(row, detail)
@@ -972,22 +1155,8 @@ def _has_real_magalu_sku(row):
 
 
 def _backfill_magalu_tv_sku_from_title(row):
-    line = str(row.get("product_line") or product_line()).strip().upper()
-    if row.get("retailer") != "Magalu" or line != "TV":
-        return False
-    item_id = sku_from_url(row.get("product_url", "")) or str(row.get("item") or "").strip()
-    current_sku = str(row.get("sku") or "").strip()
-    if current_sku and current_sku not in {item_id, str(row.get("item") or "").strip()}:
-        return False
-    title_sku = high_confidence_tv_model_number_from_text(row.get("retailer_sku_name", ""))
-    if not title_sku:
-        return False
-    row["sku"] = title_sku
-    row["parse_status"] = _append_token(
-        row.get("parse_status", ""),
-        "sku_title_fallback_after_detail_retry",
-    )
-    return True
+    """Legacy compatibility hook; title-derived TV SKU writes are disabled."""
+    return False
 
 
 def _retry_magalu_detail_blanks(row, product_url, trace_rows=None, row_index=""):
@@ -1015,6 +1184,7 @@ def _backfill_magalu_detail_blanks(
     checkpoint_every=25,
     trace_rows=None,
     row_index_offset=0,
+    checkpoint_writer=None,
 ):
     """Second pass: re-fetch items whose item query failed the first time."""
     if os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY", "1").lower() in {"0", "false", "no", "n"}:
@@ -1040,24 +1210,31 @@ def _backfill_magalu_detail_blanks(
             trace_rows=trace_rows,
             row_index=row_index,
         )
-        title_recovered = False if changed else _backfill_magalu_tv_sku_from_title(row)
         recovered = _has_real_magalu_sku(row) and str(row.get("sku") or "").strip() != before_sku
         if recovered:
             updated += 1
         print(
             f"[seda] detail retry {index}/{total} item={_safe_log_value(row.get('item'))} "
             f"sku={_safe_log_value(row.get('sku'))} query_success={int(bool(changed))} "
-            f"title_fallback={int(bool(title_recovered))} updated={int(recovered)}",
+            f"updated={int(recovered)}",
             flush=True,
         )
         if checkpoint_every and index % checkpoint_every == 0:
-            write_csv(output, rows, columns=OUTPUT_COLUMNS)
+            if checkpoint_writer:
+                checkpoint_writer(rows)
+            else:
+                write_csv(output, rows, columns=OUTPUT_COLUMNS)
             print(f"[seda] detail retry checkpoint {output} updated={updated}", flush=True)
     print(f"[seda] detail blank retry updated={updated}/{total}", flush=True)
     return rows
 
 
-def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):
+def _backfill_magalu_shipping_blanks(
+    rows,
+    output,
+    checkpoint_every=25,
+    checkpoint_writer=None,
+):
     if os.getenv("SEDA_MAGALU_SHIPPING_BLANK_RETRY", "1").lower() in {"0", "false", "no", "n"}:
         return rows
     candidates = [row for row in rows if _needs_magalu_shipping_retry(row)]
@@ -1081,7 +1258,10 @@ def _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=25):
             flush=True,
         )
         if checkpoint_every and index % checkpoint_every == 0:
-            write_csv(output, rows, columns=OUTPUT_COLUMNS)
+            if checkpoint_writer:
+                checkpoint_writer(rows)
+            else:
+                write_csv(output, rows, columns=OUTPUT_COLUMNS)
             print(f"[seda] shipping retry checkpoint {output} updated={updated}", flush=True)
     print(f"[seda] shipping blank retry updated={updated}/{total}", flush=True)
     return rows
@@ -1144,7 +1324,13 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
         _record_subcall(trace_rows, row, row_index, product_url, "pdp_html_identity", success=False, error=reason)
         _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=trace_rows, row_index=row_index)
         return
-    if detail.get("sku"):
+    if _is_magalu_tv_row(row):
+        _merge_magalu_tv_reference_sku(
+            row,
+            detail,
+            identity_verified=identity_mode == "verified",
+        )
+    elif detail.get("sku"):
         if identity_mode == "verified" or not row.get("sku"):
             row["sku"] = detail["sku"]
     _merge_missing_detail_fields(row, detail, (
@@ -1595,10 +1781,20 @@ def _is_expected_magalu_item_query_block(result):
     return _has_blocked_graphql_trace(result)
 
 
-def _abort_on_magalu_blocked_streak(kind, streak, threshold, output, rows):
+def _abort_on_magalu_blocked_streak(
+    kind,
+    streak,
+    threshold,
+    output,
+    rows,
+    checkpoint_writer=None,
+):
     if threshold <= 0 or streak < threshold:
         return
-    write_csv(output, rows, columns=OUTPUT_COLUMNS)
+    if checkpoint_writer:
+        checkpoint_writer(rows)
+    else:
+        write_csv(output, rows, columns=OUTPUT_COLUMNS)
     print(f"[seda] aborting Magalu {kind}: blocked_graphql_streak={streak} checkpoint={output}", flush=True)
     raise RuntimeError(f"magalu_{kind}_blocked_graphql_streak:{streak}")
 
@@ -1635,8 +1831,20 @@ def _detail_raw_filename(row, index):
 def _parallel_part_error(expected_rows, actual_rows):
     if len(actual_rows) != len(expected_rows):
         return f"row_count:{len(actual_rows)}!={len(expected_rows)}"
-    expected_ids = [product_identity(row) for row in expected_rows]
-    actual_ids = [product_identity(row) for row in actual_rows]
+    expected_ids = [
+        (
+            str(row.get("item") or ""),
+            str(row.get("product_url") or ""),
+        )
+        for row in expected_rows
+    ]
+    actual_ids = [
+        (
+            str(row.get("item") or ""),
+            str(row.get("product_url") or ""),
+        )
+        for row in actual_rows
+    ]
     if actual_ids != expected_ids:
         mismatch = next(
             (
@@ -1648,6 +1856,142 @@ def _parallel_part_error(expected_rows, actual_rows):
         )
         return f"identity_at:{mismatch}:actual={actual_ids[mismatch]!r}:expected={expected_ids[mismatch]!r}"
     return csv_rows_contract_error(actual_rows, OUTPUT_COLUMNS)
+
+
+def _publish_stage_path(canonical, run_token):
+    canonical = Path(canonical)
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_token or "")).strip("._")
+    if not token:
+        raise RuntimeError("detail_publish_stage_token_blank")
+    return canonical.with_name(
+        f".{canonical.name}.{token}.detail_publish.stage"
+    )
+
+
+def _fsync_file(path):
+    with Path(path).open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _publish_detail_snapshot(
+    root,
+    output,
+    product_rows,
+    subcall_trace_rows,
+    review_page_trace_rows,
+    *,
+    run_token=None,
+    final_complete=False,
+    expected_total=None,
+    target_sha256="",
+    target_path="",
+    include_traces=None,
+):
+    """Stage, validate and transactionally publish one complete checkpoint."""
+    root = Path(root)
+    token = run_token or f"{os.getpid()}_{time.time_ns()}"
+    product_stage = _publish_stage_path(output, token)
+    write_csv(product_stage, product_rows, columns=OUTPUT_COLUMNS)
+    _fsync_file(product_stage)
+    header_error = _exact_csv_header_error(product_stage, OUTPUT_COLUMNS)
+    if header_error:
+        raise RuntimeError(f"detail_publish_invalid_product_stage:{header_error}")
+    staged_product_rows = read_csv(str(product_stage))
+    product_error = _parallel_part_error(product_rows, staged_product_rows)
+    if product_error:
+        raise RuntimeError(f"detail_publish_invalid_product_stage:{product_error}")
+
+    publish_files = []
+    trace_included = _trace_enabled() if include_traces is None else bool(include_traces)
+    if trace_included:
+        trace_specs = (
+            (
+                "subcall_trace",
+                SUBCALL_TRACE_COLUMNS,
+                subcall_trace_rows,
+                True,
+            ),
+            (
+                "magalu_review_page_trace",
+                REVIEW_PAGE_TRACE_COLUMNS,
+                review_page_trace_rows,
+                False,
+            ),
+        )
+        for stem, columns, trace_rows, require_coverage in trace_specs:
+            canonical = _detail_trace_path(root, stem, tag="")
+            staged = _publish_stage_path(canonical, token)
+            _write_trace_csv(staged, trace_rows, columns)
+            header_error = _exact_csv_header_error(staged, columns)
+            if header_error:
+                raise RuntimeError(
+                    f"detail_publish_invalid_trace_stage:{stem}:{header_error}"
+                )
+            staged_trace_rows = read_csv(str(staged))
+            trace_error = _trace_identity_error(
+                staged_trace_rows,
+                product_rows,
+                start_index=0,
+                require_coverage=require_coverage,
+            )
+            if trace_error:
+                raise RuntimeError(
+                    f"detail_publish_invalid_trace_stage:{stem}:{trace_error}"
+                )
+            publish_files.append(
+                {"name": stem, "canonical": canonical, "staged": staged}
+            )
+    publish_files.append(
+        {"name": "product", "canonical": Path(output), "staged": product_stage}
+    )
+    return publish_detail_files(
+        root,
+        publish_files,
+        run_token=token,
+        metadata={
+            "complete": bool(final_complete),
+            "product_row_count": len(product_rows),
+            "expected_row_count": (
+                len(product_rows) if expected_total is None else int(expected_total)
+            ),
+            "target_sha256": str(target_sha256 or ""),
+            "target_path": str(target_path or ""),
+            "trace_included": trace_included,
+        },
+    )
+
+
+def _checkpoint_detail_state(
+    root,
+    output,
+    product_rows,
+    subcall_trace_rows,
+    review_page_trace_rows,
+    *,
+    transactional,
+    final_complete=False,
+    expected_total=None,
+    target_sha256="",
+    target_path="",
+):
+    if transactional:
+        return _publish_detail_snapshot(
+            root,
+            output,
+            product_rows,
+            subcall_trace_rows,
+            review_page_trace_rows,
+            final_complete=final_complete,
+            expected_total=expected_total,
+            target_sha256=target_sha256,
+            target_path=target_path,
+        )
+    # Worker parts are private staging inputs for their parent transaction.
+    # Keep trace-first ordering so an interrupted worker never exposes product
+    # progress without its available diagnostic receipt.
+    _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
+    write_csv(output, product_rows, columns=OUTPUT_COLUMNS)
+    return None
 
 
 def _resume_prefix(output, skip, is_worker, expected_rows, target_path=None):
@@ -1665,7 +2009,7 @@ def _resume_prefix(output, skip, is_worker, expected_rows, target_path=None):
                 "detail_resume_invalid_output:"
                 f"older_than_target:path={output}:target={target_path}"
             )
-    header_error = csv_header_contract_error(output, OUTPUT_COLUMNS)
+    header_error = _exact_csv_header_error(output, OUTPUT_COLUMNS)
     if header_error:
         raise RuntimeError(
             f"detail_resume_invalid_output:{header_error}:path={output}"
@@ -1677,7 +2021,15 @@ def _resume_prefix(output, skip, is_worker, expected_rows, target_path=None):
     return prefix
 
 
-def _run_parallel(workers, rows, output, root=None):
+def _run_parallel(
+    workers,
+    rows,
+    output,
+    root=None,
+    target_sha256="",
+    target_path="",
+    expected_total=None,
+):
     """Fan step08 out across N child processes, each with its own browser, then merge.
 
     Detail is dominated by serial browser GraphQL round-trips; a single browser page
@@ -1691,8 +2043,19 @@ def _run_parallel(workers, rows, output, root=None):
     else:
         root = Path(root)
     total = len(rows)
+    expected_total = total if expected_total is None else int(expected_total)
     if total == 0:
-        write_csv(output, [], columns=OUTPUT_COLUMNS)
+        _publish_detail_snapshot(
+            root,
+            output,
+            [],
+            [],
+            [],
+            final_complete=expected_total == 0,
+            expected_total=expected_total,
+            target_sha256=target_sha256,
+            target_path=target_path,
+        )
         print(f"[seda] wrote {output} rows=0")
         return
     workers = max(1, min(workers, total))
@@ -1738,7 +2101,6 @@ def _run_parallel(workers, rows, output, root=None):
         return_code = proc.wait()
         if return_code != 0:
             failed.append((i, return_code))
-    _merge_parallel_detail_traces(root, [tag for _i, _s, _e, _p, tag in parts])
     if failed:
         detail = ",".join(f"worker={i}:exit={return_code}" for i, return_code in failed)
         raise RuntimeError(f"detail_parallel_worker_failed:{detail}")
@@ -1749,7 +2111,7 @@ def _run_parallel(workers, rows, output, root=None):
         if not os.path.exists(part):
             invalid.append(f"worker={i}:missing_output")
             continue
-        header_error = csv_header_contract_error(part, OUTPUT_COLUMNS)
+        header_error = _exact_csv_header_error(part, OUTPUT_COLUMNS)
         if header_error:
             invalid.append(f"worker={i}:{header_error}")
             continue
@@ -1764,7 +2126,24 @@ def _run_parallel(workers, rows, output, root=None):
     if len(merged) != total:
         raise RuntimeError(f"detail_parallel_merged_count:{len(merged)}!={total}")
 
-    write_csv(output, merged, columns=OUTPUT_COLUMNS)
+    subcall_rows, review_rows = _merge_parallel_detail_traces(
+        root,
+        parts,
+        rows,
+        run_token,
+    )
+    _publish_detail_snapshot(
+        root,
+        output,
+        merged,
+        subcall_rows,
+        review_rows,
+        run_token=run_token,
+        final_complete=len(merged) == expected_total,
+        expected_total=expected_total,
+        target_sha256=target_sha256,
+        target_path=target_path,
+    )
     for _i, _start, _end, part, _tag in parts:
         try:
             os.remove(part)
@@ -1776,26 +2155,105 @@ def _run_parallel(workers, rows, output, root=None):
 
 def main():
     root = run_root()
+    is_worker = bool(os.getenv("SEDA_DETAIL_WORKER_ID"))
+    if is_worker:
+        return _run_detail_main(root, is_worker=True)
+    with detail_run_lock(root):
+        return _run_detail_main(root, is_worker=False)
+
+
+def _run_detail_main(root, *, is_worker):
+    if not is_worker:
+        # Resolve a crash-interrupted publish before reading checkpoint state or
+        # issuing any network request.
+        recover_detail_publish_transaction(root)
     input_csv = os.getenv("SEDA_DETAIL_TARGET_CSV", str(root / "output" / "seda_final_targets.csv"))
+    input_path = Path(input_csv)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"detail_target_missing:{input_path}")
+    target_header_error = _exact_csv_header_error(input_path, OUTPUT_COLUMNS)
+    if target_header_error:
+        raise RuntimeError(
+            f"detail_target_invalid_header:{target_header_error}:path={input_path}"
+        )
+    target_sha256 = file_sha256(input_path) if not is_worker else ""
     rows = read_csv(input_csv)
+    target_rows_error = csv_rows_contract_error(rows, OUTPUT_COLUMNS)
+    if target_rows_error:
+        raise RuntimeError(
+            f"detail_target_invalid_rows:{target_rows_error}:path={input_path}"
+        )
+    if not is_worker and file_sha256(input_path) != target_sha256:
+        raise RuntimeError(f"detail_target_changed_during_read:{input_path}")
+    source_row_count = len(rows)
     limit = int(os.getenv("SEDA_DETAIL_LIMIT", "0"))
     if limit:
         rows = rows[:limit]
+    total_rows = (
+        int(os.getenv("SEDA_DETAIL_TOTAL_ROWS", str(source_row_count)))
+        if is_worker
+        else source_row_count
+    )
+    target_path = str(input_path.resolve()) if not is_worker else ""
     output = os.getenv("SEDA_DETAIL_OUTPUT_CSV", str(root / "output" / "final_output_enriched.csv"))
+    if not is_worker:
+        mark_detail_publish_incomplete(
+            root,
+            expected_row_count=total_rows,
+            target_sha256=target_sha256,
+            target_path=target_path,
+        )
     if os.getenv("SEDA_MAGALU_SHIPPING_BACKFILL_ONLY", "0").lower() in {"1", "true", "yes", "y"}:
         checkpoint_every = int(os.getenv("SEDA_DETAIL_CHECKPOINT_EVERY", "25"))
-        rows = _backfill_magalu_shipping_blanks(rows, output, checkpoint_every=checkpoint_every)
-        write_csv(output, rows, columns=OUTPUT_COLUMNS)
+
+        def shipping_checkpoint(snapshot_rows):
+            return _publish_detail_snapshot(
+                root,
+                output,
+                snapshot_rows,
+                [],
+                [],
+                expected_total=total_rows,
+                target_sha256=target_sha256,
+                target_path=target_path,
+                include_traces=False,
+            )
+
+        rows = _backfill_magalu_shipping_blanks(
+            rows,
+            output,
+            checkpoint_every=checkpoint_every,
+            checkpoint_writer=shipping_checkpoint,
+        )
+        _publish_detail_snapshot(
+            root,
+            output,
+            rows,
+            [],
+            [],
+            final_complete=len(rows) == total_rows,
+            expected_total=total_rows,
+            target_sha256=target_sha256,
+            target_path=target_path,
+            include_traces=False,
+        )
         print(f"[seda] wrote {output} rows={len(rows)}")
         return
     workers = int(os.getenv("SEDA_MAGALU_DETAIL_WORKERS", "1") or "1")
     is_magalu = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().lower() == "magalu"
-    is_worker = bool(os.getenv("SEDA_DETAIL_WORKER_ID"))
     is_resume = bool(os.getenv("SEDA_DETAIL_SKIP", "").strip())
     if is_magalu and workers > 1 and not is_worker and not is_resume:
         # fan out across N child processes (each its own browser), then merge.
         # Magalu-only; skipped when resuming (SEDA_DETAIL_SKIP) so resume stays serial.
-        _run_parallel(workers, rows, output, root=root)
+        _run_parallel(
+            workers,
+            rows,
+            output,
+            root=root,
+            target_sha256=target_sha256,
+            target_path=target_path,
+            expected_total=total_rows,
+        )
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
     enriched = _resume_prefix(
@@ -1805,23 +2263,37 @@ def main():
         rows[:skip],
         target_path=input_csv,
     )
-    subcall_trace_rows = []
-    review_page_trace_rows = []
+    if skip and not is_worker:
+        subcall_trace_rows, review_page_trace_rows = _resume_detail_trace_prefix(
+            root,
+            rows[:skip],
+        )
+    else:
+        subcall_trace_rows = []
+        review_page_trace_rows = []
     if skip:
         rows = rows[skip:]
     row_index_offset = skip if is_worker else len(enriched)
-    total_rows = int(
-        os.getenv(
-            "SEDA_DETAIL_TOTAL_ROWS",
-            str(row_index_offset + len(rows)),
-        )
-    )
     checkpoint_every = int(os.getenv("SEDA_DETAIL_CHECKPOINT_EVERY", "25"))
     fallback_fetch = os.getenv("SEDA_DETAIL_FALLBACK_FETCH", "1").lower() not in {"0", "false", "no", "n"}
     magalu_detail_blocked_streak = 0
     magalu_review_blocked_streak = 0
     magalu_detail_abort_threshold = int(os.getenv("SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD", "5"))
     magalu_review_abort_threshold = int(os.getenv("SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD", "5"))
+
+    def checkpoint_writer(snapshot_rows):
+        return _checkpoint_detail_state(
+            root,
+            output,
+            snapshot_rows,
+            subcall_trace_rows,
+            review_page_trace_rows,
+            transactional=not is_worker,
+            expected_total=total_rows,
+            target_sha256=target_sha256,
+            target_path=target_path,
+        )
+
     for index, row in enumerate(rows, start=row_index_offset + 1):
         url = row.get("product_url", "")
         if row.get("retailer") == "Magalu" and not row.get("seller_id"):
@@ -1839,13 +2311,13 @@ def main():
                 magalu_detail_blocked_streak = 0
             elif _has_blocked_graphql_trace(graph_result) and not _is_expected_magalu_item_query_block(graph_result):
                 magalu_detail_blocked_streak += 1
-                _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
                 _abort_on_magalu_blocked_streak(
                     "detail",
                     magalu_detail_blocked_streak,
                     magalu_detail_abort_threshold,
                     output,
                     enriched + [row],
+                    checkpoint_writer=checkpoint_writer,
                 )
             else:
                 magalu_detail_blocked_streak = 0
@@ -1888,13 +2360,13 @@ def main():
                 magalu_review_blocked_streak = 0
             elif _has_blocked_graphql_trace(review_result):
                 magalu_review_blocked_streak += 1
-                _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
                 _abort_on_magalu_blocked_streak(
                     "review",
                     magalu_review_blocked_streak,
                     magalu_review_abort_threshold,
                     output,
                     enriched + [row],
+                    checkpoint_writer=checkpoint_writer,
                 )
             else:
                 magalu_review_blocked_streak = 0
@@ -1917,8 +2389,7 @@ def main():
             flush=True,
         )
         if checkpoint_every and index % checkpoint_every == 0:
-            write_csv(output, enriched, columns=OUTPUT_COLUMNS)
-            _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
+            checkpoint_writer(enriched)
             print(f"[seda] checkpoint {output} rows={len(enriched)}", flush=True)
     enriched = _backfill_magalu_detail_blanks(
         enriched,
@@ -1926,10 +2397,26 @@ def main():
         checkpoint_every=checkpoint_every,
         trace_rows=subcall_trace_rows,
         row_index_offset=skip if is_worker else 0,
+        checkpoint_writer=checkpoint_writer,
     )
-    enriched = _backfill_magalu_shipping_blanks(enriched, output, checkpoint_every=checkpoint_every)
-    write_csv(output, enriched, columns=OUTPUT_COLUMNS)
-    _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
+    enriched = _backfill_magalu_shipping_blanks(
+        enriched,
+        output,
+        checkpoint_every=checkpoint_every,
+        checkpoint_writer=checkpoint_writer,
+    )
+    _checkpoint_detail_state(
+        root,
+        output,
+        enriched,
+        subcall_trace_rows,
+        review_page_trace_rows,
+        transactional=not is_worker,
+        final_complete=len(enriched) == total_rows,
+        expected_total=total_rows,
+        target_sha256=target_sha256,
+        target_path=target_path,
+    )
     print(f"[seda] wrote {output} rows={len(enriched)}")
 
 

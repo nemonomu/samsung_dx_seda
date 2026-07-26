@@ -6,6 +6,8 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+from .detail_publish import detail_consumer_guard
+
 from .parsers import (
     format_brl,
     ldy_sku_short_version_from_text,
@@ -80,6 +82,11 @@ def _batch_id(now):
 
 def main():
     root = run_root()
+    with detail_consumer_guard(root):
+        return _main(root)
+
+
+def _main(root):
     source = _source_path(root)
     rows = read_csv(source)
     _validate_source_context(rows, source)
@@ -114,7 +121,7 @@ def _source_path(root):
         candidates.append(current_final)
     existing = [path for path in candidates if path.is_file()]
     if existing:
-        targets_path = output_dir / "seda_final_targets.csv"
+        targets_path = _detail_target_path(root)
         target_rows = read_csv(targets_path)
         if not target_rows:
             raise RuntimeError(f"final_source_contract_missing_targets:{targets_path}")
@@ -139,7 +146,16 @@ def _source_path(root):
             raise RuntimeError(f"final_source_no_complete_candidate:{';'.join(invalid)}")
         return max(valid, key=lambda path: (path.stat().st_mtime_ns, priority[path.name]))
 
-    return output_dir / "seda_final_targets.csv"
+    return _detail_target_path(root)
+
+
+def _detail_target_path(root):
+    return Path(
+        os.getenv(
+            "SEDA_DETAIL_TARGET_CSV",
+            str(Path(root) / "output" / "seda_final_targets.csv"),
+        )
+    )
 
 
 def _source_completeness_error(target_rows, candidate_rows):
@@ -255,7 +271,7 @@ def _format_row(row, now):
         "delivery_availability": _delivery_for_output(row),
         "pick_up_availability": _pickup_for_output(row),
         "sku": sku,
-        "screen_size": row.get("screen_size", ""),
+        "screen_size": _screen_size_for_output(row),
         "estimated_annual_electricity_use": _energy_use_for_output(row),
         "model_year": row.get("model_year", ""),
         "ref_refrigerator_type": row.get("ref_refrigerator_type", ""),
@@ -292,6 +308,23 @@ def _ascii_key(value):
 def _energy_use_for_output(row):
     return str(row.get("estimated_annual_electricity_use") or "").strip()
 
+
+def _screen_size_for_output(row):
+    value = row.get("screen_size", "")
+    if product_line() != "TV":
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.fullmatch(
+        r"(?P<size>\d{2,3})\s*(?:\x22|\x27{2}|polegadas?|pol\.?)?",
+        text,
+        re.I,
+    )
+    if not match:
+        return value
+    return f"{match.group('size')} inches"
+
 def _sku_for_output(row, item):
     line = product_line()
     if _active_retailer() == "casas_bahia" and line in {"TV", "REF"}:
@@ -299,9 +332,15 @@ def _sku_for_output(row, item):
     sku = str(row.get("sku") or "").strip()
     if not sku:
         return ""
-    if item and sku == item:
+    trusted_tv_reference = (
+        _is_magalu_row(row)
+        and line == "TV"
+        and "sku_factsheet_reference_recovered"
+        in str(row.get("parse_status") or "").split("+")
+    )
+    if item and sku == item and not trusted_tv_reference:
         return ""
-    if _is_synthetic_sku(row, sku):
+    if _is_synthetic_sku(row, sku) and not trusted_tv_reference:
         return ""
     return sku
 

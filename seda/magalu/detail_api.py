@@ -9,10 +9,12 @@ from ..parsers import (
     compact_json,
     format_brl,
     ldy_color_from_text,
+    magalu_exact_factsheet_reference,
     preferred_magalu_sku,
 )
 from ..step00_config import product_line
 from .field_extraction import extract_fields as extract_semantic_fields
+from .graphql_contract import graphql_envelope_error
 
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
@@ -319,6 +321,8 @@ def fetch_detail(item_id, timeout=None, seller_id=None, context_url=None):
     if identity_error:
         return {"success": False, "error": identity_error, "detail": {}, "trace": trace}
     detail = _detail_from_item(item, seller_id=seller_id)
+    detail["_detail_identity_verified"] = True
+    detail["_detail_item_id"] = clean_text(item.get("id"))
     if os.getenv("SEDA_MAGALU_SHIPPING_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
         shipping = fetch_shipping(item, timeout=timeout, seller_id=seller_id, context_url=context_url)
         if shipping.get("delivery"):
@@ -342,7 +346,13 @@ def fetch_shipping(item, timeout=None, seller_id=None, context_url=None):
         "query": SHIPPING_QUERY,
     }
     data = _post(payload, timeout, trace, label="shipping", context_url=context_url)
-    shipping = (data.get("data") or {}).get("shipping") or {}
+    response_data = data.get("data") if isinstance(data, dict) else {}
+    shipping = (
+        response_data.get("shipping")
+        if isinstance(response_data, dict)
+        else {}
+    )
+    shipping = shipping if isinstance(shipping, dict) else {}
     delivery, pickup = _shipping_texts(shipping)
     return {"success": bool(delivery or pickup), "delivery": delivery, "pickup": pickup, "trace": trace}
 
@@ -383,12 +393,28 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
             "query": SHOWCASE_QUERY,
         }
         response = _post(payload, timeout, trace, label=f"showcase:{place_id}", context_url=context_url)
-        dynamic = (response.get("data") or {}).get("recommendation", {}).get("dynamic")
-        for showcase in dynamic or []:
+        response_data = response.get("data") if isinstance(response, dict) else {}
+        recommendation = (
+            response_data.get("recommendation")
+            if isinstance(response_data, dict)
+            else {}
+        )
+        recommendation = recommendation if isinstance(recommendation, dict) else {}
+        dynamic = recommendation.get("dynamic")
+        dynamic = dynamic if isinstance(dynamic, list) else []
+        for showcase in dynamic:
+            if not isinstance(showcase, dict):
+                continue
             title = clean_text(showcase.get("title"))
             if not _is_similar_showcase_title(title):
                 continue
-            names = [clean_text(product.get("title")) for product in showcase.get("products") or []]
+            products = showcase.get("products")
+            products = products if isinstance(products, list) else []
+            names = [
+                clean_text(product.get("title"))
+                for product in products
+                if isinstance(product, dict)
+            ]
             names = [name for name in names if name]
             if names:
                 return {"success": True, "names": names[:20], "trace": trace}
@@ -515,15 +541,7 @@ def _post_browser_graphql(payload, timeout, trace, label, context_url=None):
 
 
 def _graphql_payload_error(data, label):
-    if not isinstance(data, dict):
-        return "invalid_json"
-    if data.get("errors"):
-        return "graphql_errors"
-    if label == "item":
-        response_data = data.get("data")
-        if not isinstance(response_data, dict) or not response_data.get("item"):
-            return "graphql_item_missing"
-    return ""
+    return graphql_envelope_error(data, require_item=label == "item")
 
 def _browser_context_label(label):
     label = str(label or "")
@@ -536,10 +554,15 @@ def _detail_from_item(item, seller_id=None):
     line = product_line()
     semantic_fields = extract_semantic_fields(item, line)
     model = _factsheet_value(item, ["modelo"])
-    reference = _factsheet_value(item, ["referencia", "referência"])
+    reference = (
+        magalu_exact_factsheet_reference(item)
+        if line == "TV"
+        else _factsheet_value(item, ["referencia", "referência"])
+    )
     detail = {
         "retailer": "Magalu",
         "sku": _sku_for_product_line(line, reference, model, item),
+        "_magalu_factsheet_reference": str(reference or "").strip(),
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
@@ -710,8 +733,18 @@ def _float_or_zero(value):
 def _shipping_texts(shipping):
     delivery = ""
     pickup = ""
-    for delivery_group in shipping.get("deliveries") or []:
-        for modality in delivery_group.get("modalities") or []:
+    if not isinstance(shipping, dict):
+        return delivery, pickup
+    deliveries = shipping.get("deliveries")
+    deliveries = deliveries if isinstance(deliveries, list) else []
+    for delivery_group in deliveries:
+        if not isinstance(delivery_group, dict):
+            continue
+        modalities = delivery_group.get("modalities")
+        modalities = modalities if isinstance(modalities, list) else []
+        for modality in modalities:
+            if not isinstance(modality, dict):
+                continue
             shipping_time = modality.get("shippingTime") if isinstance(modality.get("shippingTime"), dict) else {}
             description = clean_text(shipping_time.get("description"))
             modality_type = clean_text(modality.get("type")).lower()
@@ -723,9 +756,23 @@ def _shipping_texts(shipping):
             else:
                 delivery = delivery or description
     if not delivery:
-        for shipment in shipping.get("shippings") or []:
-            for package in shipment.get("packages") or []:
-                for delivery_type in package.get("deliveryTypes") or []:
+        shippings = shipping.get("shippings")
+        shippings = shippings if isinstance(shippings, list) else []
+        for shipment in shippings:
+            if not isinstance(shipment, dict):
+                continue
+            packages = shipment.get("packages")
+            packages = packages if isinstance(packages, list) else []
+            for package in packages:
+                if not isinstance(package, dict):
+                    continue
+                delivery_types = package.get("deliveryTypes")
+                delivery_types = (
+                    delivery_types if isinstance(delivery_types, list) else []
+                )
+                for delivery_type in delivery_types:
+                    if not isinstance(delivery_type, dict):
+                        continue
                     description = clean_text(delivery_type.get("description"))
                     if description:
                         delivery = delivery or description

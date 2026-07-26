@@ -5,10 +5,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from seda.common.retailer_runner import configure_retailer, run_module, step_env
+from seda.detail_publish import assert_detail_publish_complete
 from seda.step00_config import csv_count, dated_run_root, product_line, run_root
 
 
 TRUE_VALUES = {"1", "true", "yes", "y"}
+DETAIL_CONSUMER_STEPS = frozenset(
+    {
+        "freight_cdp_backfill",
+        "review20",
+        "listing_discount_backfill",
+        "final_output",
+        "field_audit",
+        "s3_sync",
+        "db_prepare",
+        "db_load",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -87,7 +100,11 @@ def step_by_key(steps, value):
     raise SystemExit(f"Unknown step: {value}")
 
 
-def step_complete(step):
+def _requires_detail_completion(step):
+    return step.name in DETAIL_CONSUMER_STEPS
+
+
+def step_complete(step, *, recover=True):
     root = run_root()
     project_root = Path(__file__).resolve().parents[2]
     checks = {
@@ -106,6 +123,14 @@ def step_complete(step):
     }
     if step.name in checks:
         path, label = checks[step.name]
+        if step.name == "detail_enrichment":
+            try:
+                journal = assert_detail_publish_complete(root, recover=recover)
+            except RuntimeError as exc:
+                return False, str(exc)
+            status = str(journal.get("status") or "none")
+            if status == "committed":
+                return True, label
         if step.name == "freight_cdp_backfill":
             manifest = _read_json(path.with_suffix(".manifest.json"))
             stats = manifest.get("stats") if isinstance(manifest, dict) else {}
@@ -131,11 +156,11 @@ def _read_json(path):
         return {}
 
 
-def resume_steps(steps):
+def resume_steps(steps, *, recover=True):
     selected = []
     force_downstream = False
     for step in steps:
-        complete, reason = step_complete(step)
+        complete, reason = step_complete(step, recover=recover)
         if complete and not force_downstream and step.name not in {"status_check", "s3_sync", "local_cleanup", "db_prepare", "db_load"}:
             print(f"[ok] step {step.key} {step.name}: {reason}")
             continue
@@ -148,7 +173,7 @@ def resume_steps(steps):
 
 def selected_steps(args, steps):
     if args.resume:
-        return resume_steps(steps)
+        return resume_steps(steps, recover=not args.dry_run)
     if args.all:
         selected = [step for step in steps if step.number != 0]
         if args.include_setup:
@@ -199,6 +224,8 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
             print(f"  {step.key} {step.name:<18} {step.module}")
         return
     for step in chosen:
+        if _requires_detail_completion(step) and not args.dry_run:
+            assert_detail_publish_complete(run_root())
         code = run_module(step.module, env=step_env(retailer_key, step.env), dry_run=args.dry_run)
         if code:
             raise SystemExit(code)

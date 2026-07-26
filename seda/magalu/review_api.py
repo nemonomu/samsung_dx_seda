@@ -5,6 +5,7 @@ import time
 import requests
 
 from ..parsers import clean_text
+from .graphql_contract import graphql_envelope_error
 
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
@@ -134,7 +135,9 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None,
             break
 
         _merge_rating_summary(merged, product_rating)
-        comment_count = (product_rating.get("general") or {}).get("commentCount")
+        general = product_rating.get("general")
+        general = general if isinstance(general, dict) else {}
+        comment_count = general.get("commentCount")
         if comment_count is not None:
             try:
                 target_limit = min(limit, max(0, int(float(str(comment_count).replace(",", ".")))))
@@ -142,13 +145,19 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None,
                 target_limit = limit
             if target_limit <= 0:
                 break
-        user_reviews = product_rating.get("userReviews") or {}
-        page_info = user_reviews.get("page") or {}
+        user_reviews = product_rating.get("userReviews")
+        user_reviews = user_reviews if isinstance(user_reviews, dict) else {}
+        page_info = user_reviews.get("page")
+        page_info = page_info if isinstance(page_info, dict) else {}
         try:
             total_pages = int(page_info.get("totalPages") or total_pages or 0) or total_pages
         except (TypeError, ValueError):
             pass
-        for item in user_reviews.get("items") or []:
+        review_items = user_reviews.get("items")
+        review_items = review_items if isinstance(review_items, list) else []
+        for item in review_items:
+            if not isinstance(item, dict):
+                continue
             description = clean_text(item.get("description"))
             if not description:
                 continue
@@ -176,6 +185,47 @@ def fetch_product_rating(variation_id, limit=None, timeout=None, page_size=None,
         }
     )
     return merged
+
+
+def _append_browser_attempt_trace(trace, result, **context):
+    result = result if isinstance(result, dict) else {}
+    raw_attempts = result.get("trace")
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, dict)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+    if not attempts:
+        attempts = [result]
+    appended = []
+    for raw in attempts:
+        item = dict(context)
+        item.update(
+            {
+                "operation": raw.get("operation", result.get("operation", "")),
+                "attempt": raw.get("attempt", result.get("attempt", 1)),
+                "method": raw.get("method", "browser_graphql"),
+                "status_code": raw.get(
+                    "status_code",
+                    result.get("status_code", 0),
+                ),
+                "length": raw.get(
+                    "length",
+                    len(result.get("text") or ""),
+                ),
+            }
+        )
+        error = raw.get("error")
+        if error:
+            item["error"] = error
+        graphql_errors = raw.get("graphql_errors") or raw.get("errors")
+        if graphql_errors:
+            item["errors"] = graphql_errors
+        if raw.get("response_preview"):
+            item["response_preview"] = raw["response_preview"]
+        trace.append(item)
+        appended.append(item)
+    return appended
 
 
 def _request_product_rating(session, variation_id, page, page_size, timeout, retries, retry_sleep_seconds, trace, context_url=None):
@@ -220,7 +270,16 @@ def _request_product_rating(session, variation_id, page, page_size, timeout, ret
             trace_item["error"] = "invalid_json"
             continue
 
-        product_rating = (parsed.get("data") or {}).get("productRating") or {}
+        semantic_error = graphql_envelope_error(parsed)
+        if semantic_error:
+            trace_item["error"] = semantic_error
+            if isinstance(parsed, dict) and parsed.get("errors"):
+                trace_item["errors"] = parsed.get("errors")
+            continue
+        product_rating = parsed["data"].get("productRating") or {}
+        if not isinstance(product_rating, dict):
+            trace_item["error"] = "invalid_product_rating"
+            continue
         if product_rating:
             return product_rating
         trace_item["error"] = "missing_product_rating"
@@ -241,19 +300,41 @@ def _request_product_rating(session, variation_id, page, page_size, timeout, ret
                 }
             )
         else:
-            trace_item = {
-                "page": page,
-                "attempt": 1,
-                "method": "browser_graphql",
-                "status_code": result.get("status_code", 0),
-                "length": len(result.get("text") or ""),
-            }
-            trace.append(trace_item)
+            result = result if isinstance(result, dict) else {}
+            attempt_items = _append_browser_attempt_trace(
+                trace,
+                result,
+                page=page,
+            )
             parsed = result.get("data") or {}
-            product_rating = (parsed.get("data") or {}).get("productRating") or {}
+            response_data = parsed.get("data") if isinstance(parsed, dict) else {}
+            raw_product_rating = (
+                response_data.get("productRating")
+                if isinstance(response_data, dict)
+                else None
+            )
+            product_rating = (
+                raw_product_rating
+                if isinstance(raw_product_rating, dict)
+                else {}
+            )
             if result.get("status_code") == 200 and product_rating:
                 return product_rating
-            trace_item["error"] = result.get("error") or ("graphql_errors" if parsed.get("errors") else "missing_product_rating")
+            has_graphql_errors = isinstance(parsed, dict) and bool(parsed.get("errors"))
+            operation_error = result.get("error") or (
+                "graphql_errors"
+                if has_graphql_errors
+                else (
+                    "invalid_product_rating"
+                    if raw_product_rating not in (None, {}) and not isinstance(
+                        raw_product_rating,
+                        dict,
+                    )
+                    else "missing_product_rating"
+                )
+            )
+            if attempt_items and not attempt_items[-1].get("error"):
+                attempt_items[-1]["error"] = operation_error
     return {}
 
 
@@ -291,14 +372,21 @@ def _merge_rating_summary(target, product_rating):
     if not target["product_id"]:
         target["product_id"] = clean_text(product_rating.get("productId"))
     if not target["general"]:
-        target["general"] = product_rating.get("general") or {}
+        general = product_rating.get("general")
+        target["general"] = general if isinstance(general, dict) else {}
     if not target["dimensions"]:
-        target["dimensions"] = product_rating.get("dimensions") or []
+        dimensions = product_rating.get("dimensions")
+        target["dimensions"] = dimensions if isinstance(dimensions, list) else []
     if not target["reviews_by_rating"]:
-        target["reviews_by_rating"] = product_rating.get("reviewsByRating") or []
+        reviews_by_rating = product_rating.get("reviewsByRating")
+        target["reviews_by_rating"] = (
+            reviews_by_rating if isinstance(reviews_by_rating, list) else []
+        )
     if not target["page"]:
-        user_reviews = product_rating.get("userReviews") or {}
-        target["page"] = user_reviews.get("page") or {}
+        user_reviews = product_rating.get("userReviews")
+        user_reviews = user_reviews if isinstance(user_reviews, dict) else {}
+        page = user_reviews.get("page")
+        target["page"] = page if isinstance(page, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +427,9 @@ def fetch_review_summary(product_id=None, variation_id=None, timeout=None, conte
     trace = []
     payload = _summary_payload(identifier)
     data = _post_summary_browser(payload, timeout, trace, context_url=context_url)
-    node = (data.get("data") or {}).get("reviewSummary") or {}
+    response_data = data.get("data") if isinstance(data, dict) else {}
+    node = response_data.get("reviewSummary") if isinstance(response_data, dict) else {}
+    node = node if isinstance(node, dict) else {}
     summary = clean_text(node.get("summary"))
     return {
         "success": bool(summary),
@@ -369,16 +459,20 @@ def _post_summary_browser(payload, timeout, trace, context_url=None):
         trace.append({"method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
         return {}
 
-    trace_item = {
-        "method": "browser_graphql",
-        "status_code": result.get("status_code", 0),
-        "length": len(result.get("text") or ""),
-    }
-    trace.append(trace_item)
+    result = result if isinstance(result, dict) else {}
+    attempt_items = _append_browser_attempt_trace(trace, result)
     data = result.get("data") or {}
-    if result.get("status_code") == 200 and data and not data.get("errors"):
+    semantic_error = graphql_envelope_error(data)
+    if result.get("status_code") == 200 and data and not semantic_error and not result.get("error"):
         return data
-    trace_item["error"] = result.get("error") or ("graphql_errors" if data.get("errors") else "non_json_or_blocked")
-    if data.get("errors"):
-        trace_item["errors"] = data.get("errors")
+    operation_error = result.get("error") or semantic_error or "non_json_or_blocked"
+    if attempt_items and not attempt_items[-1].get("error"):
+        attempt_items[-1]["error"] = operation_error
+    if (
+        attempt_items
+        and isinstance(data, dict)
+        and data.get("errors")
+        and not attempt_items[-1].get("errors")
+    ):
+        attempt_items[-1]["errors"] = data.get("errors")
     return {}

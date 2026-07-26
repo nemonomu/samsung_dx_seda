@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 
+from .detail_publish import detail_consumer_guard
 from .step00_config import read_csv, run_root, write_csv, write_json
 
 
@@ -55,6 +56,11 @@ def _expected_review_count(row):
 
 def main():
     root = run_root()
+    with detail_consumer_guard(root):
+        return _main(root)
+
+
+def _main(root):
     source = _source_path(root)
     rows = read_csv(source)
     review_rows = []

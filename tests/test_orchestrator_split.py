@@ -9,6 +9,95 @@ from seda.common.retailer_runner import configure_retailer
 
 
 class SplitOrchestratorTests(unittest.TestCase):
+    def test_status_and_cleanup_run_without_detail_completion_gate(self):
+        chosen = [
+            retailer_orchestrator.Step(
+                13,
+                "status_check",
+                "seda.magalu.step10_status_check",
+            ),
+            retailer_orchestrator.Step(
+                14,
+                "local_cleanup",
+                "seda.magalu.step12_local_cleanup",
+            ),
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_RUN_ROOT": "C:/diagnostic/run",
+                "SEDA_PRODUCT_LINE": "TV",
+            },
+            clear=True,
+        ), patch.object(
+            retailer_orchestrator,
+            "selected_steps",
+            return_value=chosen,
+        ), patch.object(
+            retailer_orchestrator,
+            "assert_detail_publish_complete",
+        ) as completion, patch.object(
+            retailer_orchestrator,
+            "run_module",
+            return_value=0,
+        ) as run, patch(
+            "sys.argv",
+            ["magalu_orchestrator", "status_check", "local_cleanup"],
+        ):
+            retailer_orchestrator.run_retailer_orchestrator(
+                "magalu",
+                "seda.magalu",
+                "test",
+            )
+
+        completion.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                "seda.magalu.step10_status_check",
+                "seda.magalu.step12_local_cleanup",
+            ],
+        )
+
+    def test_real_detail_consumer_is_gated_before_module_execution(self):
+        chosen = [
+            retailer_orchestrator.Step(
+                7,
+                "review20",
+                "seda.magalu.step09_review20",
+            )
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_RUN_ROOT": "C:/consumer/run",
+                "SEDA_PRODUCT_LINE": "TV",
+            },
+            clear=True,
+        ), patch.object(
+            retailer_orchestrator,
+            "selected_steps",
+            return_value=chosen,
+        ), patch.object(
+            retailer_orchestrator,
+            "assert_detail_publish_complete",
+        ) as completion, patch.object(
+            retailer_orchestrator,
+            "run_module",
+            return_value=0,
+        ) as run, patch(
+            "sys.argv",
+            ["magalu_orchestrator", "review20"],
+        ):
+            retailer_orchestrator.run_retailer_orchestrator(
+                "magalu",
+                "seda.magalu",
+                "test",
+            )
+
+        completion.assert_called_once()
+        run.assert_called_once()
+
     def test_all_splits_an_explicit_root_and_retailer_runtime_context(self):
         clean_env = {
             "SEDA_RUN_ROOT": "C:/shared/root",

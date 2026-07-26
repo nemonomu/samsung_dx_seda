@@ -247,8 +247,9 @@ def high_confidence_tv_model_number_from_text(text):
 def preferred_magalu_sku(line, reference, model, title):
     """Apply the retailer/product-line SKU priority in one shared place."""
     if str(line or "").upper() == "TV":
-        title_model = high_confidence_tv_model_number_from_text(title)
-        return title_model or reference or model
+        # TV recovery accepts only the complete factsheet Referencia string.
+        # Modelo/title inference can silently shorten a valid retailer SKU.
+        return str(reference or "").strip()
     return reference or model or appliance_model_number_from_text(title)
 
 
@@ -1654,7 +1655,11 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         semantic_item["path"] = product_url
     semantic_fields = extract_magalu_semantic_fields(semantic_item, line)
     model = _magalu_factsheet_value(item, ["modelo"])
-    reference = _magalu_factsheet_value(item, ["referencia", "referência"])
+    reference = (
+        magalu_exact_factsheet_reference(item)
+        if line == "TV"
+        else _magalu_factsheet_value(item, ["referencia", "referência"])
+    )
     item_title = clean_text(item.get("title"))
     expected_item_id = clean_text(sku_from_url(product_url)).casefold()
     actual_item_id = clean_text(item.get("id")).casefold()
@@ -1666,6 +1671,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
     detail = {
         "retailer": "Magalu",
         "sku": _magalu_sku_for_product_line(line, reference, model, item, product_url),
+        "_magalu_factsheet_reference": str(reference or "").strip(),
+        "_detail_item_id": clean_text(item.get("id")),
         "retailer_sku_name": item_title,
         "_detail_identity_verified": bool(item_title) and _url_product_identity_matches(product_url, item.get("id")),
         "_detail_identity_conflict": identity_conflict,
@@ -1834,6 +1841,55 @@ def _magalu_factsheet_value(item, labels):
         if key in wanted:
             return _magalu_fact_value(fact)
     return ""
+
+
+def magalu_exact_factsheet_reference(item):
+    """Return one unambiguous Referencia value with only edge whitespace removed.
+
+    TV SKU recovery must not collapse internal whitespace or synthesize a value
+    by joining multiple factsheet elements.  Bundle factsheets remain eligible,
+    but conflicting references make the evidence ambiguous and therefore blank.
+    """
+    if not isinstance(item, dict):
+        return ""
+    candidates = _magalu_exact_reference_candidates(item.get("factsheet"))
+    if not candidates:
+        for bundle in item.get("bundles") or []:
+            if isinstance(bundle, dict):
+                candidates.extend(
+                    _magalu_exact_reference_candidates(bundle.get("factsheet"))
+                )
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else ""
+
+
+def _magalu_exact_reference_candidates(facts):
+    candidates = []
+    for fact in _iter_magalu_facts(facts):
+        key = _normalize_key(fact.get("keyName") or fact.get("slug"))
+        if key != "referencia":
+            continue
+        elements = fact.get("elements")
+        values = []
+        if isinstance(elements, list):
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                value = element.get("value")
+                if value is None:
+                    continue
+                value = str(value).strip()
+                if value:
+                    values.append(value)
+        if not values:
+            value = fact.get("value")
+            if value is not None:
+                value = str(value).strip()
+                if value:
+                    values.append(value)
+        candidates.extend(values)
+    return candidates
+
 
 def _iter_magalu_facts(facts):
     if not isinstance(facts, list):

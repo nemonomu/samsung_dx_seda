@@ -24,6 +24,8 @@ from seda.parsers import _casas_bahia_next_product, parse_detail
 from seda import step14_db_load
 from seda.step00_config import OUTPUT_COLUMNS, write_csv
 from seda.step08_detail_enrichment import (
+    REVIEW_PAGE_TRACE_COLUMNS,
+    SUBCALL_TRACE_COLUMNS,
     _magalu_graphql_detail,
     _detail_raw_filename,
     _merge_authoritative_detail,
@@ -39,6 +41,7 @@ from seda.step08_detail_enrichment import (
     _resume_prefix,
     _run_parallel,
     _write_detail_traces,
+    _write_trace_csv,
 )
 from seda.step14_db_load import _db_value
 from seda.step15_final_output import (
@@ -1148,7 +1151,9 @@ class FieldPipelineContractTests(unittest.TestCase):
             )
         self.assertIs(detail["_detail_identity_verified"], True)
         self.assertEqual(detail["retailer_sku_name"], "Smart TV Main")
-        self.assertEqual(detail["sku"], "MAIN-1")
+        # TV SKU accepts only factsheet Referencia; Modelo and JSON-LD are not
+        # SKU recovery sources.
+        self.assertEqual(detail["sku"], "")
         self.assertEqual(detail["final_sku_price"], "R$2.000,00")
         self.assertFalse(detail.get("star_rating"))
         self.assertFalse(detail.get("count_of_star_ratings"))
@@ -2470,6 +2475,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                             "run_token": env["SEDA_DETAIL_RUN_TOKEN"],
                             "worker_id": env["SEDA_DETAIL_WORKER_ID"],
                             "item": rows[index]["item"],
+                            "product_url": rows[index]["product_url"],
                             "subcall": "detail_graphql",
                             "operation": "itemQuery",
                             "attempt": 1,
@@ -2539,6 +2545,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                         "run_token": env["SEDA_DETAIL_RUN_TOKEN"],
                         "worker_id": env["SEDA_DETAIL_WORKER_ID"],
                         "item": "new",
+                        "product_url": rows[0]["product_url"],
                         "subcall": "detail_graphql",
                     }],
                     [],
@@ -2548,6 +2555,21 @@ class FieldPipelineContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "final_output_enriched.csv"
             write_csv(output, [{"retailer": "Magalu", "item": "old", "product_url": "https://example/p/old"}])
+            trace_dir = Path(directory) / "detail" / "trace"
+            subcall_canonical = trace_dir / "subcall_trace.csv"
+            review_canonical = trace_dir / "magalu_review_page_trace.csv"
+            _write_trace_csv(
+                subcall_canonical,
+                [{"row_index": 1, "item": "old", "product_url": "https://example/p/old"}],
+                SUBCALL_TRACE_COLUMNS,
+            )
+            _write_trace_csv(
+                review_canonical,
+                [{"row_index": 1, "item": "old", "product_url": "https://example/p/old"}],
+                REVIEW_PAGE_TRACE_COLUMNS,
+            )
+            old_subcall = subcall_canonical.read_bytes()
+            old_review = review_canonical.read_bytes()
             with patch.dict(
                 os.environ,
                 {
@@ -2563,8 +2585,8 @@ class FieldPipelineContractTests(unittest.TestCase):
             with output.open("r", encoding="utf-8-sig", newline="") as handle:
                 saved = list(csv.DictReader(handle))
             self.assertEqual(saved[0]["item"], "old")
-            trace_dir = Path(directory) / "detail" / "trace"
-            self.assertTrue((trace_dir / "subcall_trace.csv").exists())
+            self.assertEqual(subcall_canonical.read_bytes(), old_subcall)
+            self.assertEqual(review_canonical.read_bytes(), old_review)
             self.assertEqual(len(list(trace_dir.glob("subcall_trace_*_w*.csv"))), 1)
 
     def test_parallel_partial_success_is_rejected_without_replacing_output(self):

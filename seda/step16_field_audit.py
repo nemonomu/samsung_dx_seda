@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from .detail_publish import detail_consumer_guard
 from .step00_config import read_csv, run_root, write_json
 from .step15_final_output import final_output_columns
 
@@ -44,6 +45,11 @@ PARSER_CRITERIA = {
 
 def main():
     root = run_root()
+    with detail_consumer_guard(root):
+        return _main(root)
+
+
+def _main(root):
     final_output = root / "output" / "final_output.csv"
     enriched = root / "output" / "final_output_enriched.csv"
     rows = read_csv(final_output)

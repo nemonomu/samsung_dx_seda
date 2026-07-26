@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from seda.detail_publish import detail_consumer_guard
 from seda.step00_config import OUTPUT_COLUMNS, read_csv, run_root, write_csv
 
 from .destaque_api import fetch_discount_type
@@ -114,7 +115,9 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    result = run(args)
+    root = run_root()
+    with detail_consumer_guard(root):
+        result = run(args)
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=False))
 
 

@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from seda.common.chrome_cdp import ensure_chrome_cdp, ensure_playwright_temp_dir
+from seda.detail_publish import detail_consumer_guard
 from seda.step00_config import run_root
 
 from .detail_api import _freight_detail
@@ -504,7 +505,9 @@ def main():
     parser.add_argument("--close-browser", action="store_true")
     parser.add_argument("--keep-browser", action="store_true")
     args = parser.parse_args()
-    result = asyncio.run(run(args))
+    root = run_root()
+    with detail_consumer_guard(root):
+        result = asyncio.run(run(args))
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=True))
     if result.get("aborted"):
         raise SystemExit(1)

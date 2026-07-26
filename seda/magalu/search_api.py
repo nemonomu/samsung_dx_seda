@@ -6,6 +6,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
+from .graphql_contract import graphql_envelope_error
+
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
 
@@ -206,8 +208,22 @@ def fetch_search_listing(url, timeout=None):
             except ValueError:
                 trace_item["error"] = "invalid_json"
                 continue
-            search = (parsed_response.get("data") or {}).get("search") or {}
-            products = search.get("products") or []
+            semantic_error = graphql_envelope_error(parsed_response)
+            if semantic_error:
+                trace_item["error"] = semantic_error
+                if isinstance(parsed_response, dict) and parsed_response.get("errors"):
+                    trace_item["errors"] = parsed_response.get("errors")
+                continue
+            search = parsed_response["data"].get("search") or {}
+            if not isinstance(search, dict):
+                trace_item["error"] = "invalid_search_payload"
+                continue
+            products = search.get("products")
+            if products is None:
+                products = []
+            elif not isinstance(products, list):
+                trace_item["error"] = "invalid_search_products"
+                continue
             if products:
                 direct_result = {
                     "success": True,
@@ -267,19 +283,63 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
         payload = _payload(url, page_size)
         for attempt in range(1, attempts + 1):
             result = graphql_post(payload, timeout=min(timeout, browser_timeout))
+            result = result if isinstance(result, dict) else {}
             data = result.get("data") or {}
-            search = (data.get("data") or {}).get("search") or {}
-            products = search.get("products") or []
-            trace_item = {
-                "method": "browser_graphql",
-                "page_size": page_size,
-                "attempt": attempt,
-                "status_code": result.get("status_code", 0),
-                "length": len(result.get("text") or ""),
-                "products": len(products),
-                "error": result.get("error", ""),
-            }
-            trace.append(trace_item)
+            response_data = data.get("data") if isinstance(data, dict) else {}
+            search = response_data.get("search") if isinstance(response_data, dict) else {}
+            search = search if isinstance(search, dict) else {}
+            raw_products = search.get("products")
+            products = raw_products if isinstance(raw_products, list) else []
+            raw_attempts = result.get("trace")
+            browser_attempts = (
+                [item for item in raw_attempts if isinstance(item, dict)]
+                if isinstance(raw_attempts, list)
+                else []
+            )
+            if not browser_attempts:
+                browser_attempts = [result]
+            appended = []
+            for inner_index, browser_attempt in enumerate(browser_attempts):
+                trace_item = {
+                    "method": browser_attempt.get("method", "browser_graphql"),
+                    "page_size": page_size,
+                    "browser_call_attempt": attempt,
+                    "attempt": browser_attempt.get(
+                        "attempt",
+                        result.get("attempt", 1),
+                    ),
+                    "status_code": browser_attempt.get(
+                        "status_code",
+                        result.get("status_code", 0),
+                    ),
+                    "length": browser_attempt.get(
+                        "length",
+                        len(result.get("text") or ""),
+                    ),
+                    "products": (
+                        len(products)
+                        if inner_index == len(browser_attempts) - 1
+                        else 0
+                    ),
+                    "error": browser_attempt.get("error", ""),
+                }
+                graphql_errors = (
+                    browser_attempt.get("graphql_errors")
+                    or browser_attempt.get("errors")
+                )
+                if graphql_errors:
+                    trace_item["errors"] = graphql_errors
+                if browser_attempt.get("response_preview"):
+                    trace_item["response_preview"] = browser_attempt[
+                        "response_preview"
+                    ]
+                trace.append(trace_item)
+                appended.append(trace_item)
+            operation_error = result.get("error", "")
+            if raw_products is not None and not isinstance(raw_products, list):
+                operation_error = operation_error or "invalid_search_products"
+            if appended and operation_error and not appended[-1].get("error"):
+                appended[-1]["error"] = operation_error
             if products:
                 return {
                     "success": True,
@@ -289,7 +349,13 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
                     "trace": trace,
                     "method": "browser_graphql_search",
                 }
-            last_error = trace_item["error"] or "empty_products"
+            last_error = (
+                operation_error
+                or (appended[-1].get("error") if appended else "")
+                or "empty_products"
+            )
+            if appended and not appended[-1].get("error"):
+                appended[-1]["error"] = last_error
             if attempt < attempts:
                 session = ensure_magalu_session("search_browser_graphql_retry")
                 trace.extend(session.get("trace") or [])

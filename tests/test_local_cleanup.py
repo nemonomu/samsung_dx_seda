@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -9,6 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from seda import step12_local_cleanup
+from seda.detail_publish import (
+    assert_detail_publish_complete,
+    detail_run_lock,
+    file_sha256,
+)
 
 
 class LocalCleanupTests(unittest.TestCase):
@@ -342,6 +348,326 @@ class LocalCleanupTests(unittest.TestCase):
         for name in rejected:
             with self.subTest(name=name):
                 self.assertFalse(step12_local_cleanup._is_detail_trace_file(name))
+
+    def test_resolved_publish_artifacts_follow_three_day_trace_retention(self):
+        fixed_now = datetime(2026, 7, 26, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            current = base / "magalu" / "tv" / "20260726"
+            old_run = base / "magalu" / "tv" / "20260720"
+            current.mkdir(parents=True)
+            trace_dir = old_run / "detail" / "trace"
+            output_dir = old_run / "output"
+            trace_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+            files = [
+                trace_dir / "subcall_trace.csv",
+                trace_dir / "detail_publish_transaction.json",
+                trace_dir / "detail_publish.lock",
+                trace_dir / ".subcall_trace.csv.detail_publish.backup",
+                trace_dir / ".subcall_trace.csv.run.detail_publish.stage",
+                output_dir / ".final_output_enriched.csv.detail_publish.backup",
+                output_dir / ".final_output_enriched.csv.run.detail_publish.stage",
+                output_dir / "_detail_part_run_0.csv",
+            ]
+            product = output_dir / "final_output_enriched.csv"
+            product.write_text(
+                "item,product_url\none,https://example/p/one\n",
+                encoding="utf-8",
+            )
+            target = output_dir / "seda_final_targets.csv"
+            target.write_text(
+                "item,product_url\none,https://example/p/one\n",
+                encoding="utf-8",
+            )
+            for path in files:
+                if path.name == "detail_publish_transaction.json":
+                    continue
+                path.write_text("old", encoding="utf-8")
+                self._mtime(path, fixed_now - timedelta(days=3, seconds=1))
+            journal = trace_dir / "detail_publish_transaction.json"
+            journal.write_text(
+                json.dumps(
+                    {
+                        "status": "committed",
+                        "metadata": {
+                            "complete": True,
+                            "product_row_count": 1,
+                            "expected_row_count": 1,
+                            "target_sha256": file_sha256(target),
+                            "target_path": str(target.resolve()),
+                        },
+                        "files": [
+                            {
+                                "order": 0,
+                                "name": "product",
+                                "canonical": "output/final_output_enriched.csv",
+                                "staged": "output/.product.stage",
+                                "backup": "output/.product.backup",
+                                "old_exists": False,
+                                "old_sha256": "",
+                                "new_sha256": file_sha256(product),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._mtime(journal, fixed_now - timedelta(days=3, seconds=1))
+            self._mtime(product, fixed_now - timedelta(days=10))
+
+            result = step12_local_cleanup._cleanup_detail_trace_files(
+                [old_run],
+                current=current,
+                base=base,
+                retention_days=3,
+                now=fixed_now,
+            )
+
+            for path in files:
+                if path.name in {
+                    "detail_publish.lock",
+                    "detail_publish_transaction.json",
+                }:
+                    self.assertTrue(path.is_file(), path)
+                else:
+                    self.assertFalse(path.exists(), path)
+            self.assertTrue(product.is_file())
+            self.assertEqual(
+                assert_detail_publish_complete(old_run)["status"],
+                "committed",
+            )
+            self.assertEqual(
+                set(result["deleted_publish_files"]),
+                {
+                    str(path.resolve())
+                    for path in files[1:]
+                    if path.name
+                    not in {
+                        "detail_publish.lock",
+                        "detail_publish_transaction.json",
+                    }
+                },
+            )
+
+    def test_active_publisher_lock_protects_expired_trace_bundle(self):
+        fixed_now = datetime(2026, 7, 26, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            current = base / "magalu" / "tv" / "20260726"
+            old_run = base / "magalu" / "tv" / "20260720"
+            current.mkdir(parents=True)
+            trace = old_run / "detail" / "trace" / "subcall_trace.csv"
+            trace.parent.mkdir(parents=True)
+            trace.write_text("old trace", encoding="utf-8")
+            self._mtime(trace, fixed_now - timedelta(days=10))
+
+            with detail_run_lock(old_run):
+                result = step12_local_cleanup._cleanup_detail_trace_files(
+                    [old_run],
+                    current=current,
+                    base=base,
+                    retention_days=3,
+                    now=fixed_now,
+                )
+
+            self.assertTrue(trace.is_file())
+            self.assertEqual(result["deleted_files"], [])
+            self.assertEqual(
+                result["protected_transactions"][0]["reason"],
+                "publisher_locked",
+            )
+
+    def test_active_full_run_lock_prevents_partial_run_deletion(self):
+        fixed_now = datetime(2026, 7, 26, 12, 0, 0)
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            current = base / "magalu" / "tv" / "20260726"
+            old_run = base / "magalu" / "tv" / "20260601"
+            current.mkdir(parents=True)
+            sentinel = old_run / "output" / "sentinel.csv"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("must stay intact", encoding="utf-8")
+            self._mtime(old_run, fixed_now - timedelta(days=45))
+            env = {
+                "SEDA_LOCAL_CLEANUP": "1",
+                "SEDA_LOCAL_RETENTION_DAYS": "30",
+                "SEDA_DETAIL_TRACE_CLEANUP": "0",
+            }
+            with detail_run_lock(old_run), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ), patch.object(
+                step12_local_cleanup,
+                "DEFAULT_RUNS_BASE",
+                base,
+            ), patch.object(
+                step12_local_cleanup,
+                "run_root",
+                return_value=current,
+            ), patch.object(
+                step12_local_cleanup,
+                "datetime",
+                FixedDateTime,
+            ):
+                step12_local_cleanup.main()
+
+            self.assertEqual(
+                sentinel.read_text(encoding="utf-8"),
+                "must stay intact",
+            )
+            manifest = json.loads(
+                (current / "cleanup" / "manifest_local_cleanup.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["deleted"], [])
+            self.assertEqual(
+                manifest["detail_trace_cleanup"]["protected_transactions"][0][
+                    "reason"
+                ],
+                "publisher_locked",
+            )
+
+    def test_full_run_rename_failure_leaves_original_tree_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            old_run = base / "magalu" / "tv" / "20260601"
+            sentinel = old_run / "output" / "sentinel.csv"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("original", encoding="utf-8")
+
+            with patch(
+                "seda.step12_local_cleanup.os.replace",
+                side_effect=OSError("rename blocked"),
+            ):
+                with self.assertRaisesRegex(OSError, "rename blocked"):
+                    step12_local_cleanup._remove_run_directory(old_run, base)
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "original")
+
+    def test_detached_read_only_tombstone_is_retried_and_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            tombstone = (
+                base
+                / ".seda_cleanup"
+                / "20260601.123.456.deleting"
+            )
+            read_only = tombstone / "output" / "sentinel.csv"
+            read_only.parent.mkdir(parents=True)
+            read_only.write_text("old", encoding="utf-8")
+            os.chmod(read_only, stat.S_IREAD)
+
+            deleted = step12_local_cleanup._cleanup_detached_run_directories(
+                base
+            )
+
+            self.assertFalse(tombstone.exists())
+            self.assertEqual(deleted, [str(tombstone.resolve())])
+
+    def test_locked_tombstone_error_is_recorded_and_retried_later(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "data"
+            locked_tombstone = (
+                base
+                / ".seda_cleanup"
+                / "20260601.123.456.deleting"
+            )
+            removable_tombstone = (
+                base
+                / ".seda_cleanup"
+                / "20260602.123.457.deleting"
+            )
+            for tombstone in (locked_tombstone, removable_tombstone):
+                sentinel = tombstone / "output" / "sentinel.csv"
+                sentinel.parent.mkdir(parents=True)
+                sentinel.write_text("old", encoding="utf-8")
+            errors = []
+            real_remove = (
+                step12_local_cleanup._remove_tree_without_reparse_points
+            )
+
+            def remove_or_lock(path):
+                if Path(path) == locked_tombstone:
+                    raise PermissionError("file is in use")
+                return real_remove(path)
+
+            with patch(
+                "seda.step12_local_cleanup._remove_tree_without_reparse_points",
+                side_effect=remove_or_lock,
+            ):
+                deleted = step12_local_cleanup._cleanup_detached_run_directories(
+                    base,
+                    errors=errors,
+                )
+
+            self.assertEqual(deleted, [str(removable_tombstone.resolve())])
+            self.assertTrue(locked_tombstone.is_dir())
+            self.assertFalse(removable_tombstone.exists())
+            self.assertEqual(len(errors), 1)
+            self.assertIn("PermissionError", errors[0]["error"])
+
+            retried = step12_local_cleanup._cleanup_detached_run_directories(
+                base,
+                errors=errors,
+            )
+            self.assertEqual(retried, [str(locked_tombstone.resolve())])
+            self.assertFalse(locked_tombstone.exists())
+
+    def test_incomplete_unresolved_or_corrupt_journal_protects_all_trace_evidence(self):
+        fixed_now = datetime(2026, 7, 26, 12, 0, 0)
+        for journal_text, expected_reason in (
+            (
+                '{"status":"committed","metadata":'
+                '{"complete":false,"product_row_count":1,"expected_row_count":2}}',
+                "journal_incomplete:status=committed",
+            ),
+            ('{"status":"rolled_back"}', "journal_incomplete:status=rolled_back"),
+            ('{"status":"prepared"}', "journal_unresolved:prepared"),
+            ("not-json", "journal_invalid:JSONDecodeError"),
+        ):
+            with self.subTest(journal=journal_text), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory) / "data"
+                current = base / "magalu" / "tv" / "20260726"
+                old_run = base / "magalu" / "tv" / "20260720"
+                current.mkdir(parents=True)
+                trace_dir = old_run / "detail" / "trace"
+                output_dir = old_run / "output"
+                trace_dir.mkdir(parents=True)
+                output_dir.mkdir(parents=True)
+                journal = trace_dir / "detail_publish_transaction.json"
+                trace = trace_dir / "subcall_trace_run_w0.csv"
+                product_part = output_dir / "_detail_part_run_0.csv"
+                journal.write_text(journal_text, encoding="utf-8")
+                trace.write_text("trace", encoding="utf-8")
+                product_part.write_text("part", encoding="utf-8")
+                for path in (journal, trace, product_part):
+                    self._mtime(path, fixed_now - timedelta(days=10))
+
+                result = step12_local_cleanup._cleanup_detail_trace_files(
+                    [old_run],
+                    current=current,
+                    base=base,
+                    retention_days=3,
+                    now=fixed_now,
+                )
+
+                self.assertTrue(journal.is_file())
+                self.assertTrue(trace.is_file())
+                self.assertTrue(product_part.is_file())
+                self.assertEqual(result["deleted_files"], [])
+                self.assertEqual(
+                    result["protected_transactions"][0]["reason"],
+                    expected_reason,
+                )
 
     def test_both_cleanup_modes_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as directory:

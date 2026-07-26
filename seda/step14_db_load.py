@@ -3,6 +3,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from .detail_publish import detail_consumer_guard
 from .step00_config import csv_rows_contract_error, db_connect, output_table, product_line, read_csv, run_root, write_json
 from .step15_final_output import _active_retailer, _validate_source_context, final_output_columns
 
@@ -17,6 +18,11 @@ RETAILER_ACCOUNT_KEYS = {
 
 def main():
     root = run_root()
+    with detail_consumer_guard(root):
+        return _main(root)
+
+
+def _main(root):
     csv_path = os.getenv("SEDA_DB_LOAD_CSV", str(root / "output" / "final_output.csv"))
     rows = read_csv(csv_path)
     _validate_source_context(rows, csv_path)

@@ -8,6 +8,7 @@ import unicodedata
 from urllib.parse import parse_qs, urlparse
 
 from ..parsers import extract_next_data, magalu_next_search_is_null
+from .graphql_contract import graphql_envelope_error
 
 
 _PAGE = None
@@ -876,6 +877,12 @@ return (async () => {
                 result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
             except ValueError:
                 result = {"status": 0, "error": "invalid_js_result", "text": str(raw_result)}
+        if not isinstance(result, dict):
+            result = {
+                "status": 0,
+                "error": "invalid_js_result",
+                "text": str(raw_result),
+            }
         text = result.get("text") or ""
         data = {}
         error = result.get("error") or ""
@@ -907,7 +914,9 @@ return (async () => {
         item_present = ""
         if operation == "itemQuery":
             response_data = data.get("data") if isinstance(data, dict) else {}
-            item_present = int(bool((response_data or {}).get("item")))
+            item_present = int(
+                isinstance(response_data, dict) and bool(response_data.get("item"))
+            )
         trace_item = {
             "operation": operation,
             "attempt": attempt,
@@ -925,6 +934,10 @@ return (async () => {
         last["trace"] = attempt_trace[:]
         last["graphql_errors"] = graphql_errors or []
         last["item_present"] = item_present
+        if error:
+            # Invalid/failed envelopes remain available as raw text and trace
+            # previews, but must never reach operation-specific consumers.
+            last["data"] = {}
         if not blocked and status_code == 200 and not error:
             return last
         if attempt < attempts:
@@ -939,15 +952,7 @@ return (async () => {
 
 
 def _graphql_semantic_error(operation, data):
-    if not isinstance(data, dict):
-        return "invalid_json"
-    if data.get("errors"):
-        return "graphql_errors"
-    if operation == "itemQuery":
-        response_data = data.get("data")
-        if not isinstance(response_data, dict) or not response_data.get("item"):
-            return "graphql_item_missing"
-    return ""
+    return graphql_envelope_error(data, require_item=operation == "itemQuery")
 
 
 def _graphql_result_blocked(result):
@@ -997,6 +1002,12 @@ return (async () => {
             result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
         except ValueError:
             result = {"status": 0, "error": "invalid_js_result", "text": str(raw_result)}
+    if not isinstance(result, dict):
+        result = {
+            "status": 0,
+            "error": "invalid_js_result",
+            "text": str(raw_result),
+        }
     text = result.get("text") or ""
     data = {}
     error = result.get("error") or ""
