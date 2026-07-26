@@ -176,6 +176,82 @@ def model_number_from_text(text):
         return candidate
     return ""
 
+
+def high_confidence_tv_model_number_from_text(text):
+    """Return a title model only when it has strong mixed alpha/numeric shape.
+
+    This is intentionally stricter than ``model_number_from_text`` because it can
+    override generic/internal references and recover failed itemQuery rows. Picking
+    a technical or bundled-accessory token would be worse than falling back to the
+    factsheet or leaving SKU blank.
+    """
+    text = clean_text(text).upper()
+    if re.search(
+        r"^\s*(?:CONTROLE|CONTROL|CR\b|SUPORTE|RACK|CABO|PLACA|RECEPTOR|MOLDURA|"
+        r"FIXADOR|BASE|PEDESTAL|SOUNDBAR|HOME\s*THEATER|C[ÂA]MERA|CONSOLE|"
+        r"VIDEOGAME)\b",
+        text,
+    ):
+        return ""
+    screen_digits = re.sub(r"\D", "", screen_size_from_text(text))
+    if not screen_digits:
+        return ""
+    candidates = list(re.finditer(
+        r"\b(?=[A-Z0-9/-]*[A-Z])(?=[A-Z0-9/-]*\d)[A-Z0-9]+(?:[-/][A-Z0-9]+)*\b",
+        text,
+    ))
+    valid = []
+    seen = set()
+    for position, match in enumerate(candidates):
+        candidate = match.group(0)
+        compact = re.sub(r"[-/]", "", candidate)
+        if compact in seen:
+            continue
+        seen.add(compact)
+        if len(compact) < 5:
+            continue
+        if candidate[0].isdigit() and not compact.startswith(screen_digits):
+            continue
+        if screen_digits not in compact:
+            continue
+        letter_count = len(re.findall(r"[A-Z]", compact))
+        has_extra_digit = bool(re.search(r"\d", compact.replace(screen_digits, "", 1)))
+        if letter_count < 2 and not (letter_count == 1 and has_extra_digit):
+            continue
+        prefix = text[max(0, match.start() - 60) : match.start()]
+        if re.search(
+            r"(?:CONTROLE|CONTROL|SUPORTE|RACK|CABO|PLACA|RECEPTOR|MOLDURA|FIXADOR|"
+            r"BASE|PAINEL|PEDESTAL|SOUNDBAR|HOME\s*THEATER|C[ÂA]MERA|CONSOLE|"
+            r"VIDEOGAME)\b[^,;|]{0,50}$",
+            prefix,
+        ):
+            continue
+        if re.fullmatch(
+            r"(?:4K|8K|HD\d*|FHD\d*|UHD\d*|QLED\d*|OLED\d*|LED\d*|DLED\d*|"
+            r"HDR\d*|HDMI\d*|USB\d*|SMART\d*|ANDROID\d*|FREESYNC\d*|"
+            r"VISION\d*|ATMOS\d*|MINILED\d*|NANOCELL\d*|"
+            r"WIFI\d*|WI-FI\d*|RJ\d+|WEBOS\d*|TIZEN\d*|ROKU\d*|DOLBY\d*|"
+            r"BLUETOOTH\d*|GOOGLE\d*|ALEXA\d*|TV\d+SMART\d*|"
+            r"\d+(?:K|HZ|GHZ|MHZ|FPS|BITS?|V|VOLTS?|P|HDMI\d*|USB\d*))",
+            candidate,
+        ):
+            continue
+        if re.fullmatch(r"20[1-3]\d", compact):
+            continue
+        valid.append((len(compact), position, candidate))
+    if len(valid) != 1:
+        return ""
+    return valid[0][2]
+
+
+def preferred_magalu_sku(line, reference, model, title):
+    """Apply the retailer/product-line SKU priority in one shared place."""
+    if str(line or "").upper() == "TV":
+        title_model = high_confidence_tv_model_number_from_text(title)
+        return title_model or reference or model
+    return reference or model or appliance_model_number_from_text(title)
+
+
 def model_year_from_text(text):
     years = [int(item) for item in re.findall(r"\b(20[1-3]\d)\b", text)]
     return str(max(years)) if years else ""
@@ -1716,9 +1792,7 @@ def _clean_magalu_ref_refrigerator_type(value):
     return text if valid else ""
 
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):
-    # factsheet can be empty (no referencia/modelo) for some listings; fall back to
-    # the model embedded in the title.
-    return reference or model or appliance_model_number_from_text(item.get("title"))
+    return preferred_magalu_sku(line, reference, model, item.get("title"))
 
 def _magalu_first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []

@@ -38,6 +38,7 @@ from seda.step08_detail_enrichment import (
     _relevant_audited_fields,
     _resume_prefix,
     _run_parallel,
+    _write_detail_traces,
 )
 from seda.step14_db_load import _db_value
 from seda.step15_final_output import (
@@ -2444,15 +2445,51 @@ class FieldPipelineContractTests(unittest.TestCase):
             def wait(self):
                 return 0
 
+        worker_envs = []
+
         def fake_popen(_command, env):
+            worker_envs.append(dict(env))
             start = int(env["SEDA_DETAIL_SKIP"])
             end = int(env["SEDA_DETAIL_LIMIT"])
             write_csv(env["SEDA_DETAIL_OUTPUT_CSV"], rows[start:end])
+            trace_root = Path(env["SEDA_DETAIL_OUTPUT_CSV"]).resolve().parent
+            with patch.dict(
+                os.environ,
+                {
+                    "SEDA_DETAIL_TRACE": env["SEDA_DETAIL_TRACE"],
+                    "SEDA_DETAIL_TRACE_TAG": env["SEDA_DETAIL_TRACE_TAG"],
+                    "SEDA_DETAIL_RUN_TOKEN": env["SEDA_DETAIL_RUN_TOKEN"],
+                    "SEDA_DETAIL_WORKER_ID": env["SEDA_DETAIL_WORKER_ID"],
+                },
+            ):
+                _write_detail_traces(
+                    trace_root,
+                    [
+                        {
+                            "row_index": index + 1,
+                            "run_token": env["SEDA_DETAIL_RUN_TOKEN"],
+                            "worker_id": env["SEDA_DETAIL_WORKER_ID"],
+                            "item": rows[index]["item"],
+                            "subcall": "detail_graphql",
+                            "operation": "itemQuery",
+                            "attempt": 1,
+                            "status_code": 200,
+                        }
+                        for index in range(start, end)
+                    ],
+                    [],
+                )
             return SuccessfulProcess()
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "final_output_enriched.csv"
-            with patch.dict(os.environ, {"SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS": "0"}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS": "0",
+                    "SEDA_DETAIL_TRACE": "1",
+                },
+            ), patch(
                 "seda.step08_detail_enrichment.subprocess.Popen",
                 side_effect=fake_popen,
             ):
@@ -2461,6 +2498,20 @@ class FieldPipelineContractTests(unittest.TestCase):
                 saved = list(csv.DictReader(handle))
             self.assertEqual([row["product_url"] for row in saved], [row["product_url"] for row in rows])
             self.assertEqual(list(Path(directory).glob("_detail_part_*.csv")), [])
+            self.assertEqual(len(worker_envs), 2)
+            self.assertEqual({env["SEDA_DETAIL_TOTAL_ROWS"] for env in worker_envs}, {"5"})
+            self.assertEqual({env["SEDA_DETAIL_TRACE"] for env in worker_envs}, {"1"})
+            self.assertEqual(len({env["SEDA_DETAIL_RUN_TOKEN"] for env in worker_envs}), 1)
+            self.assertEqual(len({env["SEDA_DETAIL_TRACE_TAG"] for env in worker_envs}), 2)
+            trace_dir = Path(directory) / "detail" / "trace"
+            with (trace_dir / "subcall_trace.csv").open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as handle:
+                merged_trace = list(csv.DictReader(handle))
+            self.assertEqual([row["row_index"] for row in merged_trace], ["1", "2", "3", "4", "5"])
+            self.assertEqual([row["item"] for row in merged_trace], ["0", "1", "2", "3", "4"])
+            self.assertEqual(list(trace_dir.glob("subcall_trace_*_w*.csv")), [])
+            self.assertEqual(list(trace_dir.glob("magalu_review_page_trace_*_w*.csv")), [])
 
     def test_parallel_failure_does_not_replace_existing_output(self):
         rows = [{"retailer": "Magalu", "item": "new", "product_url": "https://example/p/new"}]
@@ -2471,12 +2522,39 @@ class FieldPipelineContractTests(unittest.TestCase):
 
         def fake_popen(_command, env):
             write_csv(env["SEDA_DETAIL_OUTPUT_CSV"], rows)
+            trace_root = Path(env["SEDA_DETAIL_OUTPUT_CSV"]).resolve().parent
+            with patch.dict(
+                os.environ,
+                {
+                    "SEDA_DETAIL_TRACE": env["SEDA_DETAIL_TRACE"],
+                    "SEDA_DETAIL_TRACE_TAG": env["SEDA_DETAIL_TRACE_TAG"],
+                    "SEDA_DETAIL_RUN_TOKEN": env["SEDA_DETAIL_RUN_TOKEN"],
+                    "SEDA_DETAIL_WORKER_ID": env["SEDA_DETAIL_WORKER_ID"],
+                },
+            ):
+                _write_detail_traces(
+                    trace_root,
+                    [{
+                        "row_index": 1,
+                        "run_token": env["SEDA_DETAIL_RUN_TOKEN"],
+                        "worker_id": env["SEDA_DETAIL_WORKER_ID"],
+                        "item": "new",
+                        "subcall": "detail_graphql",
+                    }],
+                    [],
+                )
             return FailedProcess()
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "final_output_enriched.csv"
             write_csv(output, [{"retailer": "Magalu", "item": "old", "product_url": "https://example/p/old"}])
-            with patch.dict(os.environ, {"SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS": "0"}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS": "0",
+                    "SEDA_DETAIL_TRACE": "1",
+                },
+            ), patch(
                 "seda.step08_detail_enrichment.subprocess.Popen",
                 side_effect=fake_popen,
             ):
@@ -2485,6 +2563,9 @@ class FieldPipelineContractTests(unittest.TestCase):
             with output.open("r", encoding="utf-8-sig", newline="") as handle:
                 saved = list(csv.DictReader(handle))
             self.assertEqual(saved[0]["item"], "old")
+            trace_dir = Path(directory) / "detail" / "trace"
+            self.assertTrue((trace_dir / "subcall_trace.csv").exists())
+            self.assertEqual(len(list(trace_dir.glob("subcall_trace_*_w*.csv"))), 1)
 
     def test_parallel_partial_success_is_rejected_without_replacing_output(self):
         rows = [

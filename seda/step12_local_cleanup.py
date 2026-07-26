@@ -10,52 +10,108 @@ from .step00_config import DEFAULT_RUNS_BASE, run_root, write_json
 _RUN_DIRECTORY_RE = re.compile(r"^\d{8}$")
 _RETAILER_DIRECTORIES = ("magalu", "casas_bahia")
 _PRODUCT_LINE_DIRECTORIES = ("tv", "ref", "ldy")
+_DETAIL_TRACE_FILE_RE = re.compile(
+    r"^(?:subcall_trace|magalu_review_page_trace)(?:_[A-Za-z0-9_.-]+)?\.csv$"
+)
+_DETAIL_TRACE_TEMP_RE = re.compile(
+    r"^\.(?:subcall_trace|magalu_review_page_trace)"
+    r"(?:_[A-Za-z0-9_.-]+)?\.csv\.\d+\.\d+\.tmp$"
+)
 
 
 def main():
     current = run_root().resolve()
     output = current / "cleanup" / "manifest_local_cleanup.json"
-    enabled = os.getenv("SEDA_LOCAL_CLEANUP", "0").lower() in {"1", "true", "yes", "y"}
-    if not enabled:
-        write_json(output, {"success": True, "deleted": [], "skip_reason": "SEDA_LOCAL_CLEANUP is disabled."})
-        print(f"[seda] wrote {output}")
-        return
-
+    run_cleanup_enabled = _env_enabled("SEDA_LOCAL_CLEANUP", "0")
+    trace_cleanup_enabled = _env_enabled("SEDA_DETAIL_TRACE_CLEANUP", "1")
     deleted = []
     skipped_reparse = []
     retention_days = None
+    trace_retention_days = None
+    detail_trace_cleanup = {
+        "enabled": trace_cleanup_enabled,
+        "retention_days": None,
+        "deleted_files": [],
+        "deleted_bytes": 0,
+        "errors": [],
+    }
     skip_reason = ""
     try:
-        retention_days = int(os.getenv("SEDA_LOCAL_RETENTION_DAYS", "30"))
-        if retention_days < 0:
-            raise ValueError("SEDA_LOCAL_RETENTION_DAYS must be zero or greater")
-        cutoff = datetime.now() - timedelta(days=retention_days)
+        if run_cleanup_enabled:
+            retention_days = _retention_days("SEDA_LOCAL_RETENTION_DAYS", "30")
+        if trace_cleanup_enabled:
+            trace_retention_days = _retention_days(
+                "SEDA_DETAIL_TRACE_RETENTION_DAYS",
+                "3",
+            )
+            detail_trace_cleanup["retention_days"] = trace_retention_days
+
+        if not run_cleanup_enabled and not trace_cleanup_enabled:
+            payload = {
+                "success": True,
+                "deleted": [],
+                "skipped_reparse": [],
+                "detail_trace_cleanup": detail_trace_cleanup,
+                "skip_reason": (
+                    "SEDA_LOCAL_CLEANUP and SEDA_DETAIL_TRACE_CLEANUP are disabled."
+                ),
+            }
+            write_json(output, payload)
+            print(f"[seda] wrote {output}")
+            return
+
+        now = datetime.now()
         base = Path(os.path.abspath(DEFAULT_RUNS_BASE))
-        if _is_reparse_point(base):
-            raise RuntimeError(f"cleanup_reparse_point:{base}")
-        resolved_base = base.resolve()
-        if not _is_within(current, resolved_base):
-            skip_reason = "current_run_outside_default_cleanup_base"
-        for child in [] if skip_reason else _run_directories(base, skipped_reparse):
-            if _is_reparse_point(child):
-                _record_skipped_reparse(skipped_reparse, child)
-                continue
-            resolved = child.resolve()
-            if _paths_overlap(resolved, current):
-                continue
+        try:
+            if _is_reparse_point(base):
+                raise RuntimeError(f"cleanup_reparse_point:{base}")
+            resolved_base = base.resolve()
+            if not _is_within(current, resolved_base):
+                skip_reason = "current_run_outside_default_cleanup_base"
+            run_directories = [] if skip_reason else _run_directories(base, skipped_reparse)
+        except (OSError, RuntimeError) as exc:
+            if run_cleanup_enabled:
+                raise
+            _record_trace_cleanup_error(detail_trace_cleanup["errors"], base, exc)
+            skip_reason = "detail_trace_cleanup_discovery_failed"
+            run_directories = []
+        if run_cleanup_enabled:
+            cutoff = now - timedelta(days=retention_days)
+            for child in run_directories:
+                if _is_reparse_point(child):
+                    _record_skipped_reparse(skipped_reparse, child)
+                    continue
+                resolved = child.resolve()
+                if _paths_overlap(resolved, current):
+                    continue
+                try:
+                    modified = datetime.fromtimestamp(child.stat().st_mtime)
+                except FileNotFoundError:
+                    continue
+                if modified >= cutoff:
+                    continue
+                _remove_run_directory(child, base)
+                deleted.append(str(resolved))
+        if trace_cleanup_enabled and not skip_reason:
             try:
-                modified = datetime.fromtimestamp(child.stat().st_mtime)
-            except FileNotFoundError:
-                continue
-            if modified >= cutoff:
-                continue
-            _remove_run_directory(child, base)
-            deleted.append(str(resolved))
+                trace_result = _cleanup_detail_trace_files(
+                    run_directories,
+                    current=current,
+                    base=base,
+                    retention_days=trace_retention_days,
+                    now=now,
+                    skipped_reparse=skipped_reparse,
+                    result=detail_trace_cleanup,
+                )
+                detail_trace_cleanup.update(trace_result)
+            except (OSError, RuntimeError) as exc:
+                _record_trace_cleanup_error(detail_trace_cleanup["errors"], base, exc)
     except Exception as exc:
         payload = {
             "success": False,
             "deleted": deleted,
             "skipped_reparse": skipped_reparse,
+            "detail_trace_cleanup": detail_trace_cleanup,
             "error": f"{type(exc).__name__}:{exc}",
         }
         if retention_days is not None:
@@ -66,12 +122,147 @@ def main():
         "success": True,
         "deleted": deleted,
         "skipped_reparse": skipped_reparse,
-        "retention_days": retention_days,
+        "detail_trace_cleanup": detail_trace_cleanup,
     }
+    if retention_days is not None:
+        payload["retention_days"] = retention_days
+    if not run_cleanup_enabled:
+        payload["run_cleanup_skip_reason"] = "SEDA_LOCAL_CLEANUP is disabled."
     if skip_reason:
         payload["skip_reason"] = skip_reason
     write_json(output, payload)
     print(f"[seda] wrote {output}")
+
+
+def _env_enabled(name, default):
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "y"}
+
+
+def _retention_days(name, default):
+    value = int(os.getenv(name, default))
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater")
+    return value
+
+
+def _cleanup_detail_trace_files(
+    run_directories,
+    current,
+    base,
+    retention_days,
+    now=None,
+    skipped_reparse=None,
+    result=None,
+):
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=retention_days)
+    cutoff_date = cutoff.date()
+    result = result if result is not None else {}
+    deleted_files = result.setdefault("deleted_files", [])
+    result.setdefault("deleted_bytes", 0)
+    errors = result.setdefault("errors", [])
+    current = Path(current).resolve()
+    base = Path(base)
+
+    for run_directory in run_directories:
+        run_directory = Path(run_directory)
+        if not run_directory.exists() or _is_reparse_point(run_directory):
+            if _is_reparse_point(run_directory):
+                _record_skipped_reparse(skipped_reparse, run_directory)
+            continue
+        resolved_run = run_directory.resolve()
+        if _paths_overlap(resolved_run, current):
+            continue
+        try:
+            run_date = datetime.strptime(run_directory.name, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if run_date > cutoff_date:
+            continue
+
+        trace_directory = run_directory / "detail" / "trace"
+        reparse_point = _ancestry_reparse_point(trace_directory, base)
+        if reparse_point is not None:
+            _record_skipped_reparse(skipped_reparse, reparse_point)
+            continue
+        if not trace_directory.is_dir():
+            continue
+        try:
+            children = list(trace_directory.iterdir())
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _record_trace_cleanup_error(errors, trace_directory, exc)
+            continue
+        if any(_is_reparse_point(path) for path in children):
+            for path in children:
+                if _is_reparse_point(path):
+                    _record_skipped_reparse(skipped_reparse, path)
+            continue
+
+        trace_files = [
+            path
+            for path in children
+            if path.is_file() and _is_detail_trace_file(path.name)
+        ]
+        if not trace_files:
+            continue
+        trace_stats = []
+        stat_failed = False
+        for path in trace_files:
+            try:
+                trace_stats.append((path, path.stat()))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                _record_trace_cleanup_error(errors, path, exc)
+                stat_failed = True
+        if stat_failed:
+            continue
+        if not trace_stats:
+            continue
+        latest_modified = max(
+            datetime.fromtimestamp(file_stat.st_mtime)
+            for _path, file_stat in trace_stats
+        )
+        if latest_modified > cutoff:
+            continue
+
+        for path, file_stat in trace_stats:
+            try:
+                _assert_non_reparse_ancestry(path, base)
+                resolved_path = path.resolve()
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError) as exc:
+                _record_trace_cleanup_error(errors, path, exc)
+                continue
+            deleted_files.append(str(resolved_path))
+            result["deleted_bytes"] += file_stat.st_size
+
+    return {
+        "deleted_files": deleted_files,
+        "deleted_bytes": result["deleted_bytes"],
+        "errors": errors,
+    }
+
+
+def _record_trace_cleanup_error(errors, path, exc):
+    errors.append(
+        {
+            "path": str(path),
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+    )
+
+
+def _is_detail_trace_file(name):
+    value = str(name or "")
+    return bool(
+        _DETAIL_TRACE_FILE_RE.fullmatch(value)
+        or _DETAIL_TRACE_TEMP_RE.fullmatch(value)
+    )
 
 
 def _run_directories(base, skipped_reparse=None):

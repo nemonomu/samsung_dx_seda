@@ -5,11 +5,11 @@ import time
 import requests
 
 from ..parsers import (
-    appliance_model_number_from_text,
     clean_text,
     compact_json,
     format_brl,
     ldy_color_from_text,
+    preferred_magalu_sku,
 )
 from ..step00_config import product_line
 from .field_extraction import extract_fields as extract_semantic_fields
@@ -427,6 +427,13 @@ def _post(payload, timeout, trace, label, context_url=None):
         data = _post_browser_graphql(payload, timeout, trace, label, context_url=context_url)
         if data is not None:
             return data
+        if os.getenv("SEDA_MAGALU_BROWSER_GRAPHQL_REQUESTS_FALLBACK", "0").lower() in {
+            "0",
+            "false",
+            "no",
+            "n",
+        }:
+            return {}
 
     retries = int(os.getenv("SEDA_MAGALU_DETAIL_RETRIES", "0"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_DETAIL_RETRY_SLEEP_SECONDS", "3.0"))
@@ -454,9 +461,13 @@ def _post(payload, timeout, trace, label, context_url=None):
         except ValueError:
             trace_item["error"] = "invalid_json"
             continue
-        if data.get("errors"):
-            trace_item["error"] = "graphql_errors"
-            trace_item["errors"] = data.get("errors")
+        semantic_error = _graphql_payload_error(data, label)
+        if semantic_error:
+            trace_item["error"] = semantic_error
+            if isinstance(data, dict) and data.get("errors"):
+                trace_item["errors"] = data.get("errors")
+            if response.text:
+                trace_item["response_preview"] = response.text[:500]
             continue
         return data
     return {}
@@ -470,21 +481,49 @@ def _post_browser_graphql(payload, timeout, trace, label, context_url=None):
         trace.append({"label": label, "attempt": 1, "method": "browser_graphql", "status_code": 0, "error": f"{type(exc).__name__}: {exc}"})
         return None
 
-    trace_item = {
-        "label": label,
-        "attempt": 1,
-        "method": "browser_graphql",
-        "status_code": result.get("status_code", 0),
-        "length": len(result.get("text") or ""),
-    }
-    trace.append(trace_item)
+    browser_trace = result.get("trace") or [result]
+    for browser_item in browser_trace:
+        trace_item = {
+            "label": label,
+            "operation": browser_item.get("operation") or payload.get("operationName", ""),
+            "attempt": browser_item.get("attempt", 1),
+            "method": "browser_graphql",
+            "status_code": browser_item.get("status_code", result.get("status_code", 0)),
+            "length": browser_item.get("length", len(result.get("text") or "")),
+            "item_present": browser_item.get("item_present", ""),
+        }
+        if browser_item.get("error"):
+            trace_item["error"] = browser_item["error"]
+        graphql_errors = browser_item.get("graphql_errors") or browser_item.get("errors")
+        if graphql_errors:
+            trace_item["errors"] = graphql_errors
+        if browser_item.get("response_preview"):
+            trace_item["response_preview"] = browser_item["response_preview"]
+        trace.append(trace_item)
     data = result.get("data") or {}
-    if result.get("status_code") == 200 and data and not data.get("errors"):
+    semantic_error = _graphql_payload_error(data, label)
+    if result.get("status_code") == 200 and data and not semantic_error and not result.get("error"):
         return data
-    trace_item["error"] = result.get("error") or ("graphql_errors" if data.get("errors") else "non_json_or_blocked")
-    if data.get("errors"):
-        trace_item["errors"] = data.get("errors")
+    if trace:
+        trace_item = trace[-1]
+        trace_item["error"] = result.get("error") or semantic_error or "non_json_or_blocked"
+        if isinstance(data, dict) and data.get("errors"):
+            trace_item["errors"] = data.get("errors")
+        if result.get("text") and not trace_item.get("response_preview"):
+            trace_item["response_preview"] = result["text"][:500]
     return None
+
+
+def _graphql_payload_error(data, label):
+    if not isinstance(data, dict):
+        return "invalid_json"
+    if data.get("errors"):
+        return "graphql_errors"
+    if label == "item":
+        response_data = data.get("data")
+        if not isinstance(response_data, dict) or not response_data.get("item"):
+            return "graphql_item_missing"
+    return ""
 
 def _browser_context_label(label):
     label = str(label or "")
@@ -607,9 +646,7 @@ def _clean_ref_refrigerator_type(value):
     return text if valid else ""
 
 def _sku_for_product_line(line, reference, model, item):
-    # Some listings return an empty factsheet (no referencia/modelo) even on a BR IP;
-    # the model is still present in the title, so fall back to extracting it there.
-    return reference or model or appliance_model_number_from_text(item.get("title"))
+    return preferred_magalu_sku(line, reference, model, item.get("title"))
 
 def _first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []

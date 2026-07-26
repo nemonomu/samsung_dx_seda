@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -31,6 +32,7 @@ from .parsers import (
     clean_text,
     compact_json,
     extract_next_data,
+    high_confidence_tv_model_number_from_text,
     parse_detail,
     remove_accents,
     sku_from_url,
@@ -51,12 +53,15 @@ from .transport import fetch_url, is_blocked_html
 
 SUBCALL_TRACE_COLUMNS = [
     "row_index",
+    "run_token",
+    "worker_id",
     "retailer",
     "item",
     "sku",
     "product_url",
     "subcall",
     "label",
+    "operation",
     "page",
     "attempt",
     "method",
@@ -64,12 +69,17 @@ SUBCALL_TRACE_COLUMNS = [
     "status_code",
     "length",
     "has_next_data",
+    "item_present",
     "error",
+    "graphql_errors",
+    "response_preview",
     "detail",
 ]
 
 REVIEW_PAGE_TRACE_COLUMNS = [
     "row_index",
+    "run_token",
+    "worker_id",
     "retailer",
     "item",
     "sku",
@@ -192,6 +202,8 @@ def _trace_enabled():
 def _trace_row_base(row, row_index, product_url):
     return {
         "row_index": row_index,
+        "run_token": os.getenv("SEDA_DETAIL_RUN_TOKEN", ""),
+        "worker_id": os.getenv("SEDA_DETAIL_WORKER_ID", ""),
         "retailer": row.get("retailer", ""),
         "item": row.get("item", ""),
         "sku": row.get("sku", ""),
@@ -218,6 +230,7 @@ def _record_subcall(trace_rows, row, row_index, product_url, subcall, **values):
         {
             "subcall": subcall,
             "label": values.get("label", ""),
+            "operation": values.get("operation", ""),
             "page": values.get("page", ""),
             "attempt": values.get("attempt", ""),
             "method": values.get("method", ""),
@@ -225,7 +238,10 @@ def _record_subcall(trace_rows, row, row_index, product_url, subcall, **values):
             "status_code": values.get("status_code", ""),
             "length": values.get("length", ""),
             "has_next_data": values.get("has_next_data", ""),
+            "item_present": values.get("item_present", ""),
             "error": _compact_trace_value(values.get("error", "")),
+            "graphql_errors": _compact_trace_value(values.get("graphql_errors", "")),
+            "response_preview": _compact_trace_value(values.get("response_preview", "")),
             "detail": _compact_trace_value(values.get("detail", "")),
         }
     )
@@ -265,13 +281,17 @@ def _record_result_trace(trace_rows, row, row_index, product_url, subcall, resul
             product_url,
             subcall,
             label=item.get("label", ""),
+            operation=item.get("operation", ""),
             page=item.get("page", ""),
             attempt=item.get("attempt", ""),
             method=item.get("method", ""),
             success=item_success,
             status_code=item.get("status_code", ""),
             length=item.get("length", ""),
+            item_present=item.get("item_present", ""),
             error=item.get("error", ""),
+            graphql_errors=item.get("errors", item.get("graphql_errors", "")),
+            response_preview=item.get("response_preview", ""),
             detail=item.get("errors", f"{detail}; overall_success:{int(overall_success)}" if detail else f"overall_success:{int(overall_success)}"),
         )
 
@@ -300,19 +320,90 @@ def _record_review_page_trace(trace_rows, row, row_index, product_url, review_ur
 
 def _write_trace_csv(path, rows, columns):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({column: row.get(column, "") for column in columns})
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({column: row.get(column, "") for column in columns})
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _detail_trace_path(root, stem, tag=None):
+    if tag is None:
+        tag = os.getenv("SEDA_DETAIL_TRACE_TAG", "").strip()
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(tag or "")).strip("._")
+    suffix = f"_{safe_tag}" if safe_tag else ""
+    return root / "detail" / "trace" / f"{stem}{suffix}.csv"
 
 
 def _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows):
     if not _trace_enabled():
         return
-    trace_dir = root / "detail" / "trace"
-    _write_trace_csv(trace_dir / "subcall_trace.csv", subcall_trace_rows, SUBCALL_TRACE_COLUMNS)
-    _write_trace_csv(trace_dir / "magalu_review_page_trace.csv", review_page_trace_rows, REVIEW_PAGE_TRACE_COLUMNS)
+    _write_trace_csv(_detail_trace_path(root, "subcall_trace"), subcall_trace_rows, SUBCALL_TRACE_COLUMNS)
+    _write_trace_csv(
+        _detail_trace_path(root, "magalu_review_page_trace"),
+        review_page_trace_rows,
+        REVIEW_PAGE_TRACE_COLUMNS,
+    )
+
+
+def _merge_parallel_detail_traces(root, trace_tags):
+    if not _trace_enabled():
+        return
+    subcall_rows = []
+    review_rows = []
+    subcall_sources = 0
+    review_sources = 0
+    missing = []
+    for tag in trace_tags:
+        subcall_path = _detail_trace_path(root, "subcall_trace", tag=tag)
+        review_path = _detail_trace_path(root, "magalu_review_page_trace", tag=tag)
+        if subcall_path.exists():
+            subcall_sources += 1
+            subcall_rows.extend(read_csv(str(subcall_path)))
+        else:
+            missing.append(str(subcall_path))
+        if review_path.exists():
+            review_sources += 1
+            review_rows.extend(read_csv(str(review_path)))
+        else:
+            missing.append(str(review_path))
+    if subcall_sources:
+        _write_trace_csv(_detail_trace_path(root, "subcall_trace", tag=""), subcall_rows, SUBCALL_TRACE_COLUMNS)
+    if review_sources:
+        _write_trace_csv(
+            _detail_trace_path(root, "magalu_review_page_trace", tag=""),
+            review_rows,
+            REVIEW_PAGE_TRACE_COLUMNS,
+        )
+    if missing:
+        print(f"[seda] detail trace warning missing={len(missing)}", flush=True)
+
+
+def _remove_parallel_detail_trace_parts(root, trace_tags):
+    if not _trace_enabled():
+        return
+    for tag in trace_tags:
+        for stem in ("subcall_trace", "magalu_review_page_trace"):
+            try:
+                _detail_trace_path(root, stem, tag=tag).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(
+                    f"[seda] detail trace cleanup warning path="
+                    f"{_detail_trace_path(root, stem, tag=tag)} error={exc}",
+                    flush=True,
+                )
 
 
 def _magalu_review_target(row):
@@ -683,18 +774,24 @@ def _metric_text(value):
     return f"{number:g}"
 
 
-def _magalu_graphql_detail(row, product_url, trace_rows=None, row_index=""):
+def _magalu_graphql_detail(
+    row,
+    product_url,
+    trace_rows=None,
+    row_index="",
+    trace_subcall="detail_graphql",
+):
     if row.get("retailer") != "Magalu":
         return None
     if os.getenv("SEDA_MAGALU_DETAIL_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
-        _record_subcall(trace_rows, row, row_index, product_url, "detail_graphql", success=False, error="disabled")
+        _record_subcall(trace_rows, row, row_index, product_url, trace_subcall, success=False, error="disabled")
         return None
 
     from .magalu.detail_api import fetch_detail
 
     item_id = sku_from_url(product_url) or row.get("item") or row.get("sku")
     result = fetch_detail(item_id, seller_id=_magalu_seller_id(row, product_url), context_url=product_url)
-    _record_result_trace(trace_rows, row, row_index, product_url, "detail_graphql", result, detail=f"item_id:{item_id}")
+    _record_result_trace(trace_rows, row, row_index, product_url, trace_subcall, result, detail=f"item_id:{item_id}")
     if not result.get("success"):
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"detail_graphql_failed:{result.get('error','unknown')}")
         return result
@@ -851,30 +948,82 @@ def _magalu_seller_id(row, product_url=""):
 
 
 def _needs_magalu_detail_retry(row):
-    # a blocked/failed item query leaves sku (and the factsheet-derived specs) blank;
-    # a successful query almost always yields a sku (factsheet or title fallback).
-    return row.get("retailer") == "Magalu" and not (row.get("sku") or "").strip()
+    if row.get("retailer") != "Magalu":
+        return False
+    for token in reversed(str(row.get("parse_status") or "").split("+")):
+        if token == "detail_item_graphql":
+            return False
+        if token == "detail_graphql_failed:item_query_failed":
+            return True
+        if token.startswith("detail_graphql_failed:"):
+            return False
+    return not (row.get("sku") or "").strip()
 
 
-def _retry_magalu_detail_blanks(row, product_url):
+def _has_real_magalu_sku(row):
+    sku = str(row.get("sku") or "").strip()
+    if not sku:
+        return False
+    item_values = {
+        str(row.get("item") or "").strip(),
+        sku_from_url(row.get("product_url", "")),
+    }
+    return sku not in {value for value in item_values if value}
+
+
+def _backfill_magalu_tv_sku_from_title(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    if row.get("retailer") != "Magalu" or line != "TV":
+        return False
+    item_id = sku_from_url(row.get("product_url", "")) or str(row.get("item") or "").strip()
+    current_sku = str(row.get("sku") or "").strip()
+    if current_sku and current_sku not in {item_id, str(row.get("item") or "").strip()}:
+        return False
+    title_sku = high_confidence_tv_model_number_from_text(row.get("retailer_sku_name", ""))
+    if not title_sku:
+        return False
+    row["sku"] = title_sku
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        "sku_title_fallback_after_detail_retry",
+    )
+    return True
+
+
+def _retry_magalu_detail_blanks(row, product_url, trace_rows=None, row_index=""):
     if not _needs_magalu_detail_retry(row):
         return False
-    attempts = int(os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY_ATTEMPTS", "2"))
+    attempts = int(os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY_ATTEMPTS", "1"))
     for attempt in range(1, attempts + 1):
-        _magalu_graphql_detail(row, product_url)  # re-fetches item and merges into row
-        if (row.get("sku") or "").strip():
+        result = _magalu_graphql_detail(
+            row,
+            product_url,
+            trace_rows=trace_rows,
+            row_index=row_index,
+            trace_subcall="detail_graphql_retry",
+        )
+        if result and result.get("success"):
             row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_blank_retry")
             return True
     row["parse_status"] = _append_token(row.get("parse_status", ""), "detail_blank_retry_failed")
     return False
 
 
-def _backfill_magalu_detail_blanks(rows, output, checkpoint_every=25):
-    """Second pass: re-fetch items whose item query failed the first time (blank sku),
-    recovering sku/model_year/energy that a transient block/crash dropped."""
+def _backfill_magalu_detail_blanks(
+    rows,
+    output,
+    checkpoint_every=25,
+    trace_rows=None,
+    row_index_offset=0,
+):
+    """Second pass: re-fetch items whose item query failed the first time."""
     if os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY", "1").lower() in {"0", "false", "no", "n"}:
         return rows
-    candidates = [row for row in rows if _needs_magalu_detail_retry(row)]
+    candidates = [
+        (row_index, row)
+        for row_index, row in enumerate(rows, start=row_index_offset + 1)
+        if _needs_magalu_detail_retry(row)
+    ]
     limit = int(os.getenv("SEDA_MAGALU_DETAIL_BLANK_RETRY_LIMIT", "0"))
     if limit:
         candidates = candidates[:limit]
@@ -883,14 +1032,22 @@ def _backfill_magalu_detail_blanks(rows, output, checkpoint_every=25):
         return rows
     print(f"[seda] detail blank retry candidates={total}", flush=True)
     updated = 0
-    for index, row in enumerate(candidates, start=1):
-        changed = _retry_magalu_detail_blanks(row, row.get("product_url", ""))
-        recovered = bool(changed and (row.get("sku") or "").strip())
+    for index, (row_index, row) in enumerate(candidates, start=1):
+        before_sku = str(row.get("sku") or "").strip()
+        changed = _retry_magalu_detail_blanks(
+            row,
+            row.get("product_url", ""),
+            trace_rows=trace_rows,
+            row_index=row_index,
+        )
+        title_recovered = False if changed else _backfill_magalu_tv_sku_from_title(row)
+        recovered = _has_real_magalu_sku(row) and str(row.get("sku") or "").strip() != before_sku
         if recovered:
             updated += 1
         print(
             f"[seda] detail retry {index}/{total} item={_safe_log_value(row.get('item'))} "
-            f"sku={_safe_log_value(row.get('sku'))} updated={int(recovered)}",
+            f"sku={_safe_log_value(row.get('sku'))} query_success={int(bool(changed))} "
+            f"title_fallback={int(bool(title_recovered))} updated={int(recovered)}",
             flush=True,
         )
         if checkpoint_every and index % checkpoint_every == 0:
@@ -1407,6 +1564,30 @@ def _is_expected_magalu_item_query_block(result):
     if not trace:
         return False
     for trace_item in trace:
+        if str(trace_item.get("method") or "") != "browser_graphql":
+            continue
+        try:
+            status_code = int(trace_item.get("status_code") or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        error = str(trace_item.get("error") or "").lower()
+        if status_code in {401, 403, 429} or any(
+            marker in error
+            for marker in ("blocked", "invalid_json", "non_json_or_blocked")
+        ):
+            return False
+    for trace_item in trace:
+        if (
+            str(trace_item.get("label") or "") == "item"
+            and str(trace_item.get("method") or "") == "browser_graphql"
+            and str(trace_item.get("error") or "") == "graphql_item_missing"
+        ):
+            try:
+                if int(trace_item.get("status_code") or 0) == 200:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    for trace_item in trace:
         label = str(trace_item.get("label") or "")
         method = str(trace_item.get("method") or "")
         if label != "item" or method != "requests":
@@ -1496,7 +1677,7 @@ def _resume_prefix(output, skip, is_worker, expected_rows, target_path=None):
     return prefix
 
 
-def _run_parallel(workers, rows, output):
+def _run_parallel(workers, rows, output, root=None):
     """Fan step08 out across N child processes, each with its own browser, then merge.
 
     Detail is dominated by serial browser GraphQL round-trips; a single browser page
@@ -1504,6 +1685,11 @@ def _run_parallel(workers, rows, output):
     (distinct browser port + profile each) gives ~N x throughput. Merge preserves
     target order because the slices are contiguous.
     """
+    if root is None:
+        output_parent = Path(output).resolve().parent
+        root = output_parent.parent if output_parent.name.lower() == "output" else output_parent
+    else:
+        root = Path(root)
     total = len(rows)
     if total == 0:
         write_csv(output, [], columns=OUTPUT_COLUMNS)
@@ -1516,6 +1702,7 @@ def _run_parallel(workers, rows, output):
     stagger = float(os.getenv("SEDA_MAGALU_DETAIL_WORKER_STAGGER_SECONDS", "4"))
     out_dir = os.path.dirname(output) or "."
     run_token = f"{os.getpid()}_{time.time_ns()}"
+    trace_enabled = _trace_enabled()
     parts, procs = [], []
     for i in range(workers):
         start = i * slice_size
@@ -1530,31 +1717,35 @@ def _run_parallel(workers, rows, output):
         env = dict(os.environ)
         env["SEDA_DETAIL_RUN_TOKEN"] = run_token
         env["SEDA_DETAIL_WORKER_ID"] = str(i)
+        trace_tag = f"{run_token}_w{i}"
+        env["SEDA_DETAIL_TRACE_TAG"] = trace_tag
         env["SEDA_MAGALU_DETAIL_WORKERS"] = "1"  # child stays serial (also guarded by WORKER_ID)
         env["SEDA_DETAIL_SKIP"] = str(start)
         env["SEDA_DETAIL_LIMIT"] = str(end)
+        env["SEDA_DETAIL_TOTAL_ROWS"] = str(total)
         env["SEDA_DETAIL_OUTPUT_CSV"] = part
         env["SEDA_MAGALU_BROWSER_LOCAL_PORT"] = str(base_port + i)
         env["SEDA_MAGALU_BROWSER_PROFILE"] = f"{profile_base}_w{i}"
-        env["SEDA_DETAIL_TRACE"] = "0"  # workers share run_root; avoid clobbering trace files
+        env["SEDA_DETAIL_TRACE"] = "1" if trace_enabled else "0"
         env.pop("SEDA_MAGALU_BROWSER_ADDRESS", None)  # each worker launches its own browser
-        parts.append((i, start, end, part))
+        parts.append((i, start, end, part, trace_tag))
         print(f"[seda] detail worker {i}: rows [{start}:{end}) port={base_port + i} -> {part}", flush=True)
         procs.append(subprocess.Popen([sys.executable, "-m", "seda.magalu.step08_detail_enrichment"], env=env))
         if stagger > 0 and i < workers - 1:
             time.sleep(stagger)  # stagger browser launches to avoid startup contention
     failed = []
-    for (i, _s, _e, _p), proc in zip(parts, procs):
+    for (i, _s, _e, _p, _tag), proc in zip(parts, procs):
         return_code = proc.wait()
         if return_code != 0:
             failed.append((i, return_code))
+    _merge_parallel_detail_traces(root, [tag for _i, _s, _e, _p, tag in parts])
     if failed:
         detail = ",".join(f"worker={i}:exit={return_code}" for i, return_code in failed)
         raise RuntimeError(f"detail_parallel_worker_failed:{detail}")
 
     merged = []
     invalid = []
-    for (i, start, end, part) in parts:
+    for (i, start, end, part, _tag) in parts:
         if not os.path.exists(part):
             invalid.append(f"worker={i}:missing_output")
             continue
@@ -1574,11 +1765,12 @@ def _run_parallel(workers, rows, output):
         raise RuntimeError(f"detail_parallel_merged_count:{len(merged)}!={total}")
 
     write_csv(output, merged, columns=OUTPUT_COLUMNS)
-    for _i, _start, _end, part in parts:
+    for _i, _start, _end, part, _tag in parts:
         try:
             os.remove(part)
         except OSError:
             pass
+    _remove_parallel_detail_trace_parts(root, [tag for _i, _s, _e, _p, tag in parts])
     print(f"[seda] wrote {output} rows={len(merged)}/{total} (parallel workers={workers})", flush=True)
 
 
@@ -1603,7 +1795,7 @@ def main():
     if is_magalu and workers > 1 and not is_worker and not is_resume:
         # fan out across N child processes (each its own browser), then merge.
         # Magalu-only; skipped when resuming (SEDA_DETAIL_SKIP) so resume stays serial.
-        _run_parallel(workers, rows, output)
+        _run_parallel(workers, rows, output, root=root)
         return
     skip = int(os.getenv("SEDA_DETAIL_SKIP", "0"))
     enriched = _resume_prefix(
@@ -1617,14 +1809,20 @@ def main():
     review_page_trace_rows = []
     if skip:
         rows = rows[skip:]
-    total_rows = len(enriched) + len(rows)
+    row_index_offset = skip if is_worker else len(enriched)
+    total_rows = int(
+        os.getenv(
+            "SEDA_DETAIL_TOTAL_ROWS",
+            str(row_index_offset + len(rows)),
+        )
+    )
     checkpoint_every = int(os.getenv("SEDA_DETAIL_CHECKPOINT_EVERY", "25"))
     fallback_fetch = os.getenv("SEDA_DETAIL_FALLBACK_FETCH", "1").lower() not in {"0", "false", "no", "n"}
     magalu_detail_blocked_streak = 0
     magalu_review_blocked_streak = 0
     magalu_detail_abort_threshold = int(os.getenv("SEDA_MAGALU_DETAIL_403_ABORT_THRESHOLD", "5"))
     magalu_review_abort_threshold = int(os.getenv("SEDA_MAGALU_REVIEW_403_ABORT_THRESHOLD", "5"))
-    for index, row in enumerate(rows, start=len(enriched) + 1):
+    for index, row in enumerate(rows, start=row_index_offset + 1):
         url = row.get("product_url", "")
         if row.get("retailer") == "Magalu" and not row.get("seller_id"):
             row["seller_id"] = _magalu_seller_id(row, url)
@@ -1722,7 +1920,13 @@ def main():
             write_csv(output, enriched, columns=OUTPUT_COLUMNS)
             _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)
             print(f"[seda] checkpoint {output} rows={len(enriched)}", flush=True)
-    enriched = _backfill_magalu_detail_blanks(enriched, output, checkpoint_every=checkpoint_every)
+    enriched = _backfill_magalu_detail_blanks(
+        enriched,
+        output,
+        checkpoint_every=checkpoint_every,
+        trace_rows=subcall_trace_rows,
+        row_index_offset=skip if is_worker else 0,
+    )
     enriched = _backfill_magalu_shipping_blanks(enriched, output, checkpoint_every=checkpoint_every)
     write_csv(output, enriched, columns=OUTPUT_COLUMNS)
     _write_detail_traces(root, subcall_trace_rows, review_page_trace_rows)

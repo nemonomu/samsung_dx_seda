@@ -112,6 +112,47 @@ class DbRetailerReplaceTests(unittest.TestCase):
         self.assertEqual(manifest["mode"], "append")
         self.assertEqual(manifest["deleted"], 0)
 
+    def test_magalu_recovered_sku_and_blank_reach_insert_values_exactly(self):
+        connection, cursor = self._db()
+        recovered = self._row("Magalu")
+        recovered.update(
+            {
+                "item": "240144500",
+                "product_url": "https://www.magazineluiza.com.br/produto/p/240144500/et/tv4k/",
+                "sku": "75P7K",
+            }
+        )
+        unresolved = self._row("Magalu")
+        unresolved.update(
+            {
+                "item": "cc2215dbaj",
+                "product_url": "https://www.magazineluiza.com.br/produto/p/cc2215dbaj/et/tv4k/",
+                "sku": "",
+            }
+        )
+        rows = [recovered, unresolved]
+        env = {
+            "SEDA_PRODUCT_LINE": "TV",
+            "SEDA_ACTIVE_RETAILER": "magalu",
+            "SEDA_DB_TRUNCATE_BEFORE_LOAD": "0",
+            "SEDA_DB_REPLACE_RETAILER_BEFORE_LOAD": "0",
+        }
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            step14_db_load, "run_root", return_value=Path("C:/fixture")
+        ), patch.object(step14_db_load, "read_csv", return_value=rows), patch.object(
+            step14_db_load, "output_table", return_value="dx_seda_tv_retail_com"
+        ), patch.object(step14_db_load, "db_connect", return_value=connection), patch.object(
+            step14_db_load, "write_json"
+        ), patch("psycopg2.extras.execute_values") as execute_values:
+            step14_db_load.main()
+
+        columns = list(rows[0].keys())
+        sku_index = columns.index("sku")
+        inserted_values = execute_values.call_args.args[2]
+        self.assertEqual(inserted_values[0][sku_index], "75P7K")
+        self.assertIsNone(inserted_values[1][sku_index])
+        cursor.execute.assert_not_called()
+
     def test_single_retailer_truncate_keeps_existing_table_wide_mode(self):
         connection, cursor = self._db()
         events = []

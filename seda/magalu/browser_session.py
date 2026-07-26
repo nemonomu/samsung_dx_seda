@@ -856,6 +856,7 @@ return (async () => {
 })()
 """
     last = {}
+    attempt_trace = []
     for attempt in range(1, attempts + 1):
         try:
             raw_result = page.run_js(script, payload_text, timeout=timeout) or "{}"
@@ -883,8 +884,13 @@ return (async () => {
                 data = json.loads(text)
             except ValueError:
                 error = error or "invalid_json"
+        status_code = result.get("status") or 0
+        semantic_error = ""
+        if not error and status_code == 200:
+            semantic_error = _graphql_semantic_error(operation, data)
+            error = semantic_error or error
         last = {
-            "status_code": result.get("status") or 0,
+            "status_code": status_code,
             "text": text,
             "data": data,
             "error": error,
@@ -892,7 +898,34 @@ return (async () => {
             "attempt": attempt,
         }
         blocked = _graphql_result_blocked(last)
-        if not blocked and last["status_code"] == 200:
+        if blocked and not error:
+            error = "blocked_response"
+        elif status_code != 200 and not error:
+            error = f"http_status_{status_code}"
+        last["error"] = error
+        graphql_errors = data.get("errors") if isinstance(data, dict) else None
+        item_present = ""
+        if operation == "itemQuery":
+            response_data = data.get("data") if isinstance(data, dict) else {}
+            item_present = int(bool((response_data or {}).get("item")))
+        trace_item = {
+            "operation": operation,
+            "attempt": attempt,
+            "method": "browser_graphql",
+            "status_code": status_code,
+            "length": len(text),
+            "error": error,
+            "item_present": item_present,
+        }
+        if graphql_errors:
+            trace_item["graphql_errors"] = graphql_errors
+        if error and text:
+            trace_item["response_preview"] = text[:500]
+        attempt_trace.append(trace_item)
+        last["trace"] = attempt_trace[:]
+        last["graphql_errors"] = graphql_errors or []
+        last["item_present"] = item_present
+        if not blocked and status_code == 200 and not error:
             return last
         if attempt < attempts:
             # recovery: on a blocked/failed attempt, escalate to navigating to the
@@ -903,6 +936,18 @@ return (async () => {
                 _restart_page("graphql_post_retry_prepare_failed")
                 page = _page_for_use("graphql_post_retry")
     return last
+
+
+def _graphql_semantic_error(operation, data):
+    if not isinstance(data, dict):
+        return "invalid_json"
+    if data.get("errors"):
+        return "graphql_errors"
+    if operation == "itemQuery":
+        response_data = data.get("data")
+        if not isinstance(response_data, dict) or not response_data.get("item"):
+            return "graphql_item_missing"
+    return ""
 
 
 def _graphql_result_blocked(result):

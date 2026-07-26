@@ -189,6 +189,22 @@ seda/.env
 The loader reads `seda/.env` first and then project-root `.env`. The `.env` file
 is ignored by `.gitignore`; do not commit it.
 
+Detail GraphQL trace cleanup is enabled by default and is independent from
+whole-run cleanup:
+
+```text
+SEDA_DETAIL_TRACE_CLEANUP=1
+SEDA_DETAIL_TRACE_RETENTION_DAYS=3
+```
+
+The `local_cleanup` step removes only recognized files under `detail/trace`
+after the whole trace bundle has been unchanged for at least 72 hours. The
+current run, raw payloads, output CSVs, and unrecognized files are preserved.
+Per-file cleanup failures are recorded in the cleanup manifest and do not fail
+the crawler batch.
+`SEDA_LOCAL_CLEANUP` continues to control whole dated-run deletion separately
+and remains disabled by default.
+
 `erd.xlsx` is also ignored by git. For a clean RDP setup, place it at:
 
 ```text
