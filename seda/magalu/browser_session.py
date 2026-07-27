@@ -8,7 +8,10 @@ import unicodedata
 from urllib.parse import parse_qs, urlparse
 
 from ..parsers import extract_next_data, magalu_next_search_is_null
-from .graphql_contract import graphql_envelope_error
+from .graphql_contract import (
+    graphql_envelope_error,
+    graphql_terminal_business_error,
+)
 
 
 _PAGE = None
@@ -828,7 +831,13 @@ def graphql_post(payload, timeout=None, context_url=None):
 
     operation = payload.get("operationName") or ""
     payload_text = json.dumps(payload, ensure_ascii=False)
-    attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
+    configured_attempts = _env_int("SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS", 2)
+    # Showcase gets one *conditional* bonus slot.  It is reachable only when
+    # two consecutive Failed-to-fetch results exhaust the configured budget
+    # and a clean-browser verification is still required.
+    loop_attempts = configured_attempts
+    if operation == "showcaseQuery" and configured_attempts >= 2:
+        loop_attempts += 1
     script = """
 return (async () => {
   try {
@@ -858,7 +867,9 @@ return (async () => {
 """
     last = {}
     attempt_trace = []
-    for attempt in range(1, attempts + 1):
+    showcase_fetch_failure_streak = 0
+    showcase_restart_attempted = False
+    for attempt in range(1, loop_attempts + 1):
         try:
             raw_result = page.run_js(script, payload_text, timeout=timeout) or "{}"
         except Exception as exc:
@@ -893,7 +904,12 @@ return (async () => {
                 error = error or "invalid_json"
         status_code = result.get("status") or 0
         semantic_error = ""
+        terminal_business_error = ""
         if not error and status_code == 200:
+            terminal_business_error = graphql_terminal_business_error(
+                operation,
+                data,
+            )
             semantic_error = _graphql_semantic_error(operation, data)
             error = semantic_error or error
         last = {
@@ -903,6 +919,7 @@ return (async () => {
             "error": error,
             "operation": operation,
             "attempt": attempt,
+            "terminal_business_error": terminal_business_error,
         }
         blocked = _graphql_result_blocked(last)
         if blocked and not error:
@@ -926,10 +943,25 @@ return (async () => {
             "error": error,
             "item_present": item_present,
         }
+        if terminal_business_error:
+            trace_item["terminal_business_error"] = terminal_business_error
         if graphql_errors:
             trace_item["graphql_errors"] = graphql_errors
         if error and text:
             trace_item["response_preview"] = text[:500]
+        showcase_failed_fetch = (
+            operation == "showcaseQuery" and _is_failed_to_fetch_error(error)
+        )
+        if showcase_failed_fetch:
+            showcase_fetch_failure_streak += 1
+        else:
+            showcase_fetch_failure_streak = 0
+        showcase_circuit_open = (
+            showcase_restart_attempted and showcase_failed_fetch
+        )
+        if showcase_circuit_open:
+            trace_item["showcase_failed_fetch_circuit_open"] = True
+            last["showcase_failed_fetch_circuit_open"] = True
         attempt_trace.append(trace_item)
         last["trace"] = attempt_trace[:]
         last["graphql_errors"] = graphql_errors or []
@@ -938,21 +970,59 @@ return (async () => {
             # Invalid/failed envelopes remain available as raw text and trace
             # previews, but must never reach operation-specific consumers.
             last["data"] = {}
+        if terminal_business_error or showcase_circuit_open:
+            return last
         if not blocked and status_code == 200 and not error:
             return last
-        if attempt < attempts:
-            # recovery: on a blocked/failed attempt, escalate to navigating to the
-            # product page (context_url) before retrying.
+        should_restart_showcase = (
+            operation == "showcaseQuery"
+            and showcase_fetch_failure_streak >= 2
+            and not showcase_restart_attempted
+        )
+        if should_restart_showcase:
+            # A JS fetch failure is returned as a status=0 result, not a Python
+            # exception, so the normal dead-page recovery cannot see it.  Restart
+            # once and spend one bounded attempt on a clean browser.  If the
+            # configured budget ended here, loop_attempts contains exactly one
+            # conditional bonus slot for this verification.
+            showcase_restart_attempted = True
+            trace_item["recovery"] = "browser_restart_after_failed_fetch"
             try:
-                page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
-            except Exception:
-                _restart_page("graphql_post_retry_prepare_failed")
-                page = _page_for_use("graphql_post_retry")
+                _restart_page("graphql_post_showcase_failed_fetch")
+                page = _page_for_use("graphql_post_showcase_retry")
+                page = _prepare_js_page(
+                    page,
+                    "graphql_post_warmup",
+                    context_url=context_url,
+                    allow_default_warmup=True,
+                )
+            except Exception as exc:
+                trace_item["recovery_error"] = f"{type(exc).__name__}: {exc}"
+                trace_item["showcase_failed_fetch_circuit_open"] = True
+                last["showcase_failed_fetch_circuit_open"] = True
+                last["trace"] = attempt_trace[:]
+                return last
+            last["trace"] = attempt_trace[:]
+            continue
+        if attempt >= configured_attempts:
+            return last
+        # recovery: on a blocked/failed attempt, escalate to navigating to the
+        # product page (context_url) before retrying.
+        try:
+            page = _prepare_js_page(page, "graphql_post_warmup", context_url=context_url, allow_default_warmup=True)
+        except Exception:
+            _restart_page("graphql_post_retry_prepare_failed")
+            page = _page_for_use("graphql_post_retry")
     return last
 
 
 def _graphql_semantic_error(operation, data):
     return graphql_envelope_error(data, require_item=operation == "itemQuery")
+
+
+def _is_failed_to_fetch_error(error):
+    normalized = re.sub(r"\s+", " ", str(error or "").strip()).casefold()
+    return normalized == "typeerror: failed to fetch"
 
 
 def _graphql_result_blocked(result):

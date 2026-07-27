@@ -253,6 +253,31 @@ def _record_subcall(trace_rows, row, row_index, product_url, subcall, **values):
     trace_rows.append(record)
 
 
+def _result_trace_detail(item, detail, overall_success):
+    if "errors" in item:
+        base = item.get("errors")
+    else:
+        base = (
+            f"{detail}; overall_success:{int(overall_success)}"
+            if detail
+            else f"overall_success:{int(overall_success)}"
+        )
+    parts = [_compact_trace_value(base)]
+    for key in (
+        "terminal_business_error",
+        "recovery",
+        "recovery_error",
+        "showcase_failed_fetch_circuit_open",
+    ):
+        value = item.get(key)
+        if value in ("", None, False):
+            continue
+        if value is True:
+            value = 1
+        parts.append(f"{key}:{_compact_trace_value(value)}")
+    return "; ".join(part for part in parts if part)
+
+
 def _record_result_trace(trace_rows, row, row_index, product_url, subcall, result, success=None, detail=""):
     if trace_rows is None:
         return
@@ -297,7 +322,7 @@ def _record_result_trace(trace_rows, row, row_index, product_url, subcall, resul
             error=item.get("error", ""),
             graphql_errors=item.get("errors", item.get("graphql_errors", "")),
             response_preview=item.get("response_preview", ""),
-            detail=item.get("errors", f"{detail}; overall_success:{int(overall_success)}" if detail else f"overall_success:{int(overall_success)}"),
+            detail=_result_trace_detail(item, detail, overall_success),
         )
 
 
@@ -1350,11 +1375,29 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
     row["parse_status"] = _append_token(row.get("parse_status", ""), "pdp_html")
 
 
-def _merge_magalu_similar(row, product_url, trace_rows=None, row_index=""):
+def _merge_magalu_similar(
+    row,
+    product_url,
+    trace_rows=None,
+    row_index="",
+    prior_error="",
+):
     if row.get("retailer") != "Magalu":
         return False
     if row.get("retailer_sku_name_similar"):
         _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=True, detail="already_has_similar")
+        return False
+    if prior_error == "showcase_failed_fetch_circuit_open":
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "similar_graphql",
+            success=False,
+            error=prior_error,
+            detail="skipped_after_detail_graphql_circuit",
+        )
         return False
     if os.getenv("SEDA_MAGALU_SIMILAR_GRAPHQL", "1").lower() in {"0", "false", "no", "n"}:
         _record_subcall(trace_rows, row, row_index, product_url, "similar_graphql", success=False, error="disabled")
@@ -2371,7 +2414,13 @@ def _run_detail_main(root, *, is_worker):
             else:
                 magalu_review_blocked_streak = 0
         _merge_magalu_pdp_html(row, url, trace_rows=subcall_trace_rows, row_index=index)
-        _merge_magalu_similar(row, url, trace_rows=subcall_trace_rows, row_index=index)
+        _merge_magalu_similar(
+            row,
+            url,
+            trace_rows=subcall_trace_rows,
+            row_index=index,
+            prior_error=(graph_result or {}).get("similar_error", ""),
+        )
         _merge_magalu_review_pages(
             row,
             url,

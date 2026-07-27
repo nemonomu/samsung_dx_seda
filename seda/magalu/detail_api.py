@@ -14,7 +14,10 @@ from ..parsers import (
 )
 from ..step00_config import product_line
 from .field_extraction import extract_fields as extract_semantic_fields
-from .graphql_contract import graphql_envelope_error
+from .graphql_contract import (
+    graphql_envelope_error,
+    graphql_terminal_business_error,
+)
 
 
 GRAPHQL_URL = "https://federation.magazineluiza.com.br/graphql"
@@ -330,12 +333,17 @@ def fetch_detail(item_id, timeout=None, seller_id=None, context_url=None):
         if shipping.get("pickup"):
             detail["pick_up_availability"] = shipping["pickup"]
         trace.extend(shipping.get("trace") or [])
+    similar_error = ""
     if os.getenv("SEDA_MAGALU_SIMILAR_GRAPHQL", "1").lower() not in {"0", "false", "no", "n"}:
         similar = fetch_similar_names(item_id, timeout=timeout, context_url=context_url)
         if similar.get("names"):
             detail["retailer_sku_name_similar"] = compact_json(similar["names"])
+        similar_error = similar.get("error") or ""
         trace.extend(similar.get("trace") or [])
-    return {"success": True, "detail": detail, "trace": trace}
+    result = {"success": True, "detail": detail, "trace": trace}
+    if similar_error:
+        result["similar_error"] = similar_error
+    return result
 
 def fetch_shipping(item, timeout=None, seller_id=None, context_url=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
@@ -377,6 +385,7 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))
     trace = []
     for place_id in _similar_place_ids():
+        trace_start = len(trace)
         payload = {
             "operationName": "showcaseQuery",
             "variables": {
@@ -393,6 +402,16 @@ def fetch_similar_names(item_id, timeout=None, context_url=None):
             "query": SHOWCASE_QUERY,
         }
         response = _post(payload, timeout, trace, label=f"showcase:{place_id}", context_url=context_url)
+        if any(
+            item.get("showcase_failed_fetch_circuit_open")
+            for item in trace[trace_start:]
+        ):
+            return {
+                "success": False,
+                "error": "showcase_failed_fetch_circuit_open",
+                "names": [],
+                "trace": trace,
+            }
         response_data = response.get("data") if isinstance(response, dict) else {}
         recommendation = (
             response_data.get("recommendation")
@@ -494,6 +513,13 @@ def _post(payload, timeout, trace, label, context_url=None):
                 trace_item["errors"] = data.get("errors")
             if response.text:
                 trace_item["response_preview"] = response.text[:500]
+            terminal_business_error = graphql_terminal_business_error(
+                payload.get("operationName") or "",
+                data,
+            )
+            if terminal_business_error:
+                trace_item["terminal_business_error"] = terminal_business_error
+                break
             continue
         return data
     return {}
@@ -525,6 +551,14 @@ def _post_browser_graphql(payload, timeout, trace, label, context_url=None):
             trace_item["errors"] = graphql_errors
         if browser_item.get("response_preview"):
             trace_item["response_preview"] = browser_item["response_preview"]
+        for key in (
+            "terminal_business_error",
+            "showcase_failed_fetch_circuit_open",
+            "recovery",
+            "recovery_error",
+        ):
+            if browser_item.get(key):
+                trace_item[key] = browser_item[key]
         trace.append(trace_item)
     data = result.get("data") or {}
     semantic_error = _graphql_payload_error(data, label)
