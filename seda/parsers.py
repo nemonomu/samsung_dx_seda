@@ -177,7 +177,7 @@ def model_number_from_text(text):
     return ""
 
 
-def high_confidence_tv_model_number_from_text(text):
+def high_confidence_tv_model_number_from_text(text, screen_size_hint=""):
     """Return a title model only when it has strong mixed alpha/numeric shape.
 
     This is intentionally stricter than ``model_number_from_text`` because it can
@@ -201,6 +201,16 @@ def high_confidence_tv_model_number_from_text(text):
         return ""
     screen_digits = re.sub(r"\D", "", screen_size_from_text(text))
     if not screen_digits:
+        hint_text = remove_accents(clean_text(screen_size_hint))
+        hint_match = re.fullmatch(
+            r'\s*(\d{2,3})(?:[.,]0+)?\s*'
+            r'(?:(?:["\u2033])|pol(?:\.|egadas?)?|in(?:ch(?:es)?)?)?\s*',
+            hint_text,
+            re.I,
+        )
+        if hint_match and is_screen_size_value(hint_text):
+            screen_digits = hint_match.group(1)
+    if not screen_digits:
         return ""
     candidates = list(re.finditer(
         r"\b(?=[A-Z0-9/-]*[A-Z])(?=[A-Z0-9/-]*\d)[A-Z0-9]+(?:[-/][A-Z0-9]+)*\b",
@@ -219,6 +229,11 @@ def high_confidence_tv_model_number_from_text(text):
         if candidate[0].isdigit() and not compact.startswith(screen_digits):
             continue
         if screen_digits not in compact:
+            continue
+        if re.fullmatch(
+            r"\d{2,3}(?:APOS|POLEGADAS?|POL|INCH(?:ES)?)",
+            compact,
+        ):
             continue
         letter_count = len(re.findall(r"[A-Z]", compact))
         has_extra_digit = bool(re.search(r"\d", compact.replace(screen_digits, "", 1)))
@@ -254,6 +269,30 @@ def high_confidence_tv_model_number_from_text(text):
     if len(valid) != 1:
         return ""
     return valid[0][2]
+
+
+def high_confidence_tv_model_number_from_url(product_url, screen_size_hint=""):
+    """Return one safe model token from the product slug before ``/p/<item>``.
+
+    The item id, category and query string are deliberately excluded. Hyphens in
+    the human-readable slug are treated as word separators, so the URL cannot be
+    returned as one synthetic SKU. Title extraction remains authoritative; this
+    helper is only for titles that omit a model still present in their own URL.
+    """
+    path_parts = [part for part in urlparse(clean_text(product_url)).path.split("/") if part]
+    try:
+        product_marker = next(
+            index for index, part in enumerate(path_parts) if part.casefold() == "p"
+        )
+    except StopIteration:
+        return ""
+    if product_marker < 1:
+        return ""
+    slug_text = path_parts[product_marker - 1].replace("-", " ")
+    return high_confidence_tv_model_number_from_text(
+        slug_text,
+        screen_size_hint=screen_size_hint,
+    )
 
 
 def preferred_magalu_sku(line, reference, model, title):

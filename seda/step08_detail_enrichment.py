@@ -33,6 +33,7 @@ from .magalu.field_extraction import (
     REF_TOTAL_LABELS as MAGALU_REF_TOTAL_LABELS,
     SCREEN_LABELS as MAGALU_SCREEN_LABELS,
     extract_fields as extract_magalu_semantic_fields,
+    is_tv_product_title as is_magalu_tv_product_title,
 )
 from .parsers import (
     _html_target_label_value_pairs,
@@ -41,6 +42,7 @@ from .parsers import (
     compact_json,
     extract_next_data,
     high_confidence_tv_model_number_from_text,
+    high_confidence_tv_model_number_from_url,
     is_obviously_non_sku_magalu_value,
     is_synthetic_magalu_sku_value,
     parse_detail,
@@ -909,13 +911,24 @@ def _merge_magalu_tv_reference_sku(row, detail, *, identity_verified):
     if not _is_magalu_tv_row(row):
         return False
     reference = str(detail.get("_magalu_factsheet_reference") or "").strip()
-    title_model = high_confidence_tv_model_number_from_text(
-        detail.get("retailer_sku_name")
-    )
+    title = detail.get("retailer_sku_name") or row.get("retailer_sku_name")
+    screen_size_hint = detail.get("screen_size") or row.get("screen_size")
+    title_model = ""
+    url_model = ""
+    if is_magalu_tv_product_title(title):
+        title_model = high_confidence_tv_model_number_from_text(
+            title,
+            screen_size_hint=screen_size_hint,
+        )
+        if not title_model:
+            url_model = high_confidence_tv_model_number_from_url(
+                row.get("product_url"),
+                screen_size_hint=screen_size_hint,
+            )
     safe_reference = (
         reference if not is_obviously_non_sku_magalu_value(reference) else ""
     )
-    candidate = title_model or safe_reference
+    candidate = title_model or url_model or safe_reference
     actual_item = str(detail.get("_detail_item_id") or "").strip().casefold()
     expected_items = {
         str(row.get("item") or "").strip().casefold(),
@@ -938,11 +951,15 @@ def _merge_magalu_tv_reference_sku(row, detail, *, identity_verified):
             )
         return False
 
-    if title_model:
-        row["sku"] = title_model
+    if title_model or url_model:
+        row["sku"] = title_model or url_model
         row["parse_status"] = _append_token(
             row.get("parse_status", ""),
-            "sku_title_high_confidence_recovered",
+            (
+                "sku_title_high_confidence_recovered"
+                if title_model
+                else "sku_url_high_confidence_recovered"
+            ),
         )
         return True
 
@@ -1233,25 +1250,63 @@ def _has_real_magalu_sku(row):
     return sku not in {value for value in item_values if value}
 
 
-def _backfill_magalu_tv_sku_from_title(row):
-    """Last-resort listing-title recovery after authoritative detail retries fail."""
+def _backfill_magalu_tv_sku_from_title(row, *, final_pass=False):
+    """Recover one unresolved TV SKU from its verified row title or product slug."""
     if not _is_magalu_tv_row(row) or not _magalu_tv_sku_is_recovery_target(row):
         return False
     row_item = str(row.get("item") or "").strip().casefold()
     url_item = str(sku_from_url(row.get("product_url", "")) or "").strip().casefold()
     if not row_item or not url_item or row_item != url_item:
         return False
-    candidate = high_confidence_tv_model_number_from_text(
-        row.get("retailer_sku_name")
+    parse_status = str(row.get("parse_status") or "").casefold()
+    if "identity_mismatch" in parse_status or "identity_conflict" in parse_status:
+        return False
+    title = row.get("retailer_sku_name")
+    if not is_magalu_tv_product_title(title):
+        return False
+    screen_size_hint = row.get("screen_size")
+    title_candidate = high_confidence_tv_model_number_from_text(
+        title,
+        screen_size_hint=screen_size_hint,
     )
+    url_candidate = "" if title_candidate else high_confidence_tv_model_number_from_url(
+        row.get("product_url"),
+        screen_size_hint=screen_size_hint,
+    )
+    candidate = title_candidate or url_candidate
     if not candidate:
         return False
     row["sku"] = candidate
+    source = "title" if title_candidate else "url"
+    status_token = (
+        f"sku_{source}_final_recovered"
+        if final_pass
+        else f"sku_{source}_fallback_after_detail_retry"
+    )
     row["parse_status"] = _append_token(
         row.get("parse_status", ""),
-        "sku_title_fallback_after_detail_retry",
+        status_token,
     )
     return True
+
+
+def _backfill_magalu_tv_skus_from_title_url(rows, checkpoint_writer=None):
+    """Run one free parent-side pass before any paid ZenRows field recovery."""
+    candidates = 0
+    updated = 0
+    for row in rows:
+        if _is_magalu_tv_row(row) and _magalu_tv_sku_is_recovery_target(row):
+            candidates += 1
+        if _backfill_magalu_tv_sku_from_title(row, final_pass=True):
+            updated += 1
+    if candidates:
+        print(
+            f"[seda] magalu tv final sku recovery updated={updated}/{candidates}",
+            flush=True,
+        )
+    if updated and checkpoint_writer:
+        checkpoint_writer(rows)
+    return rows
 
 
 def _retry_magalu_detail_blanks(row, product_url, trace_rows=None, row_index=""):
@@ -2503,6 +2558,10 @@ def _run_parallel(
             target_path=target_path,
         )
 
+    merged = _backfill_magalu_tv_skus_from_title_url(
+        merged,
+        checkpoint_writer=recovery_checkpoint,
+    )
     merged = _backfill_magalu_zenrows_fields(
         merged,
         output,
@@ -2786,6 +2845,10 @@ def _run_detail_main(root, *, is_worker):
         checkpoint_writer=checkpoint_writer,
     )
     if not is_worker:
+        enriched = _backfill_magalu_tv_skus_from_title_url(
+            enriched,
+            checkpoint_writer=checkpoint_writer,
+        )
         enriched = _backfill_magalu_zenrows_fields(
             enriched,
             output,

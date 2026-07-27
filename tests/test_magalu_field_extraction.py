@@ -407,6 +407,38 @@ class MagaluFieldExtractionTests(unittest.TestCase):
             "0,39",
         )
 
+    def test_confirmed_raw_energy_values_are_not_over_cleaned(self):
+        cases = (
+            (
+                [fact("Consumo Aproximado de Energia", "1")],
+                "1",
+            ),
+            (
+                [
+                    fact("Consumo Aproximado de Energia", "Máximo: 130W"),
+                    fact("Consumo Aproximado de Energia", "0,5W"),
+                ],
+                "Máximo: 130W,0,5W",
+            ),
+            (
+                [
+                    fact("Consumo Aproximado de Energia", "<1 W"),
+                    fact("Consumo Aproximado de Energia", "8"),
+                ],
+                "<1 W,8",
+            ),
+        )
+        for factsheet, expected in cases:
+            with self.subTest(expected=expected):
+                item = {
+                    "title": "Smart TV 55 polegadas",
+                    "factsheet": factsheet,
+                }
+                self.assertEqual(
+                    extract_fields(item, "TV")["estimated_annual_electricity_use"],
+                    expected,
+                )
+
     def test_html_tags_between_description_label_and_value(self):
         item = {
             "title": "Geladeira",

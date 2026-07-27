@@ -1274,6 +1274,11 @@ def _is_tv_title(title):
     )
 
 
+def is_tv_product_title(title):
+    """Expose the shared Magalu TV-vs-accessory title classification."""
+    return _is_tv_title(title)
+
+
 def _is_ref_title(title):
     key = normalize_key(title)
     return _product_precedes_accessory(

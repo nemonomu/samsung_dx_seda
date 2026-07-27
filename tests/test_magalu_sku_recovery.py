@@ -11,11 +11,13 @@ from seda.magalu.detail_api import _detail_from_item, _post, _post_browser_graph
 from seda.parsers import (
     _parse_magalu_next_detail,
     high_confidence_tv_model_number_from_text,
+    high_confidence_tv_model_number_from_url,
 )
 from seda.step00_config import read_csv
 from seda.step08_detail_enrichment import (
     _backfill_magalu_detail_blanks,
     _backfill_magalu_tv_sku_from_title,
+    _backfill_magalu_tv_skus_from_title_url,
     _has_blocked_graphql_trace,
     _is_expected_magalu_item_query_block,
     _magalu_tv_sku_is_recovery_target,
@@ -184,6 +186,223 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
         for title in guards:
             with self.subTest(guard=title):
                 self.assertEqual(high_confidence_tv_model_number_from_text(title), "")
+
+    def test_screen_hint_and_url_slug_recovery_are_strict(self):
+        title = "Smart Tv 32 Philco Roku Tv Dolby Audio Hdr10 P32crb"
+        self.assertEqual(
+            high_confidence_tv_model_number_from_text(
+                title,
+                screen_size_hint="32 inches",
+            ),
+            "P32CRB",
+        )
+        for unsafe_hint in ("De 30 a 40 inches", "32 kg", "32/40", "32 40"):
+            with self.subTest(unsafe_hint=unsafe_hint):
+                self.assertEqual(
+                    high_confidence_tv_model_number_from_text(
+                        title,
+                        screen_size_hint=unsafe_hint,
+                    ),
+                    "",
+                )
+        self.assertEqual(
+            high_confidence_tv_model_number_from_text(
+                "Smart TV LG 65apos HDR10 Pro 4K Preta Preto",
+                screen_size_hint="65 inches",
+            ),
+            "",
+        )
+        self.assertEqual(
+            high_confidence_tv_model_number_from_url(
+                "https://www.magazineluiza.com.br/"
+                "smart-tv-55-4k-qled-samsung-qn55q7faagxzd-controle-sem-fio/"
+                "p/239232200/et/elit/?seller_id=magazineluiza",
+                screen_size_hint="55 inches",
+            ),
+            "QN55Q7FAAGXZD",
+        )
+
+    def test_final_parent_pass_recovers_the_ten_audited_null_skus(self):
+        cases = (
+            (
+                "egae5617ea",
+                "Smart Tv 32 Philco Roku Tv Dolby Áudio Hdr10 P32crb",
+                "32 inches",
+                "https://www.magazineluiza.com.br/smart-tv-32-philco-roku-tv-dolby-audio-hdr10-p32crb/p/egae5617ea/et/elit/?seller_id=mgshopgra",
+                "P32CRB",
+            ),
+            (
+                "fh3g57ajk4",
+                "Smart TV 40 Philco P40CRA Full HD Roku TV HDR10 Dolby Áudio",
+                "40 inches",
+                "https://www.magazineluiza.com.br/smart-tv-40-philco-p40cra-full-hd-roku-tv-hdr10-dolby-audio/p/fh3g57ajk4/et/elit/?seller_id=123comprou",
+                "P40CRA",
+            ),
+            (
+                "ffdc04bb9j",
+                "Smart TV 43 Britânia B43KRA Full HD Roku TV",
+                "43 inches",
+                "https://www.magazineluiza.com.br/smart-tv-43-britania-b43kra-full-hd-roku-tv/p/ffdc04bb9j/et/tves/?seller_id=eletrosid",
+                "B43KRA",
+            ),
+            (
+                "jb5ag8c4k7",
+                "Smart Tv Samsung 32 Ls32h5000fgxzd Hd Led Wifi Hdmi Bivolt com NF e Garantia",
+                "32 inches",
+                "https://www.magazineluiza.com.br/smart-tv-samsung-32-ls32h5000fgxzd-hd-led-wifi-hdmi-bivolt-com-nf-e-garantia/p/jb5ag8c4k7/et/elit/?seller_id=atonshop",
+                "LS32H5000FGXZD",
+            ),
+            (
+                "fdca3210ed",
+                "Smart TV Philips 55, 4K UHD, Titan OS, DLED - 55PUG7300/78",
+                "55 inches",
+                "https://www.magazineluiza.com.br/smart-tv-philips-55-4k-uhd-titan-os-dled-55pug7300-78/p/fdca3210ed/et/elit/?seller_id=lojascolombooficial",
+                "55PUG7300/78",
+            ),
+            (
+                "239232200",
+                'Smart TV 55" 4K QLED Samsung',
+                "55 inches",
+                "https://www.magazineluiza.com.br/smart-tv-55-4k-qled-samsung-qn55q7faagxzd-controle-sem-fio-carbon-black/p/239232200/et/elit/?seller_id=magazineluiza",
+                "QN55Q7FAAGXZD",
+            ),
+            (
+                "bkg4h8fe2f",
+                "Smart tv 50p dled aoc 50u7045/78g 4k hd hdr10 hdmi usb",
+                "50 inches",
+                "https://www.magazineluiza.com.br/smart-tv-50p-dled-aoc-50u7045-78g-4k-hd-hdr10-hdmi-usb/p/bkg4h8fe2f/et/elit/?seller_id=efacil",
+                "50U7045/78G",
+            ),
+            (
+                "fa70h615dd",
+                "Smart Tv Samsung 32 Ls32h5000fgxzd Hd Led Wifi Hdmi Bivolt",
+                "32 inches",
+                "https://www.magazineluiza.com.br/smart-tv-samsung-32-ls32h5000fgxzd-hd-led-wifi-hdmi-bivolt/p/fa70h615dd/et/elit/?seller_id=lojaskarzen",
+                "LS32H5000FGXZD",
+            ),
+            (
+                "ke5hh4864k",
+                "Smart TV AOC 43S513578G Full HD 43 Roku TV Design sem bordas e Controle Simples",
+                "43 inches",
+                "https://www.magazineluiza.com.br/smart-tv-aoc-43s513578g-full-hd-43-roku-tv-design-sem-bordas-e-controle-simples/p/ke5hh4864k/et/easc/?seller_id=lojasguaibim1",
+                "43S513578G",
+            ),
+            (
+                "ja5h57894c",
+                "Smart Tv 43 Samsung Fhd Ls43f6000fgxzd",
+                "43 inches",
+                "https://www.magazineluiza.com.br/smart-tv-43-samsung-fhd-ls43f6000fgxzd/p/ja5h57894c/et/cttv/?seller_id=easytechmg",
+                "LS43F6000FGXZD",
+            ),
+        )
+        rows = [
+            {
+                "retailer": "Magalu",
+                "product_line": "TV",
+                "item": item,
+                "sku": "",
+                "retailer_sku_name": title,
+                "screen_size": screen_size,
+                "product_url": product_url,
+                "parse_status": "listing_next_data+detail_item_graphql",
+            }
+            for item, title, screen_size, product_url, _expected in cases
+        ]
+        checkpoint_writer = Mock()
+
+        result = _backfill_magalu_tv_skus_from_title_url(
+            rows,
+            checkpoint_writer=checkpoint_writer,
+        )
+
+        self.assertIs(result, rows)
+        self.assertEqual(
+            [row["sku"] for row in rows],
+            [expected for *_source, expected in cases],
+        )
+        checkpoint_writer.assert_called_once_with(rows)
+        for row in rows:
+            expected_token = (
+                "sku_url_final_recovered"
+                if row["item"] == "239232200"
+                else "sku_title_final_recovered"
+            )
+            self.assertIn(expected_token, row["parse_status"].split("+"))
+
+    def test_final_parent_pass_blocks_accessories_and_preserves_other_scopes(self):
+        blocked = (
+            (
+                "bf5d14bfbe",
+                'Capa Proteção Tv Smart Gamer 32" Pol Confeccionada Em Tnt',
+                "https://www.magazineluiza.com.br/capa-protecao-tv-smart-gamer-32-pol-confeccionada-em-tnt-ldcampos/p/bf5d14bfbe/et/ctvv/?seller_id=leilumi",
+            ),
+            (
+                "kb719205h3",
+                'STPA 45 Suporte Articulado de PAREDE (10" a 40") ou TETO (10" a 26") para TV LCD/LED FG',
+                "https://www.magazineluiza.com.br/stpa-45-suporte-articulado-de-parede-10-a-40-ou-teto-10-a-26-para-tv-lcd-led-fg-multivisao/p/kb719205h3/et/suar/?seller_id=digodigodigo",
+            ),
+            (
+                "cb989bgdd1",
+                "Controle Compatível Samsung 4k 50ls03a 55ls03a De 50'' 55''",
+                "https://www.magazineluiza.com.br/controle-compativel-samsung-4k-50ls03a-55ls03a-de-50-55-generica/p/cb989bgdd1/et/cttv/?seller_id=cardoncontrole",
+            ),
+            (
+                "fj8968f70f",
+                "Tv Samsung Smart Hub Controle R.tv Lcd/led Sky-8008- semelhante",
+                "https://www.magazineluiza.com.br/tv-samsung-smart-hub-controle-r-tv-lcd-led-sky-8008-semelhante/p/fj8968f70f/et/cttv/?seller_id=bellatorstore",
+            ),
+            (
+                "afh5ab6gd7",
+                "Smart Tv Box Streaming Android Tv Com Netflix, Youtube tbx",
+                "https://www.magazineluiza.com.br/smart-tv-box-streaming-android-tv-com-netflix-youtube-tbx/p/afh5ab6gd7/et/tvbx/?seller_id=sharkmultstore",
+            ),
+            (
+                "bd854edfb4",
+                "Aoc / Philco Controle R.TV Roku Tv Netflix/HBO/Google Play LE-7245 - SKY",
+                "https://www.magazineluiza.com.br/aoc-philco-controle-r-tv-roku-tv-netflix-hbo-google-play-le-7245-sky/p/bd854edfb4/et/cttv/?seller_id=alternativaeletronicaltda",
+            ),
+            (
+                "cg98cd7f0g",
+                "Controle Smart Tv Botão Netflix Amazon",
+                "https://www.magazineluiza.com.br/controle-smart-tv-botao-netflix-amazon-sky/p/cg98cd7f0g/et/cttv/?seller_id=higashop2",
+            ),
+        )
+        rows = [
+            {
+                "retailer": "Magalu",
+                "product_line": "TV",
+                "item": item,
+                "sku": "",
+                "retailer_sku_name": title,
+                "screen_size": "",
+                "product_url": product_url,
+                "parse_status": "detail_item_graphql",
+            }
+            for item, title, product_url in blocked
+        ]
+        protected = [
+            dict(rows[0], sku="EXISTING-SKU"),
+            dict(rows[0], product_line="REF", retailer_sku_name="Geladeira TV32X"),
+            dict(rows[0], product_line="LDY", retailer_sku_name="Lavadora TV32X"),
+            dict(rows[0], retailer="Casas Bahia", retailer_sku_name="Smart TV 32 TV32X"),
+            dict(
+                rows[0],
+                retailer_sku_name='Smart TV Samsung 32" LS32H5000FGXZD',
+                screen_size='32"',
+                parse_status="detail_item_graphql+item_identity_conflict",
+            ),
+        ]
+        protected_before = [dict(row) for row in protected]
+        checkpoint_writer = Mock()
+
+        _backfill_magalu_tv_skus_from_title_url(
+            rows + protected,
+            checkpoint_writer=checkpoint_writer,
+        )
+
+        self.assertTrue(all(not row["sku"] for row in rows))
+        self.assertEqual(protected, protected_before)
+        checkpoint_writer.assert_not_called()
 
     def test_tv_producers_preserve_reference_until_verified_recovery(self):
         cases = (
