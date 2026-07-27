@@ -185,7 +185,13 @@ def high_confidence_tv_model_number_from_text(text):
     a technical or bundled-accessory token would be worse than falling back to the
     factsheet or leaving SKU blank.
     """
-    text = clean_text(text).upper()
+    text = remove_accents(clean_text(text)).upper()
+    if re.search(
+        r'^\s*(?:CAPA|PELICULA|PROTETOR(?:A)?|PROTECAO|ADESIVO|ESTANTE|'
+        r'PAINEL|MOVEL|MESA|ARMARIO)\b',
+        text,
+    ):
+        return ''
     if re.search(
         r"^\s*(?:CONTROLE|CONTROL|CR\b|SUPORTE|RACK|CABO|PLACA|RECEPTOR|MOLDURA|"
         r"FIXADOR|BASE|PEDESTAL|SOUNDBAR|HOME\s*THEATER|C[ÂA]MERA|CONSOLE|"
@@ -220,6 +226,12 @@ def high_confidence_tv_model_number_from_text(text):
             continue
         prefix = text[max(0, match.start() - 60) : match.start()]
         if re.search(
+            r'(?:CAPA|PELICULA|PROTETOR(?:A)?|PROTECAO|ADESIVO|ESTANTE|'
+            r'PAINEL|MOVEL|MESA|ARMARIO)\b[^,;|]{0,50}$',
+            prefix,
+        ):
+            continue
+        if re.search(
             r"(?:CONTROLE|CONTROL|SUPORTE|RACK|CABO|PLACA|RECEPTOR|MOLDURA|FIXADOR|"
             r"BASE|PAINEL|PEDESTAL|SOUNDBAR|HOME\s*THEATER|C[ÂA]MERA|CONSOLE|"
             r"VIDEOGAME)\b[^,;|]{0,50}$",
@@ -247,10 +259,37 @@ def high_confidence_tv_model_number_from_text(text):
 def preferred_magalu_sku(line, reference, model, title):
     """Apply the retailer/product-line SKU priority in one shared place."""
     if str(line or "").upper() == "TV":
-        # TV recovery accepts only the complete factsheet Referencia string.
-        # Modelo/title inference can silently shorten a valid retailer SKU.
+        # Preserve the complete Referencia in the normal producer path. The
+        # title-first policy is applied only at the verified recovery boundary,
+        # where a blank/item/synthetic SKU must be repaired.
         return str(reference or "").strip()
     return reference or model or appliance_model_number_from_text(title)
+
+
+def is_obviously_non_sku_magalu_value(value):
+    """Return whether a value is descriptive text or an electrical option."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"(?:110|127|220|240)\s*v(?:olts?)?|bivolt", text, re.I):
+        return True
+    normalized = remove_accents(text)
+    return bool(
+        re.search(
+            r"\b(?:smart\s*tv|televisor|geladeira|refrigerador|"
+            r"maquina\s+de\s+lavar|lavadora)\b",
+            normalized,
+            re.I,
+        )
+    )
+
+
+def is_synthetic_magalu_sku_value(value):
+    """Return whether a Magalu SKU would be discarded at final output."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return len(text) > 40 or is_obviously_non_sku_magalu_value(text)
 
 
 def model_year_from_text(text):
@@ -1847,8 +1886,8 @@ def magalu_exact_factsheet_reference(item):
     """Return one unambiguous Referencia value with only edge whitespace removed.
 
     TV SKU recovery must not collapse internal whitespace or synthesize a value
-    by joining multiple factsheet elements.  Bundle factsheets remain eligible,
-    but conflicting references make the evidence ambiguous and therefore blank.
+    by joining multiple factsheet elements. Bundle conflicts are resolved only
+    when one full candidate uniquely contains the high-confidence title model.
     """
     if not isinstance(item, dict):
         return ""
@@ -1860,6 +1899,17 @@ def magalu_exact_factsheet_reference(item):
                     _magalu_exact_reference_candidates(bundle.get("factsheet"))
                 )
     unique = list(dict.fromkeys(candidates))
+    if len(unique) > 1:
+        title_model = high_confidence_tv_model_number_from_text(item.get('title'))
+        title_key = re.sub(r'[^A-Z0-9]', '', title_model.upper())
+        if title_key:
+            matches = [
+                candidate
+                for candidate in unique
+                if title_key in re.sub(r'[^A-Z0-9]', '', candidate.upper())
+            ]
+            if len(matches) == 1:
+                return matches[0]
     return unique[0] if len(unique) == 1 else ""
 
 

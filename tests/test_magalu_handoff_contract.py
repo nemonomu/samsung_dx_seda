@@ -418,19 +418,27 @@ class MagaluHandoffContractTests(unittest.TestCase):
             rating = fetch_product_rating("variation", limit=1)
         self.assertIs(rating["success"], False)
 
-    def test_tv_sku_source_is_reference_only(self):
+    def test_tv_producer_preserves_reference_for_verified_recovery(self):
         self.assertEqual(
             preferred_magalu_sku(
                 "TV",
                 "  UN55U8600FGXZD  ",
                 "MODEL-FALLBACK",
-                "Samsung Smart TV 55 U8600F",
+                'Samsung Smart TV 55" 55U8600F',
             ),
             "UN55U8600FGXZD",
         )
         self.assertEqual(
-            preferred_magalu_sku("TV", "", "MODEL-FALLBACK", "Smart TV 55 U8600F"),
+            preferred_magalu_sku(
+                "TV", "", "MODEL-FALLBACK", 'Smart TV 55" 55U8600F'
+            ),
             "",
+        )
+        self.assertEqual(
+            preferred_magalu_sku(
+                "TV", " REF-FALLBACK ", "MODEL", "Smart TV 55 sem modelo"
+            ),
+            "REF-FALLBACK",
         )
         self.assertEqual(
             preferred_magalu_sku("REF", "REF-FULL", "MODEL", "Geladeira"),
@@ -493,6 +501,19 @@ class MagaluHandoffContractTests(unittest.TestCase):
         item["bundles"][0]["factsheet"] = [fact(" TV-REF ")]
         self.assertEqual(magalu_exact_factsheet_reference(item), "TV-REF")
 
+        bundle = {
+            "title": 'Smart TV Samsung 55" 55U8600F + Soundbar HW55Q600B',
+            "factsheet": [],
+            "bundles": [
+                {"factsheet": [fact("UN55U8600FGXZD")]},
+                {"factsheet": [fact("HW55Q600B/ZD")]},
+            ],
+        }
+        self.assertEqual(
+            magalu_exact_factsheet_reference(bundle),
+            "UN55U8600FGXZD",
+        )
+
     def test_verified_reference_only_recovers_blank_or_item_sentinel(self):
         for current in ("", "kh6643e17a"):
             row = _tv_row(current)
@@ -510,6 +531,94 @@ class MagaluHandoffContractTests(unittest.TestCase):
             )
             self.assertEqual(row["sku"], current)
             self.assertEqual(row["screen_size"], "55 polegadas")
+
+    def test_verified_detail_title_recovers_only_missing_tv_sku(self):
+        detail = {
+            "sku": "",
+            "_magalu_factsheet_reference": "",
+            "_detail_item_id": "kh6643e17a",
+            "_detail_identity_verified": True,
+            "retailer_sku_name": 'Smart TV Samsung 55" 55U8600F',
+            "screen_size": "55 polegadas",
+        }
+        for current in ("", "kh6643e17a"):
+            with self.subTest(current=current):
+                row = _tv_row(current)
+                _merge_authoritative_detail(row, detail, identity_verified=True)
+                self.assertEqual(row["sku"], "55U8600F")
+                self.assertIn(
+                    "sku_title_high_confidence_recovered",
+                    row["parse_status"].split("+"),
+                )
+
+        existing = _tv_row("UN55U8600FGXZD")
+        _merge_authoritative_detail(existing, detail, identity_verified=True)
+        self.assertEqual(existing["sku"], "UN55U8600FGXZD")
+        self.assertIn(
+            "sku_reference_conflict_preserved",
+            existing["parse_status"].split("+"),
+        )
+
+    def test_title_model_is_first_only_when_sku_needs_recovery(self):
+        title_detail = {
+            "sku": "",
+            "_magalu_factsheet_reference": "",
+            "_detail_item_id": "kh6643e17a",
+            "_detail_identity_verified": True,
+            "retailer_sku_name": 'Smart TV Samsung 55" 55U8600F',
+        }
+        reference_detail = _reference_detail("UN55U8600FGXZD")
+        reference_detail["retailer_sku_name"] = title_detail["retailer_sku_name"]
+
+        recovered = _tv_row("")
+        _merge_authoritative_detail(recovered, title_detail, identity_verified=True)
+        _merge_authoritative_detail(recovered, reference_detail, identity_verified=True)
+        self.assertEqual(recovered["sku"], "55U8600F")
+        self.assertIn(
+            "sku_title_high_confidence_recovered",
+            recovered["parse_status"].split("+"),
+        )
+
+        existing_reference = _tv_row("UN55U8600FGXZD")
+        _merge_authoritative_detail(
+            existing_reference, reference_detail, identity_verified=True
+        )
+        self.assertEqual(existing_reference["sku"], "UN55U8600FGXZD")
+        self.assertIn(
+            "sku_reference_conflict_preserved",
+            existing_reference["parse_status"].split("+"),
+        )
+
+    def test_five_verified_conflicts_recover_from_title_before_reference(self):
+        cases = (
+            ('Smart TV Samsung 32" HD 32H5000F Tizen', "32H5000F"),
+            ('Smart TV Semp 32" HD 32S42', "32S42"),
+            ('Smart TV TCL 40" Full HD QLED 40S5K', "40S5K"),
+            ('Smart TV LG 43" Full HD 43LR671CB', "43LR671CB"),
+            ('Smart TV SEMP 43" 4K Google TV S4362', "S4362"),
+        )
+        for title, expected in cases:
+            with self.subTest(expected=expected):
+                row = _tv_row("")
+                detail = _reference_detail("FACTSHEET-DIFFERENT")
+                detail["retailer_sku_name"] = title
+                _merge_authoritative_detail(row, detail, identity_verified=True)
+                self.assertEqual(row["sku"], expected)
+                self.assertIn(
+                    "sku_title_high_confidence_recovered",
+                    row["parse_status"].split("+"),
+                )
+
+    def test_descriptive_reference_is_never_trusted_as_tv_sku(self):
+        row = _tv_row("")
+        detail = _reference_detail("Smart TV Samsung com controle remoto")
+        detail["retailer_sku_name"] = "Smart TV Samsung sem modelo informado"
+        _merge_authoritative_detail(row, detail, identity_verified=True)
+        self.assertEqual(row["sku"], "")
+        self.assertNotIn(
+            "sku_factsheet_reference_recovered",
+            str(row.get("parse_status") or "").split("+"),
+        )
 
     def test_sku_gate_rejects_wrong_identity_provenance_and_same_name(self):
         row = _tv_row("")

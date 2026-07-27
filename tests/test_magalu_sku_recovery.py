@@ -18,6 +18,7 @@ from seda.step08_detail_enrichment import (
     _backfill_magalu_tv_sku_from_title,
     _has_blocked_graphql_trace,
     _is_expected_magalu_item_query_block,
+    _magalu_tv_sku_is_recovery_target,
     _merge_parallel_detail_traces,
     _needs_magalu_detail_retry,
     _retry_magalu_detail_blanks,
@@ -114,7 +115,7 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertIn("detail_blank_retry", row["parse_status"])
 
-    def test_failed_retries_preserve_item_sentinel_and_forward_trace_context(self):
+    def test_failed_retries_use_guarded_title_fallback_and_forward_trace_context(self):
         row = _failed_row()
         trace_rows = []
         with patch.dict(os.environ, {"SEDA_MAGALU_DETAIL_BLANK_RETRY_ATTEMPTS": "1"}), patch(
@@ -128,8 +129,8 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
                 trace_rows=trace_rows,
                 row_index_offset=38,
             )
-        self.assertEqual(rows[0]["sku"], "240144500")
-        self.assertNotIn("sku_title_fallback_after_detail_retry", rows[0]["parse_status"])
+        self.assertEqual(rows[0]["sku"], "75P7K")
+        self.assertIn("sku_title_fallback_after_detail_retry", rows[0]["parse_status"])
         self.assertEqual(call.call_args.kwargs["trace_rows"], trace_rows)
         self.assertEqual(call.call_args.kwargs["row_index"], 39)
         self.assertEqual(call.call_args.kwargs["trace_subcall"], "detail_graphql_retry")
@@ -151,6 +152,10 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
             'Smart TV Philco 40" P40CRA Roku TV': "P40CRA",
             'Smart TV Britânia 43" B43KRA': "B43KRA",
             'Smart TV Semp 32" 32S42': "32S42",
+            'Smart TV 32" Samsung HD 32H5000F Tizen': "32H5000F",
+            'Smart TV 40" TCL Full HD QLED 40S5K Google TV': "40S5K",
+            'Smart TV LG 43 LED FULL HD Smart Pro 43LR671CB Bivolt': "43LR671CB",
+            'SEMP Smart TV 43" 4K UHD LED Google TV HDR10+ Wi-Fi Bluetooth Alexa S4362': "S4362",
             'Smart TV TCL 50" 50S62': "50S62",
             'Smart TV LG OLED 65" OLED65CX': "OLED65CX",
         }
@@ -172,12 +177,15 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
             'Smart TV 55" modelos 55ABC123 e 55XYZ789',
             'Smart TV 55" SMART55 Android 55',
             'Smart TV 55" QLED55 HDR55',
+            'Capa protetora para Smart TV Samsung 55" UN55U8600FGXZD',
+            'Película protetora para Smart TV Samsung 55" UN55U8600FGXZD',
+            'Estante para TV 65" modelo 65ABC123',
         )
         for title in guards:
             with self.subTest(guard=title):
                 self.assertEqual(high_confidence_tv_model_number_from_text(title), "")
 
-    def test_tv_title_priority_matches_graphql_and_next_data(self):
+    def test_tv_producers_preserve_reference_until_verified_recovery(self):
         cases = (
             (
                 'Smart TV Samsung 32" HD Wi-Fi Tizen LS32H5000FGXZD',
@@ -273,16 +281,58 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
             self.assertEqual(graphql["sku"], "REF-ORIGINAL")
             self.assertEqual(next_data["sku"], "REF-ORIGINAL")
 
-    def test_title_fallback_hook_is_disconnected(self):
+    def test_title_fallback_hook_is_identity_and_accessory_guarded(self):
         row = _failed_row()
-        self.assertFalse(_backfill_magalu_tv_sku_from_title(row))
-        self.assertEqual(row["sku"], row["item"])
-        self.assertNotIn("sku_title_fallback_after_detail_retry", row["parse_status"])
+        self.assertTrue(_backfill_magalu_tv_sku_from_title(row))
+        self.assertEqual(row["sku"], "75P7K")
+        self.assertIn("sku_title_fallback_after_detail_retry", row["parse_status"])
 
         authoritative = _failed_row()
         authoritative["sku"] = "UN75U8600FGXZD"
         self.assertFalse(_backfill_magalu_tv_sku_from_title(authoritative))
         self.assertEqual(authoritative["sku"], "UN75U8600FGXZD")
+
+        identity_mismatch = _failed_row()
+        identity_mismatch["product_url"] = (
+            "https://www.magazineluiza.com.br/product/p/different/et/tv4k/"
+        )
+        self.assertFalse(_backfill_magalu_tv_sku_from_title(identity_mismatch))
+        self.assertEqual(identity_mismatch["sku"], identity_mismatch["item"])
+
+        accessory = _failed_row(
+            title='Capa protetora para Smart TV Samsung 75" UN75U8600FGXZD'
+        )
+        self.assertFalse(_backfill_magalu_tv_sku_from_title(accessory))
+        self.assertEqual(accessory["sku"], accessory["item"])
+
+    def test_descriptive_sku_stays_a_recovery_target_even_if_reference_tagged(self):
+        row = _failed_row()
+        row["sku"] = 'Smart TV Samsung 75" 75U8600F'
+        self.assertTrue(_magalu_tv_sku_is_recovery_target(row))
+        with patch.dict(
+            os.environ,
+            {"SEDA_ACTIVE_RETAILER": "magalu", "SEDA_PRODUCT_LINE": "TV"},
+        ):
+            self.assertEqual(_sku_for_output(row, row["item"]), "")
+
+        row["parse_status"] += "+sku_factsheet_reference_recovered"
+        self.assertTrue(_magalu_tv_sku_is_recovery_target(row))
+        with patch.dict(
+            os.environ,
+            {"SEDA_ACTIVE_RETAILER": "magalu", "SEDA_PRODUCT_LINE": "TV"},
+        ):
+            self.assertEqual(_sku_for_output(row, row["item"]), "")
+
+    def test_magalu_descriptive_filter_does_not_change_casas_ldy_sku(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "sku": "Lavadora XPTO",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_ACTIVE_RETAILER": "casas_bahia", "SEDA_PRODUCT_LINE": "LDY"},
+        ):
+            self.assertEqual(_sku_for_output(row, "item-1"), "Lavadora XPTO")
 
     def test_recovered_and_unresolved_final_db_contract(self):
         with patch.dict(

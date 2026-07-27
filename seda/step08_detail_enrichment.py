@@ -40,6 +40,9 @@ from .parsers import (
     clean_text,
     compact_json,
     extract_next_data,
+    high_confidence_tv_model_number_from_text,
+    is_obviously_non_sku_magalu_value,
+    is_synthetic_magalu_sku_value,
     parse_detail,
     remove_accents,
     sku_from_url,
@@ -114,6 +117,16 @@ MAGALU_PDP_SEMANTIC_FIELDS = (
     "ldy_color",
 )
 
+MAGALU_ZENROWS_FIELD_MAP = {
+    "TV": (
+        "screen_size",
+        "estimated_annual_electricity_use",
+        "model_year",
+    ),
+    "REF": ("ref_refrigerator_type", "ref_capacity"),
+    "LDY": ("ldy_loading_type", "ldy_capacity"),
+}
+
 AUTHORITATIVE_AUDITED_FIELDS = (
     "screen_size",
     "estimated_annual_electricity_use",
@@ -157,6 +170,17 @@ def _relevant_audited_fields(row):
             "ldy_loading_type",
         ),
     }.get(line, ())
+
+
+def _magalu_zenrows_target_fields(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return MAGALU_ZENROWS_FIELD_MAP.get(line, ())
+
+
+def _magalu_zenrows_missing_fields(row):
+    return tuple(
+        key for key in _magalu_zenrows_target_fields(row) if not row.get(key)
+    )
 
 
 def _base_url(retailer):
@@ -862,18 +886,36 @@ def _magalu_tv_sku_is_recovery_target(row):
     current = str(row.get("sku") or "").strip().casefold()
     if not current:
         return True
+    if is_obviously_non_sku_magalu_value(row.get("sku")):
+        return True
+    status_tokens = set(str(row.get("parse_status") or "").split("+"))
+    if "sku_factsheet_reference_recovered" in status_tokens:
+        return False
     sentinels = {
         str(row.get("item") or "").strip().casefold(),
         str(sku_from_url(row.get("product_url", "")) or "").strip().casefold(),
     }
-    return current in {value for value in sentinels if value}
+    return current in {
+        value for value in sentinels if value
+    } or is_synthetic_magalu_sku_value(row.get("sku"))
 
 
 def _merge_magalu_tv_reference_sku(row, detail, *, identity_verified):
-    """Apply the approved blank/item-sentinel -> factsheet Referencia write."""
+    """Apply title-first recovery without replacing an existing valid SKU.
+
+    One high-confidence product-title model is the first recovery candidate.
+    Referencia is used only when the title has no safe model candidate.
+    """
     if not _is_magalu_tv_row(row):
         return False
     reference = str(detail.get("_magalu_factsheet_reference") or "").strip()
+    title_model = high_confidence_tv_model_number_from_text(
+        detail.get("retailer_sku_name")
+    )
+    safe_reference = (
+        reference if not is_obviously_non_sku_magalu_value(reference) else ""
+    )
+    candidate = title_model or safe_reference
     actual_item = str(detail.get("_detail_item_id") or "").strip().casefold()
     expected_items = {
         str(row.get("item") or "").strip().casefold(),
@@ -883,16 +925,28 @@ def _merge_magalu_tv_reference_sku(row, detail, *, identity_verified):
     identity_matches = bool(actual_item) and bool(expected_items) and all(
         actual_item == expected for expected in expected_items
     )
-    if not identity_verified or not identity_matches or not reference:
+    if not identity_verified or not identity_matches or not candidate:
         return False
-    if not _magalu_tv_sku_is_recovery_target(row):
-        if str(row.get("sku") or "").strip() != reference:
+
+    recovery_target = _magalu_tv_sku_is_recovery_target(row)
+    current_sku = str(row.get("sku") or "").strip()
+    if not recovery_target:
+        if current_sku != candidate:
             row["parse_status"] = _append_token(
                 row.get("parse_status", ""),
                 "sku_reference_conflict_preserved",
             )
         return False
-    row["sku"] = reference
+
+    if title_model:
+        row["sku"] = title_model
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            "sku_title_high_confidence_recovered",
+        )
+        return True
+
+    row["sku"] = safe_reference
     row["parse_status"] = _append_token(
         row.get("parse_status", ""),
         "sku_factsheet_reference_recovered",
@@ -1180,8 +1234,24 @@ def _has_real_magalu_sku(row):
 
 
 def _backfill_magalu_tv_sku_from_title(row):
-    """Legacy compatibility hook; title-derived TV SKU writes are disabled."""
-    return False
+    """Last-resort listing-title recovery after authoritative detail retries fail."""
+    if not _is_magalu_tv_row(row) or not _magalu_tv_sku_is_recovery_target(row):
+        return False
+    row_item = str(row.get("item") or "").strip().casefold()
+    url_item = str(sku_from_url(row.get("product_url", "")) or "").strip().casefold()
+    if not row_item or not url_item or row_item != url_item:
+        return False
+    candidate = high_confidence_tv_model_number_from_text(
+        row.get("retailer_sku_name")
+    )
+    if not candidate:
+        return False
+    row["sku"] = candidate
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        "sku_title_fallback_after_detail_retry",
+    )
+    return True
 
 
 def _retry_magalu_detail_blanks(row, product_url, trace_rows=None, row_index=""):
@@ -1235,6 +1305,11 @@ def _backfill_magalu_detail_blanks(
             trace_rows=trace_rows,
             row_index=row_index,
         )
+        if (
+            not _has_real_magalu_sku(row)
+            or _magalu_tv_sku_is_recovery_target(row)
+        ):
+            _backfill_magalu_tv_sku_from_title(row)
         recovered = _has_real_magalu_sku(row) and str(row.get("sku") or "").strip() != before_sku
         if recovered:
             updated += 1
@@ -1251,6 +1326,244 @@ def _backfill_magalu_detail_blanks(
                 write_csv(output, rows, columns=OUTPUT_COLUMNS)
             print(f"[seda] detail retry checkpoint {output} updated={updated}", flush=True)
     print(f"[seda] detail blank retry updated={updated}/{total}", flush=True)
+    return rows
+
+
+def _magalu_zenrows_field_recovery_enabled():
+    scoped = os.getenv("SEDA_MAGALU_ZENROWS_FIELD_FALLBACK", "0").lower()
+    globally_allowed = os.getenv("SEDA_ALLOW_ZENROWS", "0").lower()
+    return scoped in {"1", "true", "yes", "y"} and globally_allowed in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _magalu_zenrows_sku_recovery_pending(row):
+    if not _is_magalu_tv_row(row):
+        return False
+    return _magalu_tv_sku_is_recovery_target(row)
+
+
+def _needs_magalu_zenrows_field_recovery(row):
+    return (
+        row.get("retailer") == "Magalu"
+        and bool(
+            _magalu_zenrows_missing_fields(row)
+            or _magalu_zenrows_sku_recovery_pending(row)
+        )
+        and _needs_magalu_detail_retry(row)
+    )
+
+
+def _magalu_zenrows_item_key(row):
+    url_item = clean_text(sku_from_url(row.get("product_url", "")))
+    row_item = clean_text(row.get("item"))
+    if url_item and row_item and url_item.casefold() != row_item.casefold():
+        return (), "input_item_identity_mismatch"
+    item_id = url_item or row_item
+    if not item_id:
+        return (), "missing_item_id"
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return (line, item_id.casefold()), ""
+
+
+def _merge_magalu_zenrows_field_result(
+    row,
+    result,
+    product_url,
+    *,
+    trace_rows=None,
+    row_index="",
+    cache_hit=False,
+):
+    missing_before = _magalu_zenrows_missing_fields(row)
+    metadata = result.get("zenrows") or {}
+    if cache_hit:
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_field_graphql",
+            method="zenrows_item_cache",
+            success=bool(result.get("success")),
+            status_code=metadata.get("status_code", ""),
+            item_present=int(bool(result.get("success"))),
+            error=result.get("error", ""),
+            detail="cached_result",
+        )
+    else:
+        cost = metadata.get("request_cost", "")
+        detail = f"missing:{','.join(missing_before)}"
+        if cost:
+            detail += f"; cost:{cost}"
+        _record_result_trace(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "zenrows_field_graphql",
+            result,
+            detail=detail,
+        )
+    if not result.get("success"):
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            f"zenrows_field_failed:{result.get('error', 'unknown')}",
+        )
+        return False
+    detail = result.get("detail") or {}
+    sku_recovered = _merge_magalu_tv_reference_sku(
+        row,
+        detail,
+        identity_verified=detail.get("_detail_identity_verified") is True,
+    )
+    _merge_missing_detail_fields(row, detail, missing_before)
+    filled = tuple(key for key in missing_before if row.get(key))
+    if not filled and not sku_recovered:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            "zenrows_field_no_target_values",
+        )
+        return False
+    row["fetch_method"] = _append_token(
+        row.get("fetch_method", ""),
+        "zenrows_graphql_item",
+    )
+    recovered_targets = list(filled)
+    if sku_recovered:
+        recovered_targets.append("sku")
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        f"zenrows_field_recovered:{','.join(recovered_targets)}",
+    )
+    return bool(filled or sku_recovered)
+
+
+def _backfill_magalu_zenrows_fields(
+    rows,
+    output,
+    checkpoint_every=5,
+    trace_rows=None,
+    checkpoint_writer=None,
+):
+    """Final item-only recovery after all free GraphQL/PDP attempts finish."""
+    if not _magalu_zenrows_field_recovery_enabled():
+        return rows
+    candidates = [
+        (row_index, row)
+        for row_index, row in enumerate(rows, start=1)
+        if _needs_magalu_zenrows_field_recovery(row)
+    ]
+    candidates.sort(
+        key=lambda entry: (
+            0 if _magalu_zenrows_missing_fields(entry[1]) else 1,
+            entry[0],
+        )
+    )
+    if not candidates:
+        return rows
+
+    from .magalu.detail_api import fetch_item_fields_via_zenrows
+
+    max_items = max(0, int(os.getenv("SEDA_MAGALU_ZENROWS_FIELD_MAX_ITEMS", "25")))
+    failure_limit = max(
+        1,
+        int(os.getenv("SEDA_MAGALU_ZENROWS_FIELD_FAILURE_STREAK", "3")),
+    )
+    cache = {}
+    attempted = 0
+    updated = 0
+    failure_streak = 0
+    stopped_reason = ""
+    print(
+        f"[seda] zenrows field recovery candidates={len(candidates)} max_items={max_items}",
+        flush=True,
+    )
+    for position, (row_index, row) in enumerate(candidates, start=1):
+        product_url = row.get("product_url", "")
+        cache_key, key_error = _magalu_zenrows_item_key(row)
+        if key_error:
+            row["parse_status"] = _append_token(
+                row.get("parse_status", ""),
+                f"zenrows_field_skipped:{key_error}",
+            )
+            _record_subcall(
+                trace_rows,
+                row,
+                row_index,
+                product_url,
+                "zenrows_field_graphql",
+                success=False,
+                error=key_error,
+            )
+            continue
+        cache_hit = cache_key in cache
+        if cache_hit:
+            result = cache[cache_key]
+        else:
+            if max_items and attempted >= max_items:
+                stopped_reason = "max_items"
+                break
+            result = fetch_item_fields_via_zenrows(
+                cache_key[1],
+                seller_id=_magalu_seller_id(row, product_url),
+                context_url=product_url,
+            )
+            cache[cache_key] = result
+            attempted += 1
+        if _merge_magalu_zenrows_field_result(
+            row,
+            result,
+            product_url,
+            trace_rows=trace_rows,
+            row_index=row_index,
+            cache_hit=cache_hit,
+        ):
+            updated += 1
+        if not cache_hit:
+            if result.get("success"):
+                failure_streak = 0
+            else:
+                failure_streak += 1
+                if result.get("error") in {
+                    "zenrows_disabled",
+                    "zenrows_dry_run",
+                    "key_missing",
+                } or str(result.get("error") or "").startswith("unknown_profile:"):
+                    stopped_reason = result.get("error") or "configuration_error"
+                    break
+                if failure_streak >= failure_limit:
+                    stopped_reason = f"failure_streak:{failure_streak}"
+                    break
+        print(
+            f"[seda] zenrows field {position}/{len(candidates)} "
+            f"item={_safe_log_value(row.get('item'))} cache={int(cache_hit)} "
+            f"success={int(bool(result.get('success')))} "
+            f"remaining={','.join(_magalu_zenrows_missing_fields(row)) or 'none'}",
+            flush=True,
+        )
+        if (
+            checkpoint_every
+            and not cache_hit
+            and attempted
+            and attempted % checkpoint_every == 0
+        ):
+            if checkpoint_writer:
+                checkpoint_writer(rows)
+            else:
+                write_csv(output, rows, columns=OUTPUT_COLUMNS)
+            print(
+                f"[seda] zenrows field checkpoint {output} attempted={attempted} updated={updated}",
+                flush=True,
+            )
+    print(
+        f"[seda] zenrows field recovery updated={updated}/{len(candidates)} "
+        f"attempted={attempted} unique={len(cache)} stopped={stopped_reason or 'no'}",
+        flush=True,
+    )
     return rows
 
 
@@ -2175,6 +2488,30 @@ def _run_parallel(
         rows,
         run_token,
     )
+
+    def recovery_checkpoint(snapshot_rows):
+        return _publish_detail_snapshot(
+            root,
+            output,
+            snapshot_rows,
+            subcall_rows,
+            review_rows,
+            run_token=run_token,
+            final_complete=False,
+            expected_total=expected_total,
+            target_sha256=target_sha256,
+            target_path=target_path,
+        )
+
+    merged = _backfill_magalu_zenrows_fields(
+        merged,
+        output,
+        checkpoint_every=int(
+            os.getenv("SEDA_MAGALU_ZENROWS_FIELD_CHECKPOINT_EVERY", "5")
+        ),
+        trace_rows=subcall_rows,
+        checkpoint_writer=recovery_checkpoint,
+    )
     _publish_detail_snapshot(
         root,
         output,
@@ -2448,6 +2785,16 @@ def _run_detail_main(root, *, is_worker):
         row_index_offset=skip if is_worker else 0,
         checkpoint_writer=checkpoint_writer,
     )
+    if not is_worker:
+        enriched = _backfill_magalu_zenrows_fields(
+            enriched,
+            output,
+            checkpoint_every=int(
+                os.getenv("SEDA_MAGALU_ZENROWS_FIELD_CHECKPOINT_EVERY", "5")
+            ),
+            trace_rows=subcall_trace_rows,
+            checkpoint_writer=checkpoint_writer,
+        )
     enriched = _backfill_magalu_shipping_blanks(
         enriched,
         output,

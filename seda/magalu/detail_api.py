@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -344,6 +345,112 @@ def fetch_detail(item_id, timeout=None, seller_id=None, context_url=None):
     if similar_error:
         result["similar_error"] = similar_error
     return result
+
+
+def fetch_item_fields_via_zenrows(item_id, timeout=None, seller_id=None, context_url=None):
+    """Fetch only itemQuery through ZenRows; never request shipping or showcases."""
+    item_id = clean_text(item_id)
+    if not item_id:
+        return {"success": False, "error": "missing_item_id", "detail": {}, "trace": []}
+
+    from .zenrows_client import request_json
+
+    timeout = int(timeout or os.getenv("SEDA_MAGALU_ZENROWS_FIELD_TIMEOUT", "90"))
+    profile = os.getenv("SEDA_MAGALU_ZENROWS_FIELD_PROFILE", "auto_custom_headers").strip()
+    payload = {
+        "operationName": "itemQuery",
+        "variables": {
+            "itemId": item_id,
+            "zipcode": _zipcode_for_graphql("SEDA_MAGALU_ZIP_CODE"),
+        },
+        "query": ITEM_QUERY,
+    }
+    headers = _headers()
+    headers["accept"] = "application/json"
+    if context_url:
+        headers["referer"] = context_url
+    result = request_json(
+        f"{GRAPHQL_URL}?operationName=itemQuery",
+        payload,
+        profile=profile,
+        timeout=timeout,
+        extra={
+            "custom_headers": "true",
+            "original_status": "true",
+            "proxy_country": "br",
+        },
+        extra_headers=headers,
+    )
+    method = f"zenrows_graphql:{result.profile}:{result.estimated_multiplier or 'unknown'}"
+    trace_item = {
+        "label": "zenrows_item",
+        "operation": "itemQuery",
+        "attempt": 1,
+        "method": method,
+        "status_code": result.status_code,
+        "length": len(result.text or ""),
+        "item_present": 0,
+        "error": result.error,
+    }
+    metadata = {
+        "profile": result.profile,
+        "estimated_multiplier": result.estimated_multiplier,
+        "request_cost": (result.headers or {}).get("X-Request-Cost", ""),
+        "status_code": result.status_code,
+    }
+    if result.error or not result.success:
+        return {
+            "success": False,
+            "error": result.error or "empty_response",
+            "detail": {},
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+    try:
+        data = json.loads(result.text or "")
+    except ValueError:
+        trace_item["error"] = "invalid_json"
+        return {
+            "success": False,
+            "error": "invalid_json",
+            "detail": {},
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+    semantic_error = _graphql_payload_error(data, "item")
+    if semantic_error:
+        trace_item["error"] = semantic_error
+        return {
+            "success": False,
+            "error": semantic_error,
+            "detail": {},
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+    response_data = data.get("data") if isinstance(data, dict) else {}
+    item = response_data.get("item") if isinstance(response_data, dict) else {}
+    item = item if isinstance(item, dict) else {}
+    identity_error = _item_identity_error(item_id, item)
+    if identity_error:
+        trace_item["error"] = identity_error
+        return {
+            "success": False,
+            "error": identity_error,
+            "detail": {},
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+    trace_item["item_present"] = 1
+    trace_item["error"] = ""
+    detail = _detail_from_item(item, seller_id=seller_id)
+    detail["_detail_identity_verified"] = True
+    detail["_detail_item_id"] = clean_text(item.get("id"))
+    return {
+        "success": True,
+        "detail": detail,
+        "trace": [trace_item],
+        "zenrows": metadata,
+    }
 
 def fetch_shipping(item, timeout=None, seller_id=None, context_url=None):
     timeout = int(timeout or os.getenv("SEDA_MAGALU_DETAIL_TIMEOUT", os.getenv("SEDA_TIMEOUT", "60")))

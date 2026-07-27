@@ -10,6 +10,8 @@ from .detail_publish import detail_consumer_guard
 
 from .parsers import (
     format_brl,
+    is_obviously_non_sku_magalu_value,
+    is_synthetic_magalu_sku_value,
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
 )
@@ -344,6 +346,8 @@ def _sku_for_output(row, item):
         and "sku_factsheet_reference_recovered"
         in str(row.get("parse_status") or "").split("+")
     )
+    if _is_magalu_row(row) and is_obviously_non_sku_magalu_value(sku):
+        return ""
     if item and sku == item and not trusted_tv_reference:
         return ""
     if _is_synthetic_sku(row, sku) and not trusted_tv_reference:
@@ -353,14 +357,7 @@ def _sku_for_output(row, item):
 def _is_synthetic_sku(row, sku):
     if not _is_magalu_row(row):
         return False
-    text = str(sku or "").strip()
-    if re.fullmatch(r"(?:110|127|220|240)\s*v(?:olts?)?|bivolt", text, re.I):
-        return True
-    if len(text) > 40:
-        return True
-    if re.search(r"\b(?:smart\s*tv|televisor|geladeira|refrigerador|maquina\s+de\s+lavar|máquina\s+de\s+lavar|lavadora)\b", text, re.I):
-        return True
-    return False
+    return is_synthetic_magalu_sku_value(sku)
 
 def _sku_short_version_for_output(row):
     line = product_line()

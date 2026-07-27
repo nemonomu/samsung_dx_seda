@@ -181,7 +181,46 @@ def estimated_multiplier(params):
 
 
 def request_url(url, profile=None, timeout=None, extra=None, extra_headers=None):
+    return _request_target(
+        url,
+        profile=profile,
+        timeout=timeout,
+        extra=extra,
+        extra_headers=extra_headers,
+    )
+
+
+def request_json(url, payload, profile=None, timeout=None, extra=None, extra_headers=None):
+    """Forward one JSON POST through the centralized ZenRows client."""
+    return _request_target(
+        url,
+        profile=profile,
+        timeout=timeout,
+        extra=extra,
+        extra_headers=extra_headers,
+        method="POST",
+        json_payload=payload,
+    )
+
+
+def _request_target(
+    url,
+    profile=None,
+    timeout=None,
+    extra=None,
+    extra_headers=None,
+    method="GET",
+    json_payload=None,
+):
     profile = profile or os.getenv("SEDA_ZENROWS_PROFILE", "auto_html")
+    if profile not in PROFILE_PARAMS:
+        return ZenRowsResult(
+            False,
+            url,
+            profile,
+            error=f"unknown_profile:{profile}",
+            params={},
+        )
     params = build_params(profile, extra=extra)
     params["url"] = url
     multiplier = estimated_multiplier(params)
@@ -193,7 +232,7 @@ def request_url(url, profile=None, timeout=None, extra=None, extra_headers=None)
         return ZenRowsResult(False, url, profile, error="zenrows_dry_run", params=public_params, estimated_multiplier=multiplier)
     key = api_key()
     if not key:
-        return ZenRowsResult(False, url, profile, error="ZENROWS_API_KEY is not set", params=public_params, estimated_multiplier=multiplier)
+        return ZenRowsResult(False, url, profile, error="key_missing", params=public_params, estimated_multiplier=multiplier)
 
     params["apikey"] = key
     timeout = int(timeout or os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", "180")))
@@ -207,9 +246,32 @@ def request_url(url, profile=None, timeout=None, extra=None, extra_headers=None)
     if extra_headers:
         headers.update({key: value for key, value in extra_headers.items() if value not in (None, "")})
     try:
-        response = requests.get(ZENROWS_API_URL, params=params, headers=headers, timeout=timeout)
+        if method == "POST":
+            response = requests.post(
+                ZENROWS_API_URL,
+                params=params,
+                headers=headers,
+                json=json_payload,
+                timeout=timeout,
+            )
+        else:
+            response = requests.get(
+                ZENROWS_API_URL,
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            )
     except Exception as exc:
-        return ZenRowsResult(False, url, profile, error=f"{type(exc).__name__}: {exc}", params=public_params, estimated_multiplier=multiplier)
+        # requests exceptions may include the full prepared ZenRows URL. That URL
+        # contains the API key in its query string, so never persist str(exc).
+        return ZenRowsResult(
+            False,
+            url,
+            profile,
+            error=f"request_error:{type(exc).__name__}",
+            params=public_params,
+            estimated_multiplier=multiplier,
+        )
 
     tracked_headers = {
         key: response.headers.get(key, "")
@@ -264,7 +326,7 @@ def fetch_next_data_html(url, profile=None, timeout=None):
             result.text = html_text
             result.success = True
             return result
-        if result.error in {"zenrows_disabled", "zenrows_dry_run", "ZENROWS_API_KEY is not set"}:
+        if result.error in {"zenrows_disabled", "zenrows_dry_run", "key_missing"}:
             return result
     return last or ZenRowsResult(False, url, profile or "pdp_next_data", error="not_attempted")
 
