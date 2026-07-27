@@ -40,6 +40,12 @@ query searchQuery(
       title
       description
       image
+      attributes {
+        type
+        label
+        value
+        current
+      }
       available
       position
       isBuyBox

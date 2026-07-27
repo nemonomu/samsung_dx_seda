@@ -35,6 +35,7 @@ from .magalu.field_extraction import (
     extract_fields as extract_magalu_semantic_fields,
     is_tv_product_title as is_magalu_tv_product_title,
 )
+from .magalu.recovery_contract import MAGALU_RECOVERY_FIELD_MAP
 from .parsers import (
     _html_target_label_value_pairs,
     _url_product_identity_matches,
@@ -119,15 +120,9 @@ MAGALU_PDP_SEMANTIC_FIELDS = (
     "ldy_color",
 )
 
-MAGALU_ZENROWS_FIELD_MAP = {
-    "TV": (
-        "screen_size",
-        "estimated_annual_electricity_use",
-        "model_year",
-    ),
-    "REF": ("ref_refrigerator_type", "ref_capacity"),
-    "LDY": ("ldy_loading_type", "ldy_capacity"),
-}
+# Compatibility alias for the paid field-recovery path's exact seven-field
+# contract. The read-only DB fallback has its own extended contract.
+MAGALU_ZENROWS_FIELD_MAP = MAGALU_RECOVERY_FIELD_MAP
 
 AUTHORITATIVE_AUDITED_FIELDS = (
     "screen_size",
@@ -1660,7 +1655,13 @@ def _backfill_magalu_shipping_blanks(
     return rows
 
 
-def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
+def _merge_magalu_pdp_html(
+    row,
+    product_url,
+    trace_rows=None,
+    row_index="",
+    allow_zenrows_pdp=False,
+):
     if row.get("retailer") != "Magalu":
         return
     try:
@@ -1706,7 +1707,9 @@ def _merge_magalu_pdp_html(row, product_url, trace_rows=None, row_index=""):
             row.get("parse_status", ""),
             f"pdp_html_failed:{result.get('status_code', 0)}:len={len(text)}:next={int('__NEXT_DATA__' in text)}",
         )
-        if _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=trace_rows, row_index=row_index):
+        if allow_zenrows_pdp and _merge_magalu_zenrows_pdp_html(
+            row, product_url, trace_rows=trace_rows, row_index=row_index
+        ):
             return
         return
     detail = parse_detail(result.get("text") or "", row.get("retailer", ""), _base_url(row.get("retailer", "")), product_url)
@@ -2038,11 +2041,64 @@ def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=
     try:
         from .magalu.zenrows_client import fetch_next_data_html
 
-        result = fetch_next_data_html(product_url)
+        try:
+            timeout = int(os.getenv("SEDA_MAGALU_ZENROWS_PDP_TIMEOUT", "120"))
+        except ValueError:
+            timeout = 120
+        attempts = [
+            fetch_next_data_html(
+                product_url,
+                profile="pdp_next_data",
+                timeout=timeout,
+            )
+        ]
+        first = attempts[0]
+        first_has_next_data = "__NEXT_DATA__" in (first.text or "")
+        if (
+            not first_has_next_data
+            and first.status_code in {200, 422}
+            and first.error not in {"key_missing", "zenrows_disabled", "zenrows_dry_run"}
+        ):
+            attempts.append(
+                fetch_next_data_html(
+                    product_url,
+                    profile="pdp_js_full",
+                    timeout=timeout,
+                )
+            )
+        result = next(
+            (
+                attempt
+                for attempt in attempts
+                if attempt.success
+                and not attempt.error
+                and "__NEXT_DATA__" in (attempt.text or "")
+            ),
+            attempts[-1],
+        )
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"zenrows_pdp_error:{type(exc).__name__}")
-        _record_subcall(trace_rows, row, row_index, product_url, "zenrows_pdp_html", success=False, error=f"{type(exc).__name__}: {exc}")
+        _record_subcall(
+            trace_rows, row, row_index, product_url,
+            "zenrows_pdp_html",
+            success=False,
+            error=type(exc).__name__,
+        )
         return False
+    for attempt_number, attempt in enumerate(attempts, start=1):
+        has_next_data = "__NEXT_DATA__" in (attempt.text or "")
+        request_cost = (attempt.headers or {}).get("X-Request-Cost", "")
+        _record_subcall(
+            trace_rows, row, row_index, product_url, "zenrows_pdp_html_attempt",
+            attempt=attempt_number,
+            method=f"zenrows_pdp:{attempt.profile}:{attempt.estimated_multiplier}",
+            success=bool(attempt.success and not attempt.error and has_next_data),
+            status_code=attempt.status_code,
+            length=len(attempt.text or ""),
+            has_next_data=int(has_next_data),
+            error=attempt.error or ("" if has_next_data else "missing_next_data"),
+            detail=f"request_cost:{request_cost}" if request_cost else "",
+        )
     token = f"zenrows_pdp:{result.profile}:{result.estimated_multiplier}"
     if result.error:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"{token}:{result.error}")
@@ -2094,11 +2150,25 @@ def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=
             error=reason,
         )
         return False
+    sku_merged = False
+    if _is_magalu_tv_row(row):
+        sku_merged = _merge_magalu_tv_reference_sku(
+            row,
+            detail,
+            identity_verified=identity_mode == "verified",
+        )
+    elif detail.get("sku") and (
+        identity_mode == "verified" or not row.get("sku")
+    ):
+        before_sku = row.get("sku")
+        row["sku"] = detail["sku"]
+        sku_merged = row.get("sku") != before_sku
     merged = _merge_missing_detail_fields(
         row,
         detail,
         ("summarized_review_content", "retailer_sku_name_similar", *MAGALU_PDP_SEMANTIC_FIELDS),
     )
+    merged = merged or sku_merged
     if _merge_magalu_exact_html_specs(row, result.text or "", detail):
         row["parse_status"] = _append_token(row.get("parse_status", ""), "zenrows_pdp_html_specs")
         merged = True
@@ -2809,7 +2879,13 @@ def _run_detail_main(root, *, is_worker):
                 )
             else:
                 magalu_review_blocked_streak = 0
-        _merge_magalu_pdp_html(row, url, trace_rows=subcall_trace_rows, row_index=index)
+        _merge_magalu_pdp_html(
+            row,
+            url,
+            trace_rows=subcall_trace_rows,
+            row_index=index,
+            allow_zenrows_pdp=_is_expected_magalu_item_query_block(graph_result),
+        )
         _merge_magalu_similar(
             row,
             url,

@@ -11,13 +11,17 @@ MAGALU_FULL_BATCHES = (
     "run_magalu_casas_interleaved_tv_ref_ldy_full.bat",
 )
 INTERLEAVED_BATCHES = MAGALU_FULL_BATCHES[-2:]
+MAGALU_RESUME_BATCHES = (
+    "resume_magalu_step08.bat",
+    "resume_magalu_tv_step08.bat",
+)
 
 
 class MagaluBatchZenRowsContractTests(unittest.TestCase):
     def _text(self, name):
         return (ROOT / name).read_text(encoding="utf-8").lower()
 
-    def test_full_batches_enable_only_bounded_itemquery_recovery(self):
+    def test_full_batches_enable_bounded_itemquery_and_item_null_pdp_recovery(self):
         required = (
             "if not defined seda_allow_zenrows set seda_allow_zenrows=1",
             "if not defined seda_zenrows_dry_run set seda_zenrows_dry_run=0",
@@ -28,10 +32,26 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
             "if not defined seda_magalu_zenrows_field_failure_streak set seda_magalu_zenrows_field_failure_streak=3",
             "if not defined seda_magalu_zenrows_field_checkpoint_every set seda_magalu_zenrows_field_checkpoint_every=5",
             "set seda_magalu_zenrows_detail_fallback=0",
-            "set seda_magalu_zenrows_pdp_fallback=0",
+            "if not defined seda_magalu_zenrows_pdp_fallback set seda_magalu_zenrows_pdp_fallback=1",
+            "if not defined seda_magalu_zenrows_pdp_timeout set seda_magalu_zenrows_pdp_timeout=120",
+            "if not defined seda_magalu_last_known_db_fallback set seda_magalu_last_known_db_fallback=1",
+            "if not defined seda_magalu_last_known_history_limit set seda_magalu_last_known_history_limit=30",
+            "if not defined seda_magalu_last_known_db_timeout_ms set seda_magalu_last_known_db_timeout_ms=15000",
             "if not defined seda_magalu_listing_allow_zenrows set seda_magalu_listing_allow_zenrows=0",
         )
         for name in MAGALU_FULL_BATCHES:
+            with self.subTest(batch=name):
+                text = self._text(name)
+                for line in required:
+                    self.assertIn(line, text)
+
+    def test_resume_batches_keep_last_known_contract_enabled(self):
+        required = (
+            "if not defined seda_magalu_last_known_db_fallback set seda_magalu_last_known_db_fallback=1",
+            "if not defined seda_magalu_last_known_history_limit set seda_magalu_last_known_history_limit=30",
+            "if not defined seda_magalu_last_known_db_timeout_ms set seda_magalu_last_known_db_timeout_ms=15000",
+        )
+        for name in MAGALU_RESUME_BATCHES:
             with self.subTest(batch=name):
                 text = self._text(name)
                 for line in required:

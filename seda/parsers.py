@@ -586,11 +586,12 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
         joiner = "&" if "?" in product_url else "?"
         product_url = f"{product_url}{joiner}seller_id={seller_id}"
     item_id = sku_from_url(product_url) or clean_text(product.get("id"))
+    line = product_line()
 
-    return {
+    row = {
         "retailer": "Magalu",
         "country": DEFAULT_COUNTRY,
-        "product_line": product_line(),
+        "product_line": line,
         "category": "Retail.com",
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",
@@ -616,6 +617,40 @@ def _magalu_product_row(product, base_url, source_url, run_id, rank):
         "parse_status": "listing_next_data",
         "seller_id": clean_text(seller_id),
     }
+    if line == "LDY":
+        title_item = {
+            "title": product.get("title") or "",
+            "path": path,
+            "factsheet": [],
+            "attributes": [],
+            "bundles": [],
+        }
+        row["ldy_capacity"] = extract_magalu_semantic_fields(
+            title_item,
+            "LDY",
+        )["ldy_capacity"]
+        row["ldy_color"] = _magalu_listing_ldy_color(product)
+    return row
+
+
+def _magalu_listing_ldy_color(product):
+    if not isinstance(product, dict):
+        return ""
+    wanted = {"cor", "cor do produto", "color"}
+    for attribute in product.get("attributes") or []:
+        if not isinstance(attribute, dict):
+            continue
+        label = normalize_field_key(
+            attribute.get("label") or attribute.get("type")
+        )
+        if label not in wanted:
+            continue
+        for key in ("current", "value"):
+            color = ldy_color_from_text(attribute.get(key))
+            if color:
+                return color
+    return ""
+
 
 def _seller_id_from_url(url):
     if not url:

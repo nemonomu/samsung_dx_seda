@@ -1088,8 +1088,33 @@ class MagaluFieldExtractionTests(unittest.TestCase):
         }
         self.assertEqual(
             extract_fields(unlabeled_dual_capacity, "LDY")["ldy_capacity"],
-            "10kg",
+            "11kg",
         )
+        unlabeled_dual_capacity["factsheet"] = []
+        self.assertEqual(
+            extract_fields(unlabeled_dual_capacity, "LDY")["ldy_capacity"],
+            "11kg",
+        )
+
+        non_washer_dryer_slash = {
+            "title": "Lavadora Samsung 11kg/7kg",
+            "factsheet": [fact("Capacidade de lavagem", "10kg")],
+        }
+        self.assertEqual(extract_fields(non_washer_dryer_slash, "LDY")["ldy_capacity"], "10kg")
+
+        unlabeled_adjacent_capacity = {
+            "title": (
+                "Lava e Seca Hisense Wd1i 11kg 7kg com Vapor "
+                "Ibubble Antialergico Cinza 110V"
+            ),
+            "factsheet": [fact("Capacidade de lavagem", "10kg")],
+        }
+        self.assertEqual(
+            extract_fields(unlabeled_adjacent_capacity, "LDY")["ldy_capacity"],
+            "11kg",
+        )
+        unlabeled_adjacent_capacity["factsheet"] = []
+        self.assertEqual(extract_fields(unlabeled_adjacent_capacity, "LDY")["ldy_capacity"], "11kg")
 
     def test_ldy_standalone_dryer_does_not_use_washing_capacity(self):
         dryer = {

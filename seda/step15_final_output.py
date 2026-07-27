@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .detail_publish import detail_consumer_guard
+from .magalu.last_known_db import backfill_magalu_last_known_fields
 
 from .parsers import (
     format_brl,
@@ -92,12 +93,26 @@ def _main(root):
     rows = read_csv(source)
     _validate_source_context(rows, source)
     _validate_internal_source_schema(rows, source)
+    recovery_stats = None
+    if _active_retailer() == "magalu":
+        recovery_stats = backfill_magalu_last_known_fields(
+            rows,
+            active_retailer="magalu",
+            product_line_value=product_line(),
+        )
     now = _run_datetime()
     output_rows = [_format_row(row, now) for row in rows]
     output = Path(os.getenv("SEDA_FINAL_OUTPUT_CSV", str(root / "output" / "final_output.csv")))
     columns = final_output_columns()
     write_csv(output, output_rows, columns=columns)
-    _write_manifest(root, source, output, output_rows, now)
+    _write_manifest(
+        root,
+        source,
+        output,
+        output_rows,
+        now,
+        magalu_last_known_db=recovery_stats,
+    )
     print(f"[seda] wrote {output} rows={len(output_rows)}")
 
 def _source_path(root):
@@ -613,7 +628,7 @@ def _item_from_url(url):
         return ""
     return parts[index + 1] if len(parts) > index + 1 else ""
 
-def _write_manifest(root, source, output, rows, now):
+def _write_manifest(root, source, output, rows, now, magalu_last_known_db=None):
     main_count = sum(1 for row in rows if row.get("main_rank"))
     bsr_count = sum(1 for row in rows if row.get("bsr_rank"))
     payload = {
@@ -626,6 +641,16 @@ def _write_manifest(root, source, output, rows, now):
         "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
         "batch_id": _batch_id(now),
     }
+    if magalu_last_known_db is not None:
+        payload["magalu_last_known_db"] = magalu_last_known_db or {
+            "enabled": False,
+            "eligible_rows": 0,
+            "queried_items": 0,
+            "history_rows": 0,
+            "recovered_rows": 0,
+            "recovered_fields": {},
+            "error": "",
+        }
     manifest_override = os.getenv("SEDA_FINAL_MANIFEST_JSON", "").strip()
     if manifest_override:
         path = Path(manifest_override)

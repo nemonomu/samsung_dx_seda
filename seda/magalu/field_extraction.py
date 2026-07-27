@@ -617,6 +617,10 @@ def _single_title_ldy_capacity(item):
     if not _is_ldy_title(title):
         return ""
 
+    paired_capacity = _paired_title_ldy_washing_capacity(title)
+    if paired_capacity is not None:
+        return paired_capacity
+
     mass_matches = [
         match
         for match in _LDY_TITLE_MASS_MENTION_RE.finditer(title)
@@ -699,7 +703,39 @@ def _ldy_title_mass_is_drying_capacity(title, match):
     )
 
 
+def _paired_title_ldy_washing_capacity(title):
+    """Return wash capacity from a conventional Lava e Seca Xkg/Ykg pair.
+
+    ``None`` means the title has no direct two-value pair. An empty string
+    means that a slash pair exists but cannot safely represent wash capacity.
+    """
+    text = clean_text(title)
+    matches = list(_LDY_TITLE_MASS_MENTION_RE.finditer(text))
+    if len(matches) != 2:
+        return None
+    first, second = matches
+    separator = text[first.end() : second.start()]
+    slash_pair = bool(re.fullmatch(r"\s*/\s*", separator))
+    adjacent_pair = bool(re.fullmatch(r"\s+", separator))
+    if not slash_pair and not adjacent_pair:
+        return None
+    if not re.search(r"\blava\s+e\s+seca\b", normalize_key(text)):
+        return "" if slash_pair else None
+    if any(_measurement_key(match)[1] != "kg" for match in matches):
+        return ""
+    if any(_title_measurement_is_qualified(text, match) for match in matches):
+        return ""
+    if any(_ldy_title_mass_is_product_weight(text, match) for match in matches):
+        return ""
+    if _ldy_title_mass_is_drying_capacity(text, first):
+        return ""
+    return clean_text(first.group(0))
+
+
 def _safe_ldy_capacity_from_title(title):
+    paired_capacity = _paired_title_ldy_washing_capacity(title)
+    if paired_capacity is not None:
+        return paired_capacity
     value = extract_ldy_capacity_from_title(title)
     if not value:
         return ""

@@ -19,8 +19,9 @@ from seda.common.field_rules import extract_ldy_capacity_from_title, extract_ref
 from seda.common.translations import translate_row
 from seda.magalu import detail_api as magalu_detail_api
 from seda.magalu.field_extraction import extract_fields as extract_magalu_fields
+from seda.magalu.search_api import SEARCH_QUERY
 from seda.magalu.zenrows_client import ZenRowsResult
-from seda.parsers import _casas_bahia_next_product, parse_detail
+from seda.parsers import _casas_bahia_next_product, _magalu_product_row, parse_detail
 from seda import step14_db_load
 from seda.step00_config import OUTPUT_COLUMNS, write_csv
 from seda.step08_detail_enrichment import (
@@ -1054,6 +1055,133 @@ class FieldPipelineContractTests(unittest.TestCase):
             self.assertTrue(_merge_magalu_zenrows_pdp_html(row, result.url))
         self.assertEqual(row["ref_capacity"], "395L")
 
+    def test_magalu_listing_ldy_keeps_exact_title_capacity_and_color_attribute(self):
+        cases = (
+            ("ebk3e3c7jd", "Lavadora Midea Wave Agitator 13kg"),
+            (
+                "ea9fc5j01e",
+                "Lava e Seca Midea HealthGuard 13kg/8kg Branca Conectada",
+            ),
+        )
+        for item, title in cases:
+            with self.subTest(item=item), patch.dict(
+                os.environ,
+                {"SEDA_PRODUCT_LINE": "LDY"},
+            ):
+                row = _magalu_product_row(
+                    {
+                        "id": "parent-id",
+                        "variationId": item,
+                        "title": title,
+                        "path": f"/produto/p/{item}/ed/lava/",
+                        "attributes": [
+                            {
+                                "type": "color",
+                                "label": "Cor",
+                                "value": "Branco",
+                                "current": "Branco",
+                            },
+                            {
+                                "type": "voltage",
+                                "label": "Voltagem",
+                                "value": "220V",
+                                "current": "220V",
+                            },
+                        ],
+                        "seller": {"id": "seller"},
+                        "price": {},
+                        "rating": {},
+                        "shippingTag": {},
+                    },
+                    "https://www.magazineluiza.com.br",
+                    "https://www.magazineluiza.com.br/busca/lavadora/",
+                    "main",
+                    1,
+                )
+            self.assertEqual(row["item"], item)
+            self.assertEqual(row["ldy_capacity"], "13kg")
+            self.assertEqual(row["ldy_color"], "Branco")
+            self.assertNotIn("ldy_loading_type", row)
+
+    def test_magalu_search_query_requests_listing_attributes(self):
+        for field in ("attributes", "type", "label", "value", "current"):
+            self.assertIn(field, SEARCH_QUERY)
+
+    def test_zenrows_pdp_uses_bounded_profile_ladder_and_merges_verified_ldy(self):
+        url = "https://www.magazineluiza.com.br/produto/p/ea9fc5j01e/ed/ela1/"
+        first = ZenRowsResult(
+            success=True,
+            url=url,
+            profile="pdp_next_data",
+            status_code=200,
+            text='{"next_data":[]}',
+            headers={"X-Request-Cost": "0.001"},
+            estimated_multiplier="10x",
+        )
+        item = {
+            "id": "ea9fc5j01e",
+            "title": "Lava e Seca Midea HealthGuard 13kg/8kg Branca",
+            "factsheet": [
+                {"keyName": "Referencia", "value": "MF200D130WB/WK-02"},
+                {"keyName": "Capacidade de Lavagem", "value": "13kg"},
+                {"keyName": "Capacidade de Secagem", "value": "8kg"},
+                {"keyName": "Tipo de Abertura do Eletrodomestico", "value": "Frontal"},
+                {"keyName": "Cor", "value": "Branco"},
+            ],
+            "attributes": [],
+            "offers": [],
+            "rating": {},
+        }
+        payload = {"props": {"pageProps": {"data": {"item": item}}}}
+        second = ZenRowsResult(
+            success=True,
+            url=url,
+            profile="pdp_js_full",
+            status_code=200,
+            text='<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>",
+            headers={"X-Request-Cost": "0.003"},
+            estimated_multiplier="25x",
+        )
+        row = {
+            "retailer": "Magalu",
+            "product_line": "LDY",
+            "product_url": url,
+            "retailer_sku_name": item["title"],
+            "sku": "ea9fc5j01e",
+        }
+        trace = []
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_PRODUCT_LINE": "LDY",
+                "SEDA_MAGALU_ZENROWS_PDP_FALLBACK": "1",
+            },
+        ), patch(
+            "seda.magalu.zenrows_client.fetch_next_data_html",
+            side_effect=(first, second),
+        ) as fetch:
+            self.assertTrue(
+                _merge_magalu_zenrows_pdp_html(
+                    row, url, trace_rows=trace, row_index=1
+                )
+            )
+        self.assertEqual(
+            [call.kwargs["profile"] for call in fetch.call_args_list],
+            ["pdp_next_data", "pdp_js_full"],
+        )
+        self.assertEqual(row["sku"], "MF200D130WB/WK-02")
+        self.assertEqual(row["ldy_loading_type"], "Front load")
+        self.assertEqual(row["ldy_capacity"], "13kg")
+        self.assertEqual(row["ldy_color"], "Branco")
+        attempts = [
+            item
+            for item in trace
+            if item["subcall"] == "zenrows_pdp_html_attempt"
+        ]
+        self.assertEqual(len(attempts), 2)
+
     def test_zenrows_pdp_auxiliary_fallback_keeps_blank_only_policy(self):
         result = ZenRowsResult(
             success=True,
@@ -1074,6 +1202,84 @@ class FieldPipelineContractTests(unittest.TestCase):
         ), patch("seda.step08_detail_enrichment.parse_detail", return_value={"screen_size": ""}):
             _merge_magalu_zenrows_pdp_html(row, result.url)
         self.assertEqual(row["screen_size"], "listing value")
+
+    def test_zenrows_pdp_terminal_error_does_not_escalate(self):
+        result = ZenRowsResult(
+            success=False,
+            url="https://example/p/sample",
+            profile="pdp_next_data",
+            status_code=403,
+            text="",
+            error="http_403",
+            estimated_multiplier="10x",
+        )
+        row = {"retailer": "Magalu", "product_url": result.url}
+        with patch.dict(
+            os.environ,
+            {"SEDA_MAGALU_ZENROWS_PDP_FALLBACK": "1"},
+        ), patch(
+            "seda.magalu.zenrows_client.fetch_next_data_html",
+            return_value=result,
+        ) as fetch:
+            self.assertFalse(_merge_magalu_zenrows_pdp_html(row, result.url))
+        fetch.assert_called_once_with(
+            result.url,
+            profile="pdp_next_data",
+            timeout=120,
+        )
+
+    def test_zenrows_pdp_exception_does_not_expose_error_text(self):
+        row = {"retailer": "Magalu", "product_url": "https://example/p/sample"}
+        trace = []
+        with patch.dict(
+            os.environ,
+            {"SEDA_MAGALU_ZENROWS_PDP_FALLBACK": "1"},
+        ), patch(
+            "seda.magalu.zenrows_client.fetch_next_data_html",
+            side_effect=RuntimeError("apikey=must-not-appear"),
+        ):
+            self.assertFalse(
+                _merge_magalu_zenrows_pdp_html(
+                    row,
+                    row["product_url"],
+                    trace_rows=trace,
+                )
+            )
+        serialized = json.dumps({"row": row, "trace": trace})
+        self.assertNotIn("must-not-appear", serialized)
+        self.assertIn("RuntimeError", serialized)
+
+    def test_magalu_paid_pdp_requires_explicit_item_null_gate(self):
+        product_url = "https://example/p/sample"
+        base_row = {
+            "retailer": "Magalu",
+            "product_line": "LDY",
+            "product_url": product_url,
+        }
+        failed = {
+            "status_code": 403,
+            "text": "",
+            "method": "test",
+            "error": "blocked",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_MAGALU_PDP_HTML_FETCH": "1"},
+        ), patch(
+            "seda.step08_detail_enrichment._fetch_magalu_next_html",
+            return_value=failed,
+        ), patch(
+            "seda.step08_detail_enrichment._merge_magalu_zenrows_pdp_html",
+            return_value=True,
+        ) as paid:
+            _merge_magalu_pdp_html(dict(base_row), product_url)
+            paid.assert_not_called()
+            _merge_magalu_pdp_html(
+                dict(base_row),
+                product_url,
+                allow_zenrows_pdp=True,
+            )
+            paid.assert_called_once()
 
     def test_casas_fixed_main_identity_uses_sku_not_product_id(self):
         product_url = "https://www.casasbahia.com.br/produto/p/123"
