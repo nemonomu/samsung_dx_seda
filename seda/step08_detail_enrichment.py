@@ -1476,13 +1476,15 @@ def _backfill_magalu_detail_blanks(
 
 def _magalu_zenrows_field_recovery_enabled():
     scoped = os.getenv("SEDA_MAGALU_ZENROWS_FIELD_FALLBACK", "0").lower()
-    globally_allowed = os.getenv("SEDA_ALLOW_ZENROWS", "0").lower()
-    return scoped in {"1", "true", "yes", "y"} and globally_allowed in {
-        "1",
-        "true",
-        "yes",
-        "y",
-    }
+    if scoped not in {"1", "true", "yes", "y"}:
+        return False
+
+    # Use the same centralized contract as the actual request. This preserves
+    # explicit global kill switches while allowing retailer-scoped defaults in
+    # the interleaved Magalu/Casas batches.
+    from .magalu.zenrows_client import dry_run, enabled
+
+    return enabled() and not dry_run()
 
 
 def _magalu_zenrows_sku_recovery_pending(row):

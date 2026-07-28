@@ -32,12 +32,25 @@ class MagaluZenRowsFieldRecoveryTest(unittest.TestCase):
     def _enabled_env(self, **extra):
         values = {
             "SEDA_ALLOW_ZENROWS": "1",
+            "SEDA_ZENROWS_DRY_RUN": "0",
             "SEDA_MAGALU_ZENROWS_FIELD_FALLBACK": "1",
             "SEDA_MAGALU_ZENROWS_FIELD_MAX_ITEMS": "25",
             "SEDA_MAGALU_ZENROWS_FIELD_FAILURE_STREAK": "3",
         }
         values.update(extra)
         return patch.dict(os.environ, values, clear=False)
+
+    def _interleaved_default_env(self, **extra):
+        values = {
+            "SEDA_ACTIVE_RETAILER": "magalu",
+            "SEDA_MAGALU_DEFAULT_ALLOW_ZENROWS": "1",
+            "SEDA_MAGALU_DEFAULT_ZENROWS_DRY_RUN": "0",
+            "SEDA_MAGALU_ZENROWS_FIELD_FALLBACK": "1",
+            "SEDA_MAGALU_ZENROWS_FIELD_MAX_ITEMS": "25",
+            "SEDA_MAGALU_ZENROWS_FIELD_FAILURE_STREAK": "3",
+        }
+        values.update(extra)
+        return patch.dict(os.environ, values, clear=True)
 
     def test_exact_product_line_field_contract(self):
         self.assertEqual(
@@ -52,6 +65,51 @@ class MagaluZenRowsFieldRecoveryTest(unittest.TestCase):
                 "LDY": ("ldy_loading_type", "ldy_capacity"),
             },
         )
+
+    def test_interleaved_retailer_defaults_enable_recovery_without_global_switches(self):
+        row = _failed_row()
+        response = {
+            "success": True,
+            "detail": {"screen_size": '65"'},
+            "trace": [],
+            "zenrows": {"status_code": 200},
+        }
+        with self._interleaved_default_env(), patch(
+            "seda.magalu.detail_api.fetch_item_fields_via_zenrows",
+            return_value=response,
+        ) as fetch:
+            rows = _backfill_magalu_zenrows_fields(
+                [row],
+                "unused.csv",
+                checkpoint_every=0,
+            )
+
+        fetch.assert_called_once()
+        self.assertEqual(rows[0]["screen_size"], '65"')
+
+    def test_explicit_global_disable_overrides_interleaved_retailer_default(self):
+        with self._interleaved_default_env(SEDA_ALLOW_ZENROWS="0"), patch(
+            "seda.magalu.detail_api.fetch_item_fields_via_zenrows",
+        ) as fetch:
+            _backfill_magalu_zenrows_fields(
+                [_failed_row()],
+                "unused.csv",
+                checkpoint_every=0,
+            )
+
+        fetch.assert_not_called()
+
+    def test_explicit_dry_run_overrides_interleaved_retailer_default(self):
+        with self._interleaved_default_env(SEDA_ZENROWS_DRY_RUN="1"), patch(
+            "seda.magalu.detail_api.fetch_item_fields_via_zenrows",
+        ) as fetch:
+            _backfill_magalu_zenrows_fields(
+                [_failed_row()],
+                "unused.csv",
+                checkpoint_every=0,
+            )
+
+        fetch.assert_not_called()
 
     def test_one_item_result_fills_only_missing_fields_and_is_cached(self):
         first = _failed_row(screen_size='77"')
