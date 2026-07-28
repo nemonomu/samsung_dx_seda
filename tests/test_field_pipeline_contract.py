@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from seda.casas_bahia.detail_api import (
     _fetch_product_source_direct,
+    _pickup_text,
     _product_source_detail,
     _product_source_payload_error,
     fetch_product_source,
@@ -105,6 +106,44 @@ class FieldPipelineContractTests(unittest.TestCase):
                         translated["ldy_loading_type"],
                     )
                 )
+
+    def test_casas_ref_single_door_translation_accepts_singular_and_plural_source(self):
+        for raw in ("1 porta", "1 portas"):
+            with self.subTest(raw=raw):
+                translated = translate_row({"ref_refrigerator_type": raw})
+                self.assertEqual(translated["ref_refrigerator_type"], "Single Door")
+
+    def test_casas_pickup_duration_translation_is_narrow_and_idempotent(self):
+        cases = (
+            ("Retira Rapido Retirar em 1 dia", "Fast pickup in 1 day"),
+            ("Retira Rapido Retirar em 2 dias", "Fast pickup in 2 days"),
+            ("Retira Rapido Retirar em 1 dia \u00fatil", "Fast pickup in 1 business day"),
+            ("Retira Rapido Retirar em 2 dias \u00fateis", "Fast pickup in 2 business days"),
+            ("Fast pickup in 2 dias", "Fast pickup in 2 days"),
+            ("Retira Rapido Retirar em 2h", "Fast pickup in 2h"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                translated = translate_row({"pick_up_availability": raw})
+                self.assertEqual(translated["pick_up_availability"], expected)
+                self.assertEqual(
+                    translate_row(translated)["pick_up_availability"],
+                    expected,
+                )
+
+        delivery = "Desculpe! No momento este produto nao pode ser entregue."
+        self.assertEqual(
+            translate_row({"delivery_availability": delivery})["delivery_availability"],
+            delivery,
+        )
+
+        pickup_from_api = _pickup_text({"prazo": {"textoFormatado": "2 dias"}})
+        self.assertEqual(
+            translate_row({"pick_up_availability": pickup_from_api})[
+                "pick_up_availability"
+            ],
+            "Fast pickup in 2 days",
+        )
 
     def test_blank_only_becomes_database_null(self):
         self.assertIsNone(_db_value("ref_capacity", ""))

@@ -209,6 +209,10 @@ def _append_browser_attempt_trace(trace, result, **context):
                     "status_code",
                     result.get("status_code", 0),
                 ),
+                "content_type": raw.get(
+                    "content_type",
+                    result.get("content_type", ""),
+                ),
                 "length": raw.get(
                     "length",
                     len(result.get("text") or ""),

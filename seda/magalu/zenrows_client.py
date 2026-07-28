@@ -132,12 +132,25 @@ class ZenRowsResult:
     estimated_multiplier: str = ""
 
 
+def _retailer_default(name, fallback):
+    retailer = os.getenv("SEDA_ACTIVE_RETAILER", "").strip().upper()
+    if not retailer:
+        return fallback
+    return os.getenv(f"SEDA_{retailer}_DEFAULT_{name}", fallback)
+
+
 def enabled():
-    return os.getenv("SEDA_ALLOW_ZENROWS", "0").lower() in {"1", "true", "yes", "y"}
+    value = os.getenv("SEDA_ALLOW_ZENROWS")
+    if value is None:
+        value = _retailer_default("ALLOW_ZENROWS", "0")
+    return value.lower() in {"1", "true", "yes", "y"}
 
 
 def dry_run():
-    return os.getenv("SEDA_ZENROWS_DRY_RUN", "1").lower() not in {"0", "false", "no", "n"}
+    value = os.getenv("SEDA_ZENROWS_DRY_RUN")
+    if value is None:
+        value = _retailer_default("ZENROWS_DRY_RUN", "1")
+    return value.lower() not in {"0", "false", "no", "n"}
 
 
 def api_key():

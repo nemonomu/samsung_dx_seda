@@ -20,6 +20,73 @@ def normalize_key(value):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def canonicalize_ref_refrigerator_type(value):
+    """Return one canonical refrigerator architecture from a raw value.
+
+    Compound source values are resolved by the approved semantic order:
+    named multi-door layouts, bottom-freezer layouts, top-freezer layouts,
+    explicit 1/3/4 door counts, then Duplex/2-door.  The returned value is
+    canonical so downstream translation cannot reinterpret the same raw text
+    with a different priority.
+    """
+    key = normalize_key(value)
+    if not key:
+        return ""
+
+    for pattern, canonical in (
+        (r"\bside\s+by\s+side\b", "Side by Side"),
+        (r"\bfrench(?:\s+door)?\b|\bporta\s+francesa\b", "French Door"),
+        (r"\bmultidoor\b|\bmulti\s+door\b", "Multidoor"),
+    ):
+        if re.search(pattern, key):
+            return canonical
+
+    if re.search(
+        r"\b(?:inverse|inverso)\b|\bbottom\s+freezer\b|"
+        r"\bfreezer\s+(?:embaixo|inferior)\b",
+        key,
+    ):
+        return "Inverse"
+    if re.search(
+        r"\btop\s+freezer\b|\bfreezer\s+(?:em\s+cima|superior)\b",
+        key,
+    ):
+        return "Top Freezer"
+
+    count_match = re.search(r"\b([134])\s*portas?\b", key)
+    if count_match:
+        count = count_match.group(1)
+        return f"{count} porta" if count == "1" else f"{count} portas"
+    for pattern, canonical in (
+        (r"\buma\s+porta\b", "1 porta"),
+        (r"\btres\s+portas\b", "3 portas"),
+        (r"\bquatro\s+portas\b", "4 portas"),
+    ):
+        if re.search(pattern, key):
+            return canonical
+
+    if re.search(r"\bduplex\b", key):
+        return "Duplex"
+    if re.search(r"\b2\s*portas?\b|\bduas\s+portas\b", key):
+        return "2 portas"
+    return ""
+
+
+def ref_refrigerator_type_specificity(value):
+    canonical = canonicalize_ref_refrigerator_type(value)
+    if canonical in {"Side by Side", "French Door", "Multidoor"}:
+        return 5
+    if canonical == "Inverse":
+        return 4
+    if canonical == "Top Freezer":
+        return 3
+    if canonical in {"1 porta", "3 portas", "4 portas"}:
+        return 2
+    if canonical in {"Duplex", "2 portas"}:
+        return 1
+    return 0
+
+
 def _comparison_key(value):
     return normalize_key(value)
 

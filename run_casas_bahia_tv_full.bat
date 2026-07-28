@@ -8,6 +8,8 @@ for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\casas_bahia\log\casas_bahia_tv_full_%SEDA_RUN_TIMESTAMP%.log"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
+if not defined SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS set SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS=1
+if not defined SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN set SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN=0
 
 if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
 set SEDA_FETCH_MODE=graphql

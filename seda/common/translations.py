@@ -1,7 +1,10 @@
 import re
 import unicodedata
 
-from .field_rules import normalize_loading_type
+from .field_rules import (
+    canonicalize_ref_refrigerator_type,
+    normalize_loading_type,
+)
 
 
 TRANSLATABLE_FIELDS = {
@@ -158,12 +161,29 @@ def _translate_pickup(text):
     normalized = _normalize(text)
     fast = re.search(r"retira\s+rapido\s+retirar\s+em\s+(.+)", normalized, re.I)
     if fast:
-        return f"Fast pickup in {fast.group(1).strip()}"
+        return f"Fast pickup in {_translate_pickup_duration(fast.group(1))}"
+    already_fast = re.search(r"fast\s+pickup\s+in\s+(.+)", text, re.I)
+    if already_fast:
+        return f"Fast pickup in {_translate_pickup_duration(already_fast.group(1))}"
     if re.search(r"retire.*amanh", normalized, re.I):
         return "Pick up in store starting tomorrow"
     if re.search(r"retire|retira", normalized, re.I):
         return "Pick up in store"
     return text
+
+
+def _translate_pickup_duration(value):
+    duration = str(value or "").strip()
+    normalized = _normalize(duration)
+    match = re.fullmatch(r"(\d+)\s+dias?(?:\s+(ut(?:il|eis)))?", normalized, re.I)
+    if not match:
+        return duration
+    count = match.group(1)
+    if match.group(2):
+        unit = "business day" if count == "1" else "business days"
+    else:
+        unit = "day" if count == "1" else "days"
+    return f"{count} {unit}"
 
 
 def _translate_recommendation(text):
@@ -184,11 +204,26 @@ def _translate_ref_refrigerator_type(text):
     normalized = _normalize(text)
     if not normalized:
         return ""
+    canonical = canonicalize_ref_refrigerator_type(text)
+    canonical_translation = {
+        "Side by Side": "Side by Side",
+        "French Door": "French Door",
+        "Multidoor": "Multidoor",
+        "Inverse": "Freezer-on-Bottom",
+        "Top Freezer": "Freezer-on-Top",
+        "1 porta": "Single Door",
+        "3 portas": "Three Door",
+        "4 portas": "Four Door",
+        "Duplex": "Freezer-on-Top",
+        "2 portas": "Two Door",
+    }.get(canonical)
+    if canonical_translation:
+        return canonical_translation
     if normalized in {"sim", "nao", "1", "2", "02", "3", "4"}:
         return ""
     if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
         return ""
-    if re.search(r"\b1\s*porta\b|uma\s+porta|porta unica", normalized, re.I):
+    if re.search(r"\b1\s*portas?\b|uma\s+porta|porta unica", normalized, re.I):
         return "Single Door"
     if re.search(r"\b2\s*portas\b|duas\s+portas", normalized, re.I):
         return "Two Door"

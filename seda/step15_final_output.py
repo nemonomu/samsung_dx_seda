@@ -12,6 +12,7 @@ from .magalu.last_known_db import backfill_magalu_last_known_fields
 from .parsers import (
     format_brl,
     is_obviously_non_sku_magalu_value,
+    is_appliance_spec_token,
     is_synthetic_magalu_sku_value,
     ldy_sku_short_version_from_text,
     ref_sku_short_version_from_text,
@@ -307,7 +308,10 @@ def _format_row(row, now):
         "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
         "star_rating": _star_rating_for_output(row.get("star_rating", "")),
         "count_of_star_ratings": _count_metric_for_output(row.get("count_of_star_ratings", "")),
-        "count_of_reviews": _count_metric_for_output(row.get("count_of_reviews", "")),
+        "count_of_reviews": _count_metric_for_output(
+            row.get("count_of_reviews", ""),
+            preserve_blank=_magalu_review_count_failed(row),
+        ),
         "recommendation_intent": _recommendation_for_output(row.get("recommendation_intent", "")),
         "detailed_review_content": _join_reviews(row.get("detailed_review_content", "")),
         "bsr_rank": row.get("bsr_rank", ""),
@@ -361,6 +365,12 @@ def _sku_for_output(row, item):
         and "sku_factsheet_reference_recovered"
         in str(row.get("parse_status") or "").split("+")
     )
+    if (
+        _is_magalu_row(row)
+        and line in {"REF", "LDY"}
+        and is_appliance_spec_token(sku)
+    ):
+        return ""
     if _is_magalu_row(row) and is_obviously_non_sku_magalu_value(sku):
         return ""
     if item and sku == item and not trusted_tv_reference:
@@ -495,13 +505,13 @@ def _star_rating_for_output(value):
         return str(int(number))
     return f"{number:g}"
 
-def _count_metric_for_output(value):
+def _count_metric_for_output(value, preserve_blank=False):
     text = str(value or "").strip()
     if not text or text.lower() in {"none", "null", "nan"}:
-        return "0"
+        return "" if preserve_blank else "0"
     normalized = re.sub(r"[^\d,.-]", "", text)
     if not normalized:
-        return "0"
+        return "" if preserve_blank else "0"
     if "," in normalized:
         normalized = normalized.replace(".", "").replace(",", ".")
     elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", normalized):
@@ -509,12 +519,23 @@ def _count_metric_for_output(value):
     try:
         number = float(normalized)
     except ValueError:
-        return text
+        return "" if preserve_blank else text
+    if preserve_blank and number < 0:
+        return ""
     if number == 0:
         return "0"
     if number.is_integer():
         return str(int(number))
     return f"{number:g}"
+
+
+def _magalu_review_count_failed(row):
+    if not _is_magalu_row(row):
+        return False
+    return any(
+        token.startswith("reviews_graphql_failed:")
+        for token in str(row.get("parse_status") or "").split("+")
+    )
 
 def _summary_for_output(value):
     text = _join_values(value)

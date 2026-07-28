@@ -780,6 +780,32 @@ class CasasBahiaFieldExtractionTests(unittest.TestCase):
         )
         self.assertEqual(self.detail("REF", data)["ref_capacity"], "490 L")
 
+    def test_ref_type_uses_title_only_after_description_and_specs_are_empty(self):
+        title_only = source("Geladeira Electrolux Multidoor 541L", [])
+        self.assertEqual(
+            self.detail("REF", title_only)["ref_refrigerator_type"],
+            "Multidoor",
+        )
+
+        description_first = source(
+            "Geladeira Electrolux Multidoor 541L",
+            [spec("Quantidade de portas", "1 portas")],
+            "Geladeira Side by Side com amplo espaco interno",
+        )
+        self.assertEqual(
+            self.detail("REF", description_first)["ref_refrigerator_type"],
+            "Side by Side",
+        )
+
+        spec_before_title = source(
+            "Geladeira Electrolux Multidoor 541L",
+            [spec("Quantidade de portas", "1 portas")],
+        )
+        self.assertEqual(
+            self.detail("REF", spec_before_title)["ref_refrigerator_type"],
+            "1 portas",
+        )
+
     def test_ref_title_door_count_does_not_override_structured_capacity(self):
         cases = (
             ("Refrigerador 1 Porta Consul CRA30", "300 L"),

@@ -3,6 +3,7 @@ import re
 
 from ..common.field_rules import (
     CAPACITY_QUALIFIER_PATTERN,
+    canonicalize_ref_refrigerator_type,
     clean_text,
     combine_distinct,
     combine_measurement_distinct,
@@ -25,6 +26,7 @@ from ..common.field_rules import (
     normalize_key,
     normalize_exact_loading_direction,
     normalize_loading_type,
+    ref_refrigerator_type_specificity as common_ref_refrigerator_type_specificity,
     sanitize_labeled_energy_target_value,
     select_ref_capacity_exact_over_qualified,
     select_ref_title_capacity_component,
@@ -1313,6 +1315,41 @@ def _is_tv_title(title):
 def is_tv_product_title(title):
     """Expose the shared Magalu TV-vs-accessory title classification."""
     return _is_tv_title(title)
+
+
+def ref_refrigerator_type_from_title(title):
+    """Return one explicit refrigerator architecture stated in the title.
+
+    This is deliberately narrower than a general title inference. It runs only
+    for titles that pass the existing REF product/accessory guard and returns an
+    empty value when no architecture is stated, allowing the producer's
+    existing factsheet and door-count fallbacks to remain authoritative.
+    """
+    text = clean_text(title)
+    if not text or not _is_ref_title(text):
+        return ""
+    return canonicalize_ref_refrigerator_type(text)
+
+
+def ref_refrigerator_type_specificity(value):
+    """Rank one explicit architecture without inferring from unrelated text."""
+    return common_ref_refrigerator_type_specificity(value)
+
+
+def select_ref_refrigerator_type(title_type, spec_types):
+    """Select by semantic specificity, preferring title only on equal rank."""
+    candidates = [(clean_text(title_type), True)]
+    candidates.extend((clean_text(value), False) for value in spec_types or ())
+    selected = ""
+    selected_key = (0, 0)
+    for value, is_title in candidates:
+        canonical = canonicalize_ref_refrigerator_type(value)
+        rank = ref_refrigerator_type_specificity(canonical)
+        candidate_key = (rank, int(is_title))
+        if canonical and candidate_key > selected_key:
+            selected = canonical
+            selected_key = candidate_key
+    return selected
 
 
 def _is_ref_title(title):

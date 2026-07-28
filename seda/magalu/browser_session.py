@@ -859,7 +859,11 @@ return (async () => {
         body: JSON.stringify(payload)
       }
     );
-    return JSON.stringify({status: response.status, text: await response.text()});
+    return JSON.stringify({
+      status: response.status,
+      contentType: response.headers.get('content-type') || '',
+      text: await response.text()
+    });
   } catch (error) {
     return JSON.stringify({status: 0, error: String(error), text: ''});
   }
@@ -903,6 +907,7 @@ return (async () => {
             except ValueError:
                 error = error or "invalid_json"
         status_code = result.get("status") or 0
+        content_type = result.get("contentType") or ""
         semantic_error = ""
         terminal_business_error = ""
         if not error and status_code == 200:
@@ -914,6 +919,7 @@ return (async () => {
             error = semantic_error or error
         last = {
             "status_code": status_code,
+            "content_type": content_type,
             "text": text,
             "data": data,
             "error": error,
@@ -922,7 +928,7 @@ return (async () => {
             "terminal_business_error": terminal_business_error,
         }
         blocked = _graphql_result_blocked(last)
-        if blocked and not error:
+        if blocked:
             error = "blocked_response"
         elif status_code != 200 and not error:
             error = f"http_status_{status_code}"
@@ -939,6 +945,7 @@ return (async () => {
             "attempt": attempt,
             "method": "browser_graphql",
             "status_code": status_code,
+            "content_type": content_type,
             "length": len(text),
             "error": error,
             "item_present": item_present,
@@ -1027,10 +1034,115 @@ def _is_failed_to_fetch_error(error):
 
 def _graphql_result_blocked(result):
     status = int(result.get("status_code") or 0)
-    text = _ascii_lower(result.get("text") or "")
     if status in {401, 403, 429}:
         return True
-    return any(marker in text for marker in ("akamai", "captcha", "access denied", "nao e possivel", "erro 403", "oops", "ops!"))
+
+    payload = result.get("data")
+    if isinstance(payload, dict) and ("data" in payload or "errors" in payload):
+        errors = payload.get("errors")
+        return bool(
+            isinstance(errors, list)
+            and any(_graphql_error_is_blocked(error) for error in errors)
+        )
+
+    # Normal GraphQL data can contain arbitrary customer review text. Only
+    # inspect explicit top-level error/message values for a decoded non-envelope
+    # JSON response. Never scan arbitrary JSON values or normal GraphQL data.
+    if result.get("error") != "invalid_json" and "json" in str(
+        result.get("content_type") or ""
+    ).casefold():
+        return _top_level_json_error_is_blocked(payload)
+    text = _ascii_lower(result.get("text") or "")
+    return any(
+        marker in text
+        for marker in (
+            "akamai",
+            "captcha",
+            "access denied",
+            "erro 403",
+            "too many requests",
+        )
+    )
+
+
+def _top_level_json_error_is_blocked(payload):
+    if not isinstance(payload, dict):
+        return False
+    values = []
+    for key in ("error", "message"):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            text = _ascii_lower(value).strip()
+            if text:
+                values.append(text)
+    if not values:
+        return False
+    exact_codes = {
+        "401",
+        "403",
+        "429",
+        "forbidden",
+        "unauthenticated",
+        "unauthorized",
+        "rate_limited",
+        "too_many_requests",
+    }
+    strong_markers = (
+        "akamai",
+        "captcha",
+        "access denied",
+        "forbidden",
+        "unauthorized",
+        "unauthenticated",
+        "rate limit",
+        "too many requests",
+        "erro 403",
+        "http 403",
+    )
+    return any(
+        text in exact_codes or any(marker in text for marker in strong_markers)
+        for text in values
+    )
+
+
+def _graphql_error_is_blocked(error):
+    if not isinstance(error, dict):
+        return False
+    extensions = error.get("extensions")
+    extensions = extensions if isinstance(extensions, dict) else {}
+    codes = {
+        str(extensions.get(key) or "").strip().casefold()
+        for key in ("code", "status", "statusCode", "errorType")
+    }
+    codes.discard("")
+    if codes.intersection(
+        {
+            "401",
+            "403",
+            "429",
+            "forbidden",
+            "unauthenticated",
+            "unauthorized",
+            "rate_limited",
+            "too_many_requests",
+        }
+    ):
+        return True
+    message = _ascii_lower(error.get("message") or "")
+    return any(
+        marker in message
+        for marker in (
+            "akamai",
+            "captcha",
+            "access denied",
+            "forbidden",
+            "unauthorized",
+            "unauthenticated",
+            "rate limit",
+            "too many requests",
+            "erro 403",
+        )
+    )
 
 
 def graphql_post_raw(payload, timeout=None, endpoint=None):

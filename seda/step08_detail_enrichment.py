@@ -283,7 +283,12 @@ def _result_trace_detail(item, detail, overall_success):
             if detail
             else f"overall_success:{int(overall_success)}"
         )
-    parts = [_compact_trace_value(base)]
+    parts = []
+    content_type = _compact_trace_value(item.get("content_type", ""))
+    if content_type:
+        parts.append(f"content_type:{content_type}")
+    if base not in ("", None):
+        parts.append(_compact_trace_value(base))
     for key in (
         "terminal_business_error",
         "recovery",
@@ -582,6 +587,56 @@ def _magalu_review_target(row):
     return review_limit
 
 
+def _magalu_review_graphql_failure_reason(result):
+    """Return why ProductRating did not provide an explicit review count."""
+    if not isinstance(result, dict):
+        return "count_missing:invalid_result"
+    if _magalu_review_count_present(result):
+        return ""
+
+    reason = result.get("error") or ""
+    trace = result.get("trace")
+    if isinstance(trace, list):
+        for item in reversed(trace):
+            if isinstance(item, dict) and item.get("error"):
+                reason = item.get("error")
+                break
+    if not reason:
+        return "count_missing"
+    safe_reason = re.sub(
+        r"[^a-z0-9_.-]+",
+        "_",
+        str(reason).casefold(),
+    ).strip("_")[:80]
+    return f"count_missing:{safe_reason or 'unknown'}"
+
+
+def _magalu_review_count_value_present(value):
+    if value in ("", None) or isinstance(value, bool):
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    normalized = text.replace(".", "").replace(",", ".")
+    try:
+        number = float(normalized)
+        return math.isfinite(number) and number >= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _magalu_review_count_present(result):
+    if not isinstance(result, dict):
+        return False
+    general = result.get("general")
+    general = general if isinstance(general, dict) else {}
+    if _magalu_review_count_value_present(general.get("commentCount")):
+        return True
+    page = result.get("page")
+    page = page if isinstance(page, dict) else {}
+    return _magalu_review_count_value_present(page.get("totalItems"))
+
+
 def _magalu_html_headers():
     return {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -710,20 +765,31 @@ def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
         return None
     result = fetch_product_rating(sku_from_url(product_url) or row.get("sku"), limit=limit, context_url=product_url)
     _record_result_trace(trace_rows, row, row_index, product_url, "review_graphql", result, detail=f"limit:{limit}")
+    failure_reason = _magalu_review_graphql_failure_reason(result)
+    if failure_reason:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            f"reviews_graphql_failed:{failure_reason}",
+        )
     reviews = result.get("reviews") or []
     if reviews:
         row["detailed_review_content"] = compact_json(reviews)
         row["fetch_method"] = _append_token(row.get("fetch_method", ""), result.get("method", "graphql_product_rating"))
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_{len(reviews)}")
 
-    general = result.get("general") or {}
+    general = result.get("general")
+    general = general if isinstance(general, dict) else {}
     if general:
         row["star_rating"] = general.get("rating", "") or row.get("star_rating", "")
         row["count_of_star_ratings"] = general.get("reviewCount", "") or row.get("count_of_star_ratings", "")
-        if general.get("commentCount") is not None:
-            row["count_of_reviews"] = general.get("commentCount")
-        elif (result.get("page") or {}).get("totalItems") is not None:
-            row["count_of_reviews"] = (result.get("page") or {}).get("totalItems")
+    comment_count = general.get("commentCount")
+    page = result.get("page")
+    page = page if isinstance(page, dict) else {}
+    page_count = page.get("totalItems")
+    if _magalu_review_count_value_present(comment_count):
+        row["count_of_reviews"] = comment_count
+    elif _magalu_review_count_value_present(page_count):
+        row["count_of_reviews"] = page_count
 
     # summarized_review_content via reviewSummaryQuery on the browser GraphQL channel
     # (PDP HTML is Akamai-403 on every product; this needs no PDP HTML / ZenRows).
@@ -757,6 +823,7 @@ def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
 def _merge_casas_bahia_apis(row):
     if row.get("retailer") != "Casas Bahia":
         return
+    _clear_legacy_casas_recommendation_default(row)
     if os.getenv("SEDA_CASAS_BAHIA_API_ENRICH", "1").lower() in {"0", "false", "no", "n"}:
         return
 
@@ -829,10 +896,23 @@ def _merge_casas_bahia_apis(row):
     try:
         from .casas_bahia.review_api import fetch_reviews
 
-        result = fetch_reviews(product_id)
+        result = fetch_reviews(product_id, referer_url=row.get("product_url", ""))
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_api_error:{type(exc).__name__}")
         return
+    review_method = result.get("method", "casas_bahia_reviews_api")
+    zenrows_requested = bool(result.get("zenrows_requested"))
+    if zenrows_requested:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            "reviews_zenrows_requested:10x",
+        )
+    cost = (result.get("headers") or {}).get("X-Request-Cost", "")
+    if cost:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            f"reviews_cost:{cost}",
+        )
     if result.get("success"):
         general = result.get("general") or {}
         reviews = result.get("reviews") or []
@@ -841,10 +921,12 @@ def _merge_casas_bahia_apis(row):
             row["summarized_review_content"] = summary
         if reviews:
             row["detailed_review_content"] = compact_json(reviews)
-            row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_reviews_api")
+            row["fetch_method"] = _append_token(row.get("fetch_method", ""), review_method)
             seen = int(result.get("review_items_seen") or len(reviews))
             status = f"reviews_{len(reviews)}/{seen}" if seen != len(reviews) else f"reviews_{len(reviews)}"
             row["parse_status"] = _append_token(row.get("parse_status", ""), status)
+        elif zenrows_requested:
+            row["fetch_method"] = _append_token(row.get("fetch_method", ""), review_method)
         _merge_zero_preserving(row, "star_rating", general.get("rating", ""))
         _merge_zero_preserving(row, "count_of_star_ratings", general.get("ratingQty", ""))
         _merge_zero_preserving(row, "count_of_reviews", general.get("ratingQty", ""))
@@ -852,9 +934,20 @@ def _merge_casas_bahia_apis(row):
             row["recommendation_intent"] = f"{general.get('recommendationPercentage')}% dos clientes recomendam esse produto"
     else:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_api_failed:{result.get('error','unknown')}")
-    if not row.get("recommendation_intent"):
-        row["recommendation_intent"] = "0% dos clientes recomendam esse produto"
-        row["parse_status"] = _append_token(row.get("parse_status", ""), "recommendation_default_0")
+
+
+def _clear_legacy_casas_recommendation_default(row):
+    tokens = str(row.get("parse_status") or "").split("+")
+    value = str(row.get("recommendation_intent") or "").strip().casefold()
+    if (
+        "recommendation_default_0" in tokens
+        and value == "0% dos clientes recomendam esse produto"
+    ):
+        row["recommendation_intent"] = ""
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            "recommendation_default_0_cleared",
+        )
 
 
 def _clear_magalu_listing_metrics(row):
@@ -1032,7 +1125,9 @@ def _merge_zero_preserving(row, key, value):
 
 
 def _metric_text(value):
-    text = str(value or "").strip()
+    if value in ("", None):
+        return ""
+    text = str(value).strip()
     if not text:
         return ""
     try:

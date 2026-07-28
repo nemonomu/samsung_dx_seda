@@ -183,20 +183,14 @@ def _fetch_product_source_zenrows(url, timeout=None):
     except Exception as exc:
         return {"success": False, "error": f"zenrows_import_{type(exc).__name__}: {exc}", "method": "casas_bahia_product_source_zenrows"}
 
-    restore = {
-        "SEDA_ALLOW_ZENROWS": os.environ.get("SEDA_ALLOW_ZENROWS"),
-        "SEDA_ZENROWS_DRY_RUN": os.environ.get("SEDA_ZENROWS_DRY_RUN"),
-    }
-    os.environ["SEDA_ALLOW_ZENROWS"] = "1"
-    os.environ["SEDA_ZENROWS_DRY_RUN"] = "0"
-    try:
-        result = request_url(url, profile=os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_PROFILE", "premium_html"), timeout=timeout)
-    finally:
-        for key, value in restore.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    result = request_url(
+        url,
+        profile=os.getenv(
+            "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_PROFILE",
+            "premium_html",
+        ),
+        timeout=timeout,
+    )
     if not result.success:
         return {
             "success": False,
@@ -262,6 +256,7 @@ def _product_source_detail(data):
                     _ref_type_from_text(description)
                     or _first_group_spec(grouped_specs, ["caracteristicas", "especificacoes tecnicas"], ["quantidade de portas"])
                     or _first_spec(spec_values, ["quantidade de portas"])
+                    or _ref_type_from_text(name)
                 ),
                 "ref_capacity": semantic_fields["ref_capacity"],
                 "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
@@ -593,11 +588,7 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
         "wait": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_WAIT", "15000"),
         "js_instructions": json.dumps(instructions, separators=(",", ":")),
     }
-    restore = {
-        "SEDA_ALLOW_ZENROWS": os.environ.get("SEDA_ALLOW_ZENROWS"),
-        "SEDA_ZENROWS_DRY_RUN": os.environ.get("SEDA_ZENROWS_DRY_RUN"),
-        "SEDA_ZENROWS_SESSION_ID": os.environ.get("SEDA_ZENROWS_SESSION_ID"),
-    }
+    restore_session_id = os.environ.get("SEDA_ZENROWS_SESSION_ID")
     profile = os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_PROFILE", "basic_html")
     attempts = _int_env("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_ATTEMPTS", 3)
     base_session = _int_env("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_SESSION_ID", 12345)
@@ -605,8 +596,6 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
     last_headers = {}
     last_method = "zenrows_pdp_shipping"
     try:
-        os.environ["SEDA_ALLOW_ZENROWS"] = "1"
-        os.environ["SEDA_ZENROWS_DRY_RUN"] = "0"
         for attempt in range(max(1, attempts)):
             os.environ["SEDA_ZENROWS_SESSION_ID"] = str(base_session + attempt)
             result = request_url(product_url, profile=profile, timeout=timeout, extra=extra)
@@ -615,6 +604,12 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
             last_method = f"zenrows_pdp_shipping:{result.estimated_multiplier}"
             if not result.success:
                 last_error = f"zenrows_pdp_{result.error or result.status_code}"
+                if result.error in {
+                    "zenrows_disabled",
+                    "zenrows_dry_run",
+                    "key_missing",
+                }:
+                    break
                 continue
             payload = _parse_json_text(result.text)
             if not isinstance(payload, dict):
@@ -635,11 +630,10 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
                 "headers": last_headers,
             }
     finally:
-        for key, value in restore.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        if restore_session_id is None:
+            os.environ.pop("SEDA_ZENROWS_SESSION_ID", None)
+        else:
+            os.environ["SEDA_ZENROWS_SESSION_ID"] = restore_session_id
     return {
         "success": False,
         "error": last_error,

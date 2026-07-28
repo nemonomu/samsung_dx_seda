@@ -5,6 +5,7 @@ import time
 
 import requests
 
+from ..common.field_rules import canonicalize_ref_refrigerator_type
 from ..parsers import (
     clean_text,
     compact_json,
@@ -14,7 +15,11 @@ from ..parsers import (
     preferred_magalu_sku,
 )
 from ..step00_config import product_line
-from .field_extraction import extract_fields as extract_semantic_fields
+from .field_extraction import (
+    extract_fields as extract_semantic_fields,
+    ref_refrigerator_type_from_title,
+    select_ref_refrigerator_type,
+)
 from .graphql_contract import (
     graphql_envelope_error,
     graphql_terminal_business_error,
@@ -648,6 +653,7 @@ def _post_browser_graphql(payload, timeout, trace, label, context_url=None):
             "attempt": browser_item.get("attempt", 1),
             "method": "browser_graphql",
             "status_code": browser_item.get("status_code", result.get("status_code", 0)),
+            "content_type": browser_item.get("content_type", result.get("content_type", "")),
             "length": browser_item.get("length", len(result.get("text") or "")),
             "item_present": browser_item.get("item_present", ""),
         }
@@ -776,13 +782,18 @@ def _capacity_from_description(item):
     return ""
 
 def _ref_refrigerator_type(item):
+    title_type = ref_refrigerator_type_from_title(item.get("title"))
+    spec_types = []
     for fact in _iter_facts(_item_facts(item)):
         key = _ascii_lower(fact.get("keyName") or fact.get("slug"))
         if key not in {"porta", "portas", "tipo", "tipo de porta"}:
             continue
         cleaned = _clean_ref_refrigerator_type(_fact_value(fact))
         if cleaned:
-            return cleaned
+            spec_types.append(cleaned)
+    selected = select_ref_refrigerator_type(title_type, spec_types)
+    if selected:
+        return selected
     # no valid door format in the type fields (e.g. "Porta"="Inverter" is compressor
     # tech, not a door type) -> infer from the door count. Only 2 -> Duplex; other
     # counts are ambiguous (Duplex vs Inverse, French vs Side-by-side) so left blank.
@@ -801,13 +812,7 @@ def _clean_ref_refrigerator_type(value):
         return ""
     if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
         return ""
-    valid = re.search(
-        r"duplex|inverse|inverso|side\s*by\s*side|french|multidoor|multi\s*door|top\s*freezer|"
-        r"porta\s+francesa|\b(?:1|2|3|4)\s*portas?\b|uma\s+porta|duas\s+portas|tres\s+portas|quatro\s+portas",
-        normalized,
-        re.I,
-    )
-    return text if valid else ""
+    return canonicalize_ref_refrigerator_type(text)
 
 def _sku_for_product_line(line, reference, model, item):
     return preferred_magalu_sku(line, reference, model, item.get("title"))

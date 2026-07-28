@@ -9,10 +9,15 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from .step00_config import DEFAULT_COUNTRY, normalized_product_url, product_line
 from .common.field_rules import (
+    canonicalize_ref_refrigerator_type,
     is_screen_size_value,
     normalize_key as normalize_field_key,
 )
-from .magalu.field_extraction import extract_fields as extract_magalu_semantic_fields
+from .magalu.field_extraction import (
+    extract_fields as extract_magalu_semantic_fields,
+    ref_refrigerator_type_from_title as magalu_ref_refrigerator_type_from_title,
+    select_ref_refrigerator_type as select_magalu_ref_refrigerator_type,
+)
 from .casas_bahia.field_extraction import (
     ENERGY_ALIAS_LABELS as CASAS_ENERGY_ALIAS_LABELS,
     ENERGY_CANONICAL_LABELS as CASAS_ENERGY_CANONICAL_LABELS,
@@ -297,12 +302,94 @@ def high_confidence_tv_model_number_from_url(product_url, screen_size_hint=""):
 
 def preferred_magalu_sku(line, reference, model, title):
     """Apply the retailer/product-line SKU priority in one shared place."""
-    if str(line or "").upper() == "TV":
+    normalized_line = str(line or "").upper()
+    if normalized_line == "TV":
         # Preserve the complete Referencia in the normal producer path. The
         # title-first policy is applied only at the verified recovery boundary,
         # where a blank/item/synthetic SKU must be repaired.
         return str(reference or "").strip()
+    if normalized_line in {"REF", "LDY"}:
+        for value in (reference, model):
+            candidate = _safe_magalu_appliance_sku_candidate(value)
+            if candidate:
+                return candidate
+        return appliance_model_number_from_text(title)
     return reference or model or appliance_model_number_from_text(title)
+
+
+def _safe_magalu_appliance_sku_candidate(value):
+    """Preserve a valid candidate or salvage one safe model token from prose."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    if is_appliance_spec_token(text):
+        return ""
+    if not is_synthetic_magalu_sku_value(text):
+        return text
+    token = appliance_model_number_from_text(text)
+    if token and not is_synthetic_magalu_sku_value(token):
+        return token
+    return ""
+
+
+_APPLIANCE_SPEC_NUMBER = r"\d+(?:[.,]\d+)?"
+_APPLIANCE_SPEC_UNIT = (
+    r"(?:VOLTS?|VAC|VDC|V|WATTS?|KWH|KW|WH|W|"
+    r"GHZ|MHZ|KHZ|HZ|RPM|KGS|KG|LITROS?|LTS|LT|ML|CM|MM|M|L|"
+    r"AMPS|AMP|A|HDMI|USB|PH|K)"
+)
+
+
+def is_appliance_spec_token(value):
+    """Return whether a candidate is only a measurement/electrical spec."""
+    text = clean_text(value).upper()
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return False
+    if re.fullmatch(r"(?:MONO|BI|TRI|QUADRI|MULTI|AUTO)?VOLT", compact):
+        return True
+
+    measurement = rf"{_APPLIANCE_SPEC_NUMBER}{_APPLIANCE_SPEC_UNIT}"
+    if re.fullmatch(measurement, compact):
+        return True
+    if re.fullmatch(rf"{measurement}(?:[-/+]{measurement})+", compact):
+        return True
+    if re.fullmatch(
+        rf"{_APPLIANCE_SPEC_NUMBER}(?:[-/+]{_APPLIANCE_SPEC_NUMBER})+"
+        rf"(?:V(?:OLTS?)?|HZ|KHZ|MHZ|GHZ|KG|KGS|L|LTS|LITROS?)",
+        compact,
+    ):
+        return True
+    if re.fullmatch(
+        rf"{_APPLIANCE_SPEC_NUMBER}(?:X{_APPLIANCE_SPEC_NUMBER})+"
+        rf"(?:CM|MM|M)",
+        compact,
+    ):
+        return True
+    voltage_unit = r"(?:VOLTS?|VAC|VDC|V)"
+    frequency_unit = r"(?:GHZ|MHZ|KHZ|HZ)"
+    voltage = rf"{_APPLIANCE_SPEC_NUMBER}{voltage_unit}"
+    voltage_sequence = rf"{voltage}(?:[/+]{voltage})*"
+    voltage_range = (
+        rf"{_APPLIANCE_SPEC_NUMBER}(?:[/+]{_APPLIANCE_SPEC_NUMBER})+"
+        rf"{voltage_unit}"
+    )
+    frequency = rf"{_APPLIANCE_SPEC_NUMBER}{frequency_unit}"
+    frequency_range = (
+        rf"{_APPLIANCE_SPEC_NUMBER}(?:[/+]{_APPLIANCE_SPEC_NUMBER})+"
+        rf"{frequency_unit}"
+    )
+    if re.fullmatch(
+        rf"(?:{voltage_sequence}|{voltage_range})(?:[-+]?{frequency_range})",
+        compact,
+    ):
+        return True
+    if re.fullmatch(
+        rf"(?:{voltage_sequence}|{voltage_range}){frequency}",
+        compact,
+    ):
+        return True
+    return False
 
 
 def is_obviously_non_sku_magalu_value(value):
@@ -356,6 +443,8 @@ def appliance_model_number_from_text(text):
     for candidate in candidates:
         compact = re.sub(r"[\s._/-]+", "", candidate)
         if len(compact) < 4:
+            continue
+        if is_appliance_spec_token(candidate):
             continue
         if re.fullmatch(r"\d+(?:[,.]\d+)?(?:KG|KGS|L|LITROS?|V|VOLTS?)", compact):
             continue
@@ -1879,13 +1968,18 @@ def _magalu_capacity_from_description(item):
     return ""
 
 def _magalu_ref_refrigerator_type(item):
+    title_type = magalu_ref_refrigerator_type_from_title(item.get("title"))
+    spec_types = []
     for fact in _iter_magalu_facts(_magalu_item_facts(item)):
         key = _normalize_key(fact.get("keyName") or fact.get("slug"))
         if key not in {"porta", "portas", "tipo", "tipo de porta"}:
             continue
         cleaned = _clean_magalu_ref_refrigerator_type(_magalu_fact_value(fact))
         if cleaned:
-            return cleaned
+            spec_types.append(cleaned)
+    selected = select_magalu_ref_refrigerator_type(title_type, spec_types)
+    if selected:
+        return selected
     # no valid door format (e.g. "Porta"="Inverter" is compressor tech) -> infer from
     # door count. Only 2 -> Duplex; other counts are ambiguous so left blank.
     doors = _magalu_factsheet_value(item, ["quantidade de portas", "numero de portas", "número de portas"])
@@ -1903,13 +1997,7 @@ def _clean_magalu_ref_refrigerator_type(value):
         return ""
     if re.search(r"\b\d+(?:[,.]\d+)?\s*(?:cm|mm|m)\b", normalized, re.I):
         return ""
-    valid = re.search(
-        r"duplex|inverse|inverso|side\s*by\s*side|french|multidoor|multi\s*door|top\s*freezer|"
-        r"porta\s+francesa|\b(?:1|2|3|4)\s*portas?\b|uma\s+porta|duas\s+portas|tres\s+portas|quatro\s+portas",
-        normalized,
-        re.I,
-    )
-    return text if valid else ""
+    return canonicalize_ref_refrigerator_type(text)
 
 def _magalu_sku_for_product_line(line, reference, model, item, product_url):
     return preferred_magalu_sku(line, reference, model, item.get("title"))

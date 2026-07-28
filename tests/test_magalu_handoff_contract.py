@@ -45,7 +45,13 @@ class _FakePage:
 
 
 def _browser_response(payload):
-    return json.dumps({"status": 200, "text": json.dumps(payload)})
+    return json.dumps(
+        {
+            "status": 200,
+            "contentType": "application/json; charset=utf-8",
+            "text": json.dumps(payload),
+        }
+    )
 
 
 def _tv_row(sku=""):
@@ -70,6 +76,101 @@ def _reference_detail(reference="UN55U8600FGXZD", item="kh6643e17a"):
 
 
 class MagaluHandoffContractTests(unittest.TestCase):
+    def test_browser_graphql_does_not_scan_customer_review_text_for_block_markers(self):
+        payload = {
+            "data": {
+                "productRating": {
+                    "general": {"rating": 4.8, "reviewCount": 10, "commentCount": 1},
+                    "userReviews": {
+                        "items": [
+                            {
+                                "description": (
+                                    "Nao e possivel instalar hoje. Oops! "
+                                    "O suporte mencionou Akamai."
+                                )
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+        page = _FakePage([_browser_response(payload)])
+        request = {"operationName": "ProductRating", "variables": {}}
+        with patch.dict(
+            os.environ,
+            {"SEDA_MAGALU_BROWSER_GRAPHQL_ATTEMPTS": "3"},
+        ), patch(
+            "seda.magalu.browser_session._page_for_use",
+            return_value=page,
+        ), patch(
+            "seda.magalu.browser_session._prepare_js_page",
+            side_effect=lambda active_page, *_args, **_kwargs: active_page,
+        ):
+            result = browser_session.graphql_post(request)
+
+        self.assertEqual(page.calls, 1)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["data"], payload)
+
+    def test_graphql_block_classifier_uses_status_structured_errors_and_html(self):
+        valid = {
+            "status_code": 200,
+            "content_type": "application/json",
+            "data": {"data": {"message": "Nao e possivel. Oops! Akamai"}},
+            "text": "",
+            "error": "",
+        }
+        forbidden = {
+            "status_code": 200,
+            "content_type": "application/json",
+            "data": {
+                "errors": [
+                    {"message": "Forbidden", "extensions": {"code": "FORBIDDEN"}}
+                ]
+            },
+            "text": "",
+            "error": "graphql_errors",
+        }
+        challenge = {
+            "status_code": 200,
+            "content_type": "text/html",
+            "data": {},
+            "text": "<html><title>Access Denied</title>Akamai</html>",
+            "error": "invalid_json",
+        }
+        json_challenge = {
+            "status_code": 200,
+            "content_type": "application/json",
+            "data": {"error": "Access Denied by Akamai"},
+            "text": '{"error":"Access Denied by Akamai"}',
+            "error": "graphql_data_missing",
+        }
+        harmless_json = {
+            "status_code": 200,
+            "content_type": "application/json",
+            "data": {"message": "Nao e possivel. Oops!"},
+            "text": '{"message":"Nao e possivel. Oops!"}',
+            "error": "graphql_data_missing",
+        }
+        unrelated_json = {
+            "status_code": 200,
+            "content_type": "application/json",
+            "data": {"review": "Akamai"},
+            "text": '{"review":"Akamai"}',
+            "error": "graphql_data_missing",
+        }
+        self.assertFalse(browser_session._graphql_result_blocked(valid))
+        self.assertTrue(browser_session._graphql_result_blocked(forbidden))
+        self.assertTrue(browser_session._graphql_result_blocked(challenge))
+        self.assertTrue(browser_session._graphql_result_blocked(json_challenge))
+        self.assertFalse(browser_session._graphql_result_blocked(harmless_json))
+        self.assertFalse(browser_session._graphql_result_blocked(unrelated_json))
+        self.assertTrue(
+            browser_session._graphql_result_blocked(
+                {"status_code": 403, "data": {}, "text": "", "error": ""}
+            )
+        )
+
     def test_graphql_envelope_matrix(self):
         cases = [
             ([], False, "invalid_json"),
@@ -291,12 +392,14 @@ class MagaluHandoffContractTests(unittest.TestCase):
                 "attempt": 1,
                 "method": "browser_graphql",
                 "status_code": 200,
+                "content_type": "application/json; charset=utf-8",
                 "error": "graphql_data_invalid_type",
             },
             {
                 "attempt": 2,
                 "method": "browser_graphql",
                 "status_code": 200,
+                "content_type": "application/json; charset=utf-8",
                 "error": "",
             },
         ]
@@ -328,6 +431,36 @@ class MagaluHandoffContractTests(unittest.TestCase):
         self.assertEqual(
             [item.get("error", "") for item in trace],
             ["graphql_data_invalid_type", ""],
+        )
+        self.assertEqual(
+            [item.get("content_type", "") for item in trace],
+            ["application/json; charset=utf-8"] * 2,
+        )
+
+        detail_trace = []
+        detail_result = {
+            "status_code": 200,
+            "data": {"data": {"item": {"id": "ok"}}},
+            "trace": inner_trace,
+            "error": "",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_MAGALU_BROWSER_GRAPHQL": "1"},
+        ), patch(
+            "seda.magalu.browser_session.graphql_post",
+            return_value=detail_result,
+        ):
+            detail = _post(
+                {"operationName": "itemQuery"},
+                10,
+                detail_trace,
+                "item",
+            )
+        self.assertEqual(detail["data"]["item"]["id"], "ok")
+        self.assertEqual(
+            [item.get("content_type", "") for item in detail_trace],
+            ["application/json; charset=utf-8"] * 2,
         )
 
         summary_trace = []

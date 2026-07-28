@@ -71,6 +71,82 @@ class ZenRowsClientTest(unittest.TestCase):
         self.assertEqual(result.error, "unknown_profile:not-a-profile")
         request_get.assert_not_called()
 
+    def test_retailer_defaults_apply_only_when_actual_globals_are_absent(self):
+        cases = (
+            ("magalu", "SEDA_MAGALU_DEFAULT_ALLOW_ZENROWS", "SEDA_MAGALU_DEFAULT_ZENROWS_DRY_RUN"),
+            (
+                "casas_bahia",
+                "SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS",
+                "SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN",
+            ),
+        )
+        for retailer, allow_default, dry_default in cases:
+            with self.subTest(retailer=retailer), patch.dict(
+                os.environ,
+                {
+                    "SEDA_ACTIVE_RETAILER": retailer,
+                    allow_default: "1",
+                    dry_default: "0",
+                },
+                clear=True,
+            ):
+                self.assertTrue(zenrows_client.enabled())
+                self.assertFalse(zenrows_client.dry_run())
+                self.assertNotIn("SEDA_ALLOW_ZENROWS", os.environ)
+                self.assertNotIn("SEDA_ZENROWS_DRY_RUN", os.environ)
+
+    def test_parent_actual_globals_survive_load_env_setdefault_and_override_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_ACTIVE_RETAILER": "casas_bahia",
+                "SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS": "1",
+                "SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN": "0",
+                "SEDA_ALLOW_ZENROWS": "0",
+                "SEDA_ZENROWS_DRY_RUN": "1",
+            },
+            clear=True,
+        ):
+            # step00_config.load_env() uses setdefault, so a parent switch wins.
+            os.environ.setdefault("SEDA_ALLOW_ZENROWS", "1")
+            os.environ.setdefault("SEDA_ZENROWS_DRY_RUN", "0")
+            self.assertFalse(zenrows_client.enabled())
+            self.assertTrue(zenrows_client.dry_run())
+
+    def test_loaded_actual_globals_override_retailer_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_ACTIVE_RETAILER": "casas_bahia",
+                "SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS": "1",
+                "SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN": "0",
+            },
+            clear=True,
+        ):
+            # This is the same setdefault operation used for values loaded from .env.
+            os.environ.setdefault("SEDA_ALLOW_ZENROWS", "0")
+            os.environ.setdefault("SEDA_ZENROWS_DRY_RUN", "1")
+            self.assertFalse(zenrows_client.enabled())
+            self.assertTrue(zenrows_client.dry_run())
+
+    def test_retailer_switch_re_evaluates_defaults_without_global_leak(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_ACTIVE_RETAILER": "magalu",
+                "SEDA_MAGALU_DEFAULT_ALLOW_ZENROWS": "1",
+                "SEDA_MAGALU_DEFAULT_ZENROWS_DRY_RUN": "0",
+                "SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS": "0",
+                "SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN": "1",
+            },
+            clear=True,
+        ):
+            self.assertTrue(zenrows_client.enabled())
+            self.assertFalse(zenrows_client.dry_run())
+            os.environ["SEDA_ACTIVE_RETAILER"] = "casas_bahia"
+            self.assertFalse(zenrows_client.enabled())
+            self.assertTrue(zenrows_client.dry_run())
+
     def test_itemquery_wrapper_requires_exact_response_identity(self):
         def response(item_id):
             return zenrows_client.ZenRowsResult(

@@ -11,6 +11,14 @@ MAGALU_FULL_BATCHES = (
     "run_magalu_casas_interleaved_tv_ref_ldy_full.bat",
 )
 INTERLEAVED_BATCHES = MAGALU_FULL_BATCHES[-2:]
+MAGALU_STANDALONE_FULL_BATCHES = MAGALU_FULL_BATCHES[:-2]
+CASAS_FULL_BATCHES = (
+    "run_casas_bahia_tv_full.bat",
+    "run_casas_bahia_ref_full.bat",
+    "run_casas_bahia_ldy_full.bat",
+    "run_casas_bahia_tv_ref_ldy_full.bat",
+)
+CASAS_ZENROWS_BATCHES = CASAS_FULL_BATCHES + INTERLEAVED_BATCHES
 MAGALU_RESUME_BATCHES = (
     "resume_magalu_step08.bat",
     "resume_magalu_tv_step08.bat",
@@ -23,8 +31,6 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
 
     def test_full_batches_enable_bounded_itemquery_and_item_null_pdp_recovery(self):
         required = (
-            "if not defined seda_allow_zenrows set seda_allow_zenrows=1",
-            "if not defined seda_zenrows_dry_run set seda_zenrows_dry_run=0",
             "if not defined seda_magalu_zenrows_field_fallback set seda_magalu_zenrows_field_fallback=1",
             "if not defined seda_magalu_zenrows_field_profile set seda_magalu_zenrows_field_profile=auto_custom_headers",
             "if not defined seda_magalu_zenrows_field_timeout set seda_magalu_zenrows_field_timeout=90",
@@ -44,6 +50,15 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
                 text = self._text(name)
                 for line in required:
                     self.assertIn(line, text)
+        actual_defaults = (
+            "if not defined seda_allow_zenrows set seda_allow_zenrows=1",
+            "if not defined seda_zenrows_dry_run set seda_zenrows_dry_run=0",
+        )
+        for name in MAGALU_STANDALONE_FULL_BATCHES:
+            with self.subTest(batch=name, contract="standalone_global_default"):
+                text = self._text(name)
+                for line in actual_defaults:
+                    self.assertIn(line, text)
 
     def test_resume_batches_keep_last_known_contract_enabled(self):
         required = (
@@ -57,25 +72,51 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
                 for line in required:
                     self.assertIn(line, text)
 
-    def test_interleaved_batches_do_not_leak_global_allow_into_casas(self):
+    def test_casas_batches_default_zenrows_only_when_user_did_not_set_switches(self):
+        required = (
+            "if not defined seda_casas_bahia_default_allow_zenrows set seda_casas_bahia_default_allow_zenrows=1",
+            "if not defined seda_casas_bahia_default_zenrows_dry_run set seda_casas_bahia_default_zenrows_dry_run=0",
+        )
+        for name in CASAS_ZENROWS_BATCHES:
+            with self.subTest(batch=name):
+                text = self._text(name)
+                for line in required:
+                    self.assertIn(line, text)
+
+        for name in CASAS_FULL_BATCHES:
+            with self.subTest(batch=name, contract="no_unconditional_override"):
+                lines = [line.strip() for line in self._text(name).splitlines()]
+                self.assertIn(required[0], lines)
+                self.assertIn(required[1], lines)
+                self.assertFalse(self._actual_global_assignments(lines, "seda_allow_zenrows"))
+                self.assertFalse(self._actual_global_assignments(lines, "seda_zenrows_dry_run"))
+
+    def test_interleaved_batches_use_retailer_defaults_without_actual_global_mutation(self):
+        required = (
+            "if not defined seda_magalu_default_allow_zenrows set seda_magalu_default_allow_zenrows=1",
+            "if not defined seda_magalu_default_zenrows_dry_run set seda_magalu_default_zenrows_dry_run=0",
+            "if not defined seda_casas_bahia_default_allow_zenrows set seda_casas_bahia_default_allow_zenrows=1",
+            "if not defined seda_casas_bahia_default_zenrows_dry_run set seda_casas_bahia_default_zenrows_dry_run=0",
+        )
         for name in INTERLEAVED_BATCHES:
             with self.subTest(batch=name):
                 text = self._text(name)
-                self.assertIn(
-                    'set "seda_magalu_allow_zenrows=%seda_allow_zenrows%"',
-                    text,
-                )
-                magalu = text.rsplit("\n:run_magalu\n", 1)[1].split(
-                    "\n:run_casas\n", 1
-                )[0]
-                casas = text.rsplit("\n:run_casas\n", 1)[1].split(
-                    "\n:run_stage\n", 1
-                )[0]
-                self.assertIn(
-                    'set "seda_allow_zenrows=%seda_magalu_allow_zenrows%"',
-                    magalu,
-                )
-                self.assertIn('set "seda_allow_zenrows=0"', casas)
+                lines = [line.strip() for line in text.splitlines()]
+                for line in required:
+                    self.assertIn(line, lines)
+                self.assertFalse(self._actual_global_assignments(lines, "seda_allow_zenrows"))
+                self.assertFalse(self._actual_global_assignments(lines, "seda_zenrows_dry_run"))
+                self.assertNotIn("seda_magalu_allow_zenrows", text)
+
+    @staticmethod
+    def _actual_global_assignments(lines, name):
+        return [
+            line
+            for line in lines
+            if line.startswith(f"set {name}=")
+            or line.startswith(f'set "{name}=')
+            or line.startswith(f"if not defined {name} ")
+        ]
 
     def test_smoke_batch_remains_paid_fallback_free(self):
         text = self._text("run_magalu_tv_smoke.bat")
