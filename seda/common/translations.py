@@ -16,6 +16,7 @@ TRANSLATABLE_FIELDS = {
     "ref_refrigerator_type",
     "ldy_loading_type",
 }
+PRESERVE_TRANSLATION_FIELDS_KEY = "_seda_preserve_translation_fields"
 
 
 WEEKDAY_TRANSLATIONS = {
@@ -52,8 +53,15 @@ MONTH_TRANSLATIONS = {
 
 def translate_row(row):
     translated = dict(row)
+    preserved = translated.pop(PRESERVE_TRANSLATION_FIELDS_KEY, ())
+    if isinstance(preserved, str):
+        preserved = {preserved}
+    elif isinstance(preserved, (set, tuple, list, frozenset)):
+        preserved = set(preserved)
+    else:
+        preserved = set()
     for field in TRANSLATABLE_FIELDS:
-        if field in translated:
+        if field in translated and field not in preserved:
             translated[field] = translate_value(field, translated.get(field, ""))
     return translated
 

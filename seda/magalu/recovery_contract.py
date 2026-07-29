@@ -1,8 +1,8 @@
 """Magalu recovery-field contracts for each recovery source.
 
 The paid ZenRows field fallback stays limited to the original seven semantic
-fields.  The read-only last-known DB fallback also covers SKU and the LDY
-colour field, whose validation rules live in ``last_known_db``.
+fields. The read-only last-known DB fallback also covers SKU and the LDY
+colour field, and trusts each item's newest non-blank stored field value.
 """
 
 

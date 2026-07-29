@@ -6,8 +6,12 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+from .common.translations import PRESERVE_TRANSLATION_FIELDS_KEY
 from .detail_publish import detail_consumer_guard
-from .magalu.last_known_db import backfill_magalu_last_known_fields
+from .magalu.last_known_db import (
+    backfill_magalu_last_known_fields,
+    recovered_from_last_known_db,
+)
 
 from .parsers import (
     format_brl,
@@ -279,7 +283,7 @@ def _format_row(row, now):
     final_sku_price = _price_for_output(row.get("final_sku_price", ""))
     if original_sku_price and final_sku_price and _prices_equal(original_sku_price, final_sku_price):
         original_sku_price = ""
-    return {
+    formatted = {
         "country": "SEDA",
         "product": product_line(),
         "item": row.get("item") or item or sku,
@@ -320,6 +324,14 @@ def _format_row(row, now):
         "crawl_strdatetime": now.strftime("%Y-%m-%d %H:%M:%S"),
         "batch_id": _batch_id(now),
     }
+    preserve_translation = tuple(
+        field
+        for field in ("ref_refrigerator_type", "ldy_loading_type")
+        if recovered_from_last_known_db(row, field)
+    )
+    if preserve_translation:
+        formatted[PRESERVE_TRANSLATION_FIELDS_KEY] = preserve_translation
+    return formatted
 
 
 def _delivery_for_output(row):
@@ -338,6 +350,8 @@ def _energy_use_for_output(row):
 
 def _screen_size_for_output(row):
     value = row.get("screen_size", "")
+    if recovered_from_last_known_db(row, "screen_size"):
+        return str(value or "").strip()
     if product_line() != "TV":
         return value
     text = str(value or "").strip()
@@ -359,6 +373,8 @@ def _sku_for_output(row, item):
     sku = str(row.get("sku") or "").strip()
     if not sku:
         return ""
+    if recovered_from_last_known_db(row, "sku"):
+        return sku
     trusted_tv_reference = (
         _is_magalu_row(row)
         and line == "TV"

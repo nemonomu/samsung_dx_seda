@@ -17,7 +17,10 @@ from seda.casas_bahia.detail_api import (
 )
 from seda.casas_bahia.field_extraction import extract_fields as extract_casas_fields
 from seda.common.field_rules import extract_ldy_capacity_from_title, extract_ref_capacity_from_title
-from seda.common.translations import translate_row
+from seda.common.translations import (
+    PRESERVE_TRANSLATION_FIELDS_KEY,
+    translate_row,
+)
 from seda.magalu import detail_api as magalu_detail_api
 from seda.magalu.field_extraction import extract_fields as extract_magalu_fields
 from seda.magalu.search_api import SEARCH_QUERY
@@ -94,6 +97,22 @@ class FieldPipelineContractTests(unittest.TestCase):
                 saved = next(csv.DictReader(handle))
         self.assertEqual(saved["ldy_loading_type"], "Top load,Front load")
         self.assertEqual(saved["ldy_capacity"], "De 11 a 15kg")
+
+    def test_marked_db_history_fields_bypass_translation_only_for_that_row(self):
+        row = {
+            "ref_refrigerator_type": "Duplex",
+            "ldy_loading_type": "Autom\u00e1tica",
+            "sku_status": "Patrocinado",
+            PRESERVE_TRANSLATION_FIELDS_KEY: (
+                "ref_refrigerator_type",
+                "ldy_loading_type",
+            ),
+        }
+        translated = translate_row(row)
+        self.assertEqual(translated["ref_refrigerator_type"], "Duplex")
+        self.assertEqual(translated["ldy_loading_type"], "Autom\u00e1tica")
+        self.assertEqual(translated["sku_status"], "Sponsored")
+        self.assertNotIn(PRESERVE_TRANSLATION_FIELDS_KEY, translated)
 
     def test_invalid_loading_values_become_blank_before_database(self):
         for raw in ("Automática", "Roupa"):

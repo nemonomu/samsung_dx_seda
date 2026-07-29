@@ -1,7 +1,9 @@
-"""Read-only Magalu fallback for stable semantic fields.
+"""Read-only Magalu fallback for fields that would otherwise be blank.
 
-This module never writes to the database. It fills only blank values in the
-current in-memory rows after the normal itemQuery/PDP/retry paths have failed.
+This module never writes to the database. It fills only values that would be
+blank in the current output, using the newest non-blank stored value for the
+same verified Magalu item. Stored values are trusted as-is; their wording and
+format are not reinterpreted by the fallback.
 """
 
 import os
@@ -9,100 +11,18 @@ import re
 from collections import Counter, defaultdict
 from urllib.parse import urlsplit
 
-from ..common.field_rules import (
-    is_ldy_capacity_value,
-    is_ref_capacity_category_band,
-    is_ref_capacity_value,
-    is_screen_size_value,
-    normalize_exact_loading_direction,
-    normalize_key,
-    sanitize_labeled_energy_target_value,
-)
-from ..common.translations import _translate_ref_refrigerator_type
 from ..parsers import (
+    is_appliance_spec_token,
     is_obviously_non_sku_magalu_value,
     is_synthetic_magalu_sku_value,
 )
 from ..step00_config import db_connect, output_table
-from .field_extraction import (
-    _is_compact_ldy_volume_item,
-    _is_magalu_ldy_capacity_value,
-)
 from .recovery_contract import last_known_fields
 
 
 TRUE_VALUES = {"1", "true", "yes", "y"}
 MAGALU_ACCOUNT_KEYS = ("magalu", "magazineluiza")
-NULL_LIKE_VALUES = {"none", "null", "nan", "[null]"}
-SUCCESS_STATUS_TOKENS = {"detail_item_graphql", "detail_blank_retry"}
-REQUIRED_FAILURE_TOKENS = {
-    "detail_graphql_failed:item_query_failed",
-    "detail_blank_retry_failed",
-}
-REF_TYPE_VALUES = {
-    value.casefold(): value
-    for value in (
-        "Single Door",
-        "Two Door",
-        "Three Door",
-        "Four Door",
-        "French Door",
-        "Side by Side",
-        "Multidoor",
-        "Freezer-on-Bottom",
-        "Freezer-on-Top",
-    )
-}
-LDY_COLOR_TOKENS = {
-    "amadeirado",
-    "amarelo",
-    "azul",
-    "bege",
-    "black",
-    "branca",
-    "branco",
-    "bronze",
-    "champagne",
-    "chumbo",
-    "cinza",
-    "cobre",
-    "coral",
-    "creme",
-    "dourada",
-    "dourado",
-    "grafite",
-    "gray",
-    "green",
-    "grey",
-    "inox",
-    "laranja",
-    "lilas",
-    "madeira",
-    "marrom",
-    "onix",
-    "pink",
-    "platinum",
-    "prata",
-    "preta",
-    "preto",
-    "red",
-    "rosa",
-    "rose",
-    "roxa",
-    "roxo",
-    "silver",
-    "stainless",
-    "steel",
-    "titanio",
-    "titanium",
-    "transparente",
-    "turquesa",
-    "verde",
-    "vermelha",
-    "vermelho",
-    "vinho",
-    "white",
-}
+RECOVERED_FIELDS_KEY = "_magalu_last_known_db_recovered_fields"
 
 
 def backfill_magalu_last_known_fields(
@@ -111,7 +31,7 @@ def backfill_magalu_last_known_fields(
     active_retailer,
     product_line_value,
 ):
-    """Fill eligible blank fields from prior DB rows and return safe counters."""
+    """Fill fields that would otherwise save blank and return safe counters."""
     line = str(product_line_value or "").strip().upper()
     fields = last_known_fields(line)
     stats = _empty_stats()
@@ -163,10 +83,11 @@ def backfill_magalu_last_known_fields(
         for field in fields:
             if not _current_field_needs_recovery(row, field):
                 continue
-            value = _latest_valid_value(candidates, field, current_row=row)
+            value = _latest_stored_value(candidates, field)
             if not value:
                 continue
             row[field] = value
+            _mark_recovered_field(row, field)
             recovered_field_counts[field] += 1
             changed = True
         if changed:
@@ -207,15 +128,6 @@ def _eligible_row(row, line, fields):
         return False
     if not any(_current_field_needs_recovery(row, field) for field in fields):
         return False
-    tokens = {
-        token.strip()
-        for token in str(row.get("parse_status") or "").split("+")
-        if token.strip()
-    }
-    if not REQUIRED_FAILURE_TOKENS.issubset(tokens):
-        return False
-    if SUCCESS_STATUS_TOKENS.intersection(tokens):
-        return False
     status_key = str(row.get("parse_status") or "").casefold()
     if "identity_mismatch" in status_key or "identity_conflict" in status_key:
         return False
@@ -230,7 +142,6 @@ def _read_history(item_keys, line, fields):
     selected_columns = (
         "item",
         "product_url",
-        "retailer_sku_name",
         *fields,
         "crawl_strdatetime",
         "batch_id",
@@ -295,84 +206,36 @@ def _read_history(item_keys, line, fields):
                 pass
 
 
-def _latest_valid_value(candidates, field, *, current_row):
+def _latest_stored_value(candidates, field):
     for candidate in candidates:
-        value = _validated_history_value(
-            field,
-            candidate.get(field),
-            current_row=current_row,
-            history_row=candidate,
+        value = candidate.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _mark_recovered_field(row, field):
+    recovered = row.get(RECOVERED_FIELDS_KEY)
+    if not isinstance(recovered, set):
+        recovered = (
+            set(recovered)
+            if isinstance(recovered, (tuple, list, frozenset))
+            else set()
         )
-        if value:
-            return value
-    return ""
+        row[RECOVERED_FIELDS_KEY] = recovered
+    recovered.add(field)
 
 
-def _validated_history_value(
-    field,
-    value,
-    *,
-    current_row,
-    history_row=None,
-):
-    text = str(value or "").strip()
-    if not text or text.casefold() in NULL_LIKE_VALUES:
-        return ""
-    if field == "sku":
-        return _validated_sku(text, current_row, history_row)
-    if field == "screen_size":
-        return text if is_screen_size_value(text) else ""
-    if field == "estimated_annual_electricity_use":
-        # The shared sanitizer preserves agreed bare values such as "1" while
-        # rejecting voltage/efficiency noise and trimming a following spec.
-        return sanitize_labeled_energy_target_value(text)
-    if field == "model_year":
-        return text if re.fullmatch(r"20[1-3]\d", text) else ""
-    if field == "ref_refrigerator_type":
-        translated = _translate_ref_refrigerator_type(text)
-        return REF_TYPE_VALUES.get(str(translated).casefold(), "")
-    if field == "ref_capacity":
-        if (
-            _is_auxiliary_ref_capacity(text)
-            or _is_compound_ref_capacity(text)
-            or not is_ref_capacity_value(text)
-        ):
-            return ""
-        return "" if is_ref_capacity_category_band(text) else text
-    if field == "ldy_loading_type":
-        return _validated_loading_type(text)
-    if field == "ldy_color":
-        return _validated_ldy_color(text)
-    if field == "ldy_capacity":
-        if (
-            not _is_compound_ldy_capacity(text)
-            and not _is_suspicious_unitless_ldy_capacity(text)
-            and is_ldy_capacity_value(text)
-        ):
-            return text
-        contexts = [
-            {
-                "title": current_row.get("retailer_sku_name", ""),
-                "path": current_row.get("product_url", ""),
-            }
-        ]
-        if history_row:
-            contexts.append(
-                {
-                    "title": history_row.get("retailer_sku_name", ""),
-                    "path": history_row.get("product_url", ""),
-                }
-            )
-        if (
-            any(_is_compact_ldy_volume_item(context) for context in contexts)
-            and _is_magalu_ldy_capacity_value(
-                text,
-                allow_compact_volume=True,
-            )
-        ):
-            return text
-        return ""
-    return ""
+def recovered_from_last_known_db(row, field):
+    """Return whether this in-memory field came from read-only DB history."""
+    recovered = row.get(RECOVERED_FIELDS_KEY)
+    return (
+        isinstance(recovered, (set, tuple, list, frozenset))
+        and field in recovered
+    )
 
 
 def _current_field_needs_recovery(row, field):
@@ -385,11 +248,13 @@ def _current_sku_needs_recovery(row):
     text = str(row.get("sku") or "").strip()
     if not text:
         return True
+    line = str(
+        row.get("product_line") or row.get("product") or ""
+    ).strip().upper()
+    if line in {"REF", "LDY"} and is_appliance_spec_token(text):
+        return True
     trusted_tv_reference = (
-        str(row.get("product_line") or row.get("product") or "")
-        .strip()
-        .upper()
-        == "TV"
+        line == "TV"
         and "sku_factsheet_reference_recovered"
         in {
             token.strip()
@@ -406,157 +271,6 @@ def _current_sku_needs_recovery(row):
         is_synthetic_magalu_sku_value(text)
         and not trusted_tv_reference
     )
-
-
-def _validated_sku(value, current_row, history_row=None):
-    text = str(value or "").strip()
-    key = normalize_key(text)
-    if (
-        not text
-        or text.casefold() in NULL_LIKE_VALUES
-        or key in {
-            "n a",
-            "na",
-            "nao informado",
-            "nao se aplica",
-            "sem modelo",
-            "sem referencia",
-            "undefined",
-            "unknown",
-        }
-        or not re.search(r"[A-Za-z0-9]", text)
-        or re.match(r"https?://", text, re.I)
-        or is_obviously_non_sku_magalu_value(text)
-        or is_synthetic_magalu_sku_value(text)
-    ):
-        return ""
-    identity_keys = {_current_identity_key(current_row)}
-    if history_row:
-        identity_keys.add(_current_identity_key(history_row))
-    identity_keys.discard("")
-    return "" if text.casefold() in identity_keys else text
-
-
-def _validated_ldy_color(value):
-    text = str(value or "").strip()
-    key = normalize_key(text)
-    if (
-        not text
-        or len(text) > 80
-        or text.casefold() in NULL_LIKE_VALUES
-        or not re.search(r"[A-Za-z]", key)
-        or re.search(r"https?://|[<>]", text, re.I)
-        or re.search(
-            r"\b(?:110|127|220|240)\s*v(?:olts?)?\b|\bbivolt\b",
-            key,
-            re.I,
-        )
-        or re.search(
-            r"\d+(?:[.,]\d+)?\s*(?:kg|kgs|quilos?|l|litros?|ml)\b",
-            key,
-            re.I,
-        )
-        or normalize_exact_loading_direction(text)
-    ):
-        return ""
-    if key in {
-        "automatica",
-        "automatico",
-        "roupa",
-        "sim",
-        "nao",
-        "n a",
-        "na",
-        "nao informado",
-        "sem cor",
-    }:
-        return ""
-    if re.search(
-        r"\b(?:conforme|disponibilidade|estoque|friday|promocao|oferta)\b|"
-        r"\bnao\s+se\s+aplica\b",
-        key,
-        re.I,
-    ):
-        return ""
-    return text if LDY_COLOR_TOKENS.intersection(key.split()) else ""
-
-
-def _is_compound_ldy_capacity(value):
-    text = str(value or "").strip()
-    unit = r"(?:kg|kgs|quilos?|libras?|lbs?)"
-    qualifier = r"(?:de|acima|abaixo|mais|menos|at(?:e|\u00e9)|[<>])"
-    separator = r"[,;|]"
-    return bool(
-        re.search(
-            rf"{unit}\s*{separator}\s*(?:{qualifier}\s*)?\d",
-            text,
-            re.I,
-        )
-        or re.search(
-            rf"\d\s*{separator}\s*{qualifier}\b",
-            text,
-            re.I,
-        )
-    )
-
-
-def _is_auxiliary_ref_capacity(value):
-    text = str(value or "").strip()
-    key = normalize_key(text)
-    return bool(
-        re.search(
-            r"\b(?:reservatorio|tanque)\b.*\b(?:agua|water)\b"
-            r"|\b(?:agua|water)\b.*\b(?:reservatorio|tanque)\b",
-            key,
-            re.I,
-        )
-        or re.search(r"\d+(?:[.,]\d+)?\s*ml\b", text, re.I)
-    )
-
-
-def _is_compound_ref_capacity(value):
-    text = str(value or "").strip()
-    unit = (
-        r"(?:ml|litros?|lts?|l|quartos?|quarts?|"
-        r"p(?:e|\u00e9)s?\s*c(?:u|\u00fa)bicos?|cu\.?\s*ft\.?)"
-    )
-    qualifier = (
-        r"(?:de|acima|abaixo|mais|menos|at(?:e|\u00e9)|"
-        r"aprox(?:imadamente)?|[<>~])"
-    )
-    return bool(
-        re.search(
-            rf"{unit}\s*[,;|]\s*(?:{qualifier}\s*)?\d",
-            text,
-            re.I,
-        )
-    )
-
-
-def _is_suspicious_unitless_ldy_capacity(value):
-    text = str(value or "").strip()
-    if not re.fullmatch(r"\d+(?:[.,]\d+)?", text):
-        return False
-    try:
-        return float(text.replace(",", ".")) <= 2
-    except ValueError:
-        return True
-
-
-def _validated_loading_type(value):
-    parts = [
-        part.strip()
-        for part in re.split(r"\s*[,;|]\s*", str(value or ""))
-        if part.strip()
-    ]
-    normalized = [
-        normalize_exact_loading_direction(part)
-        for part in parts
-    ]
-    if not parts or any(not value for value in normalized):
-        return ""
-    unique = list(dict.fromkeys(normalized))
-    return unique[0] if len(unique) == 1 else ""
 
 
 def _historical_identity_valid(row, expected_item):
@@ -592,7 +306,7 @@ def _current_identity_key(row):
 
 
 def _nonblank(value):
-    return bool(str(value or "").strip())
+    return value is not None and bool(str(value).strip())
 
 
 def _canonical_retailer(value):
