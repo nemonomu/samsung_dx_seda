@@ -90,6 +90,13 @@ def step_env(retailer_key, extra=None):
         "SEDA_FETCH_MODE": os.environ.get("SEDA_FETCH_MODE") or default_fetch_mode,
         "SEDA_RUN_ROOT": os.environ.get("SEDA_RUN_ROOT") or str(dated_run_root(retailer=retailer_key)),
     }
+    for name in (
+        "SEDA_ZENROWS_USAGE_EXECUTION_ID",
+        "SEDA_ZENROWS_USAGE_REQUIRED",
+    ):
+        value = os.environ.get(name, "").strip()
+        if value:
+            env[name] = value
     if extra:
         env.update(extra)
     return env

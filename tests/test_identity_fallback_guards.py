@@ -6,7 +6,12 @@ from seda.casas_bahia.detail_html_backfill import (
     _merge as merge_casas_html,
     _needs_backfill as needs_casas_html_backfill,
 )
+from seda.casas_bahia.sku_contract import (
+    PDP_HTML_MODEL_TOKEN,
+    PRODUCT_SOURCE_MODEL_TOKEN,
+)
 from seda.magalu.ai_summary_curl_backfill import _trusted_summary
+from seda.parsers import CASAS_TV_EXACT_MODELO_FIELD
 from seda.step08_detail_enrichment import _merge_magalu_review_pages
 
 
@@ -87,6 +92,55 @@ class IdentityFallbackGuardTests(unittest.TestCase):
         )
         self.assertEqual(ldy_row["ldy_loading_type"], "Top load")
         self.assertFalse(needs_casas_html_backfill(ldy_row))
+
+    def test_casas_tv_html_backfill_preserves_rest_and_requires_verified_modelo(self):
+        base_row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv/p/123",
+            "retailer_sku_name": "Smart TV Principal",
+            "sku": "55REST",
+            "parse_status": PRODUCT_SOURCE_MODEL_TOKEN,
+        }
+        same_name = {
+            "retailer_sku_name": "smart-tv principal",
+            "sku": "BAD-SAME-NAME",
+            CASAS_TV_EXACT_MODELO_FIELD: True,
+        }
+        self.assertTrue(merge_casas_html(base_row, same_name))
+        self.assertEqual(base_row["sku"], "55REST")
+        self.assertIn(
+            PRODUCT_SOURCE_MODEL_TOKEN,
+            base_row["parse_status"].split("+"),
+        )
+
+        verified_html = {
+            "retailer_sku_name": "Smart TV Principal",
+            "sku": "55HTML",
+            CASAS_TV_EXACT_MODELO_FIELD: True,
+            "_detail_identity_verified": True,
+            "parse_status": "detail_casas_bahia_html",
+        }
+        self.assertTrue(merge_casas_html(base_row, verified_html))
+        self.assertEqual(base_row["sku"], "55REST")
+        self.assertIn(
+            PRODUCT_SOURCE_MODEL_TOKEN,
+            base_row["parse_status"].split("+"),
+        )
+        self.assertNotIn(PDP_HTML_MODEL_TOKEN, base_row["parse_status"].split("+"))
+
+        html_only_row = {
+            **base_row,
+            "sku": "123",
+            "parse_status": PRODUCT_SOURCE_MODEL_TOKEN,
+        }
+        self.assertTrue(merge_casas_html(html_only_row, verified_html))
+        self.assertEqual(html_only_row["sku"], "55HTML")
+        self.assertIn(PDP_HTML_MODEL_TOKEN, html_only_row["parse_status"].split("+"))
+        self.assertNotIn(
+            PRODUCT_SOURCE_MODEL_TOKEN,
+            html_only_row["parse_status"].split("+"),
+        )
 
     def test_magalu_review_pages_block_conflict_and_allow_exact_name(self):
         response = {

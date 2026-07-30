@@ -6,11 +6,24 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+from .casas_bahia.sku_contract import casas_tv_sku_for_output
+from .casas_bahia.ldy_sku_contract import (
+    casas_ldy_short_for_output,
+    casas_ldy_sku_for_output,
+)
+from .casas_bahia.last_known_db import (
+    backfill_casas_bahia_last_known_fields,
+    recovered_from_last_known_db as recovered_from_casas_last_known_db,
+)
+from .casas_bahia.ref_sku_contract import (
+    casas_ref_short_for_output,
+    casas_ref_sku_for_output,
+)
 from .common.translations import PRESERVE_TRANSLATION_FIELDS_KEY
 from .detail_publish import detail_consumer_guard
 from .magalu.last_known_db import (
     backfill_magalu_last_known_fields,
-    recovered_from_last_known_db,
+    recovered_from_last_known_db as recovered_from_magalu_last_known_db,
 )
 
 from .parsers import (
@@ -98,11 +111,18 @@ def _main(root):
     rows = read_csv(source)
     _validate_source_context(rows, source)
     _validate_internal_source_schema(rows, source)
-    recovery_stats = None
+    magalu_recovery_stats = None
+    casas_recovery_stats = None
     if _active_retailer() == "magalu":
-        recovery_stats = backfill_magalu_last_known_fields(
+        magalu_recovery_stats = backfill_magalu_last_known_fields(
             rows,
             active_retailer="magalu",
+            product_line_value=product_line(),
+        )
+    elif _active_retailer() == "casas_bahia":
+        casas_recovery_stats = backfill_casas_bahia_last_known_fields(
+            rows,
+            active_retailer="casas_bahia",
             product_line_value=product_line(),
         )
     now = _run_datetime()
@@ -116,7 +136,8 @@ def _main(root):
         output,
         output_rows,
         now,
-        magalu_last_known_db=recovery_stats,
+        magalu_last_known_db=magalu_recovery_stats,
+        casas_bahia_last_known_db=casas_recovery_stats,
     )
     print(f"[seda] wrote {output} rows={len(output_rows)}")
 
@@ -316,7 +337,7 @@ def _format_row(row, now):
         "ldy_loading_type": row.get("ldy_loading_type", ""),
         "ldy_color": row.get("ldy_color", ""),
         "ldy_capacity": row.get("ldy_capacity", ""),
-        "sku_short_version": _sku_short_version_for_output(row),
+        "sku_short_version": _sku_short_version_for_output(row, sku),
         "summarized_review_content": _summary_for_output(row.get("summarized_review_content", "")),
         "retailer_sku_name_similar": _join_values(row.get("retailer_sku_name_similar", ""), filter_noise=True),
         "star_rating": _star_rating_for_output(row.get("star_rating", "")),
@@ -336,7 +357,7 @@ def _format_row(row, now):
     preserve_translation = tuple(
         field
         for field in ("ref_refrigerator_type", "ldy_loading_type")
-        if recovered_from_last_known_db(row, field)
+        if _recovered_from_any_last_known_db(row, field)
     )
     if preserve_translation:
         formatted[PRESERVE_TRANSLATION_FIELDS_KEY] = preserve_translation
@@ -359,7 +380,7 @@ def _energy_use_for_output(row):
 
 def _screen_size_for_output(row):
     value = row.get("screen_size", "")
-    if recovered_from_last_known_db(row, "screen_size"):
+    if _recovered_from_any_last_known_db(row, "screen_size"):
         return str(value or "").strip()
     if product_line() != "TV":
         return value
@@ -379,13 +400,15 @@ def _sku_for_output(row, item):
     line = product_line()
     if _active_retailer() == "casas_bahia":
         if line == "TV":
-            return row.get("retailer_sku_name") or ""
+            return casas_tv_sku_for_output(row, item)
         if line == "REF":
-            return ""
+            return casas_ref_sku_for_output(row, item)
+        if line == "LDY":
+            return casas_ldy_sku_for_output(row, item)
     sku = str(row.get("sku") or "").strip()
     if not sku:
         return ""
-    if recovered_from_last_known_db(row, "sku"):
+    if recovered_from_magalu_last_known_db(row, "sku"):
         return sku
     trusted_tv_reference = (
         _is_magalu_row(row)
@@ -412,14 +435,14 @@ def _is_synthetic_sku(row, sku):
         return False
     return is_synthetic_magalu_sku_value(sku)
 
-def _sku_short_version_for_output(row):
+def _sku_short_version_for_output(row, resolved_sku=""):
     line = product_line()
     if _active_retailer() == "magalu" and line in {"REF", "LDY"}:
         return ""
+    if line == "LDY" and _active_retailer() == "casas_bahia":
+        return casas_ldy_short_for_output(row, resolved_sku)
     if line == "REF" and _active_retailer() == "casas_bahia":
-        sku = str(row.get("sku") or "").strip()
-        if sku:
-            return sku
+        return casas_ref_short_for_output(row, resolved_sku)
     value = str(row.get("sku_short_version") or "").strip()
     if value:
         return value
@@ -677,7 +700,15 @@ def _item_from_url(url):
         return ""
     return parts[index + 1] if len(parts) > index + 1 else ""
 
-def _write_manifest(root, source, output, rows, now, magalu_last_known_db=None):
+def _write_manifest(
+    root,
+    source,
+    output,
+    rows,
+    now,
+    magalu_last_known_db=None,
+    casas_bahia_last_known_db=None,
+):
     main_count = sum(1 for row in rows if row.get("main_rank"))
     bsr_count = sum(1 for row in rows if row.get("bsr_rank"))
     payload = {
@@ -700,6 +731,19 @@ def _write_manifest(root, source, output, rows, now, magalu_last_known_db=None):
             "recovered_fields": {},
             "error": "",
         }
+    if casas_bahia_last_known_db is not None:
+        payload["casas_bahia_last_known_db"] = (
+            casas_bahia_last_known_db
+            or {
+                "enabled": False,
+                "eligible_rows": 0,
+                "queried_items": 0,
+                "history_rows": 0,
+                "recovered_rows": 0,
+                "recovered_fields": {},
+                "error": "",
+            }
+        )
     manifest_override = os.getenv("SEDA_FINAL_MANIFEST_JSON", "").strip()
     if manifest_override:
         path = Path(manifest_override)
@@ -708,6 +752,13 @@ def _write_manifest(root, source, output, rows, now, magalu_last_known_db=None):
         path = output_path.with_name(f"{output_path.stem}.manifest.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _recovered_from_any_last_known_db(row, field):
+    return (
+        recovered_from_magalu_last_known_db(row, field)
+        or recovered_from_casas_last_known_db(row, field)
+    )
 
 
 if __name__ == "__main__":

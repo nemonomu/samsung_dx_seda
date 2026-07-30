@@ -6,9 +6,17 @@ from pathlib import Path
 import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
-from ..parsers import parse_detail
+from ..parsers import parse_detail, sku_from_url
 from ..step00_config import OUTPUT_COLUMNS, product_line, read_csv, run_root, write_csv
 from ..step08_detail_enrichment import _detail_identity_mode
+from .sku_contract import (
+    PDP_HTML_MODEL_TOKEN,
+    PRODUCT_SOURCE_MODEL_TOKEN,
+    exact_modelo_candidate,
+    has_verified_model_token,
+    replace_verified_model_token,
+    verified_model_value,
+)
 
 
 FIELDS = [
@@ -172,9 +180,38 @@ def _merge(row, detail):
             f'casas_html_backfill_{reason}',
         )
         return False
+    line = str(
+        row.get("product_line")
+        or row.get("product")
+        or product_line()
+    ).strip().upper()
+    is_tv = line == "TV"
+    is_ldy = line == "LDY"
+    html_model = (
+        exact_modelo_candidate(row, detail)
+        if is_tv and identity_mode == "verified"
+        else ""
+    )
+    preserve_product_source = bool(
+        is_tv
+        and has_verified_model_token(row, PRODUCT_SOURCE_MODEL_TOKEN)
+        and verified_model_value(
+            row,
+            sku_from_url(row.get("product_url", "")),
+        )
+    )
+    html_model_applied = False
     for field in FIELDS:
         value = detail.get(field)
         if not value:
+            continue
+        if field == "sku" and is_ldy:
+            continue
+        if field == "sku" and is_tv:
+            if not html_model or preserve_product_source:
+                continue
+            row[field] = html_model
+            html_model_applied = True
             continue
         if field == "retailer_sku_name" and row.get(field) and not row.get(field, "").endswith("..."):
             continue
@@ -183,6 +220,11 @@ def _merge(row, detail):
         row[field] = value
     row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_html_backfill")
     row["parse_status"] = _append_token(row.get("parse_status", ""), detail.get("parse_status", "detail_casas_bahia_html"))
+    if html_model_applied:
+        row["parse_status"] = replace_verified_model_token(
+            row.get("parse_status", ""),
+            PDP_HTML_MODEL_TOKEN,
+        )
     return True
 
 

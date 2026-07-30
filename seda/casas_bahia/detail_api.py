@@ -9,15 +9,22 @@ from pathlib import Path
 import requests
 
 from ._net import is_retryable_exc, request_with_retry, retry_after_seconds, sleep_backoff, throttle
+from .ldy_sku_contract import (
+    BRAND_FIELD as CASAS_LDY_BRAND_FIELD,
+    EVIDENCE_FIELD as CASAS_LDY_EVIDENCE_FIELD,
+    extract_product_source_evidence as extract_casas_ldy_sku_evidence,
+)
+from .ref_sku_contract import (
+    BRAND_FIELD as CASAS_REF_BRAND_FIELD,
+    EVIDENCE_FIELD as CASAS_REF_EVIDENCE_FIELD,
+    extract_product_source_evidence as extract_casas_ref_sku_evidence,
+)
 from ..common.field_rules import is_screen_size_value
 from ..parsers import (
+    CASAS_TV_EXACT_MODELO_FIELD,
     _html_break_text,
-    appliance_model_number_from_text,
     clean_text,
     ldy_color_from_text,
-    ldy_sku_from_text,
-    ldy_sku_short_version_from_text,
-    ref_sku_short_version_from_text,
     screen_size_from_text,
 )
 from ..step00_config import product_line, run_root
@@ -52,7 +59,15 @@ def fetch_product_source(sku_id, timeout=None):
         last_error = f"cache_invalid_payload:{cache_error}"
     attempts = _product_source_attempts()
     for attempt in attempts:
-        retries = int(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRIES", "1"))
+        retry_env = (
+            "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_RETRIES"
+            if attempt == "zenrows"
+            else "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRIES"
+        )
+        retries = max(
+            0,
+            _int_env(retry_env, 0 if attempt == "zenrows" else 1),
+        )
         for retry in range(retries + 1):
             if retry:
                 time.sleep(float(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRY_SLEEP_SECONDS", "1.5")) * retry)
@@ -190,6 +205,7 @@ def _fetch_product_source_zenrows(url, timeout=None):
             "premium_html",
         ),
         timeout=timeout,
+        extra={"proxy_country": "br"},
     )
     if not result.success:
         return {
@@ -249,7 +265,9 @@ def _product_source_detail(data):
     }
     if line == "TV":
         detail["sku"] = model
+        detail[CASAS_TV_EXACT_MODELO_FIELD] = bool(model)
     if line == "REF":
+        brand = _product_brand(product, sku, spec_values)
         detail.update(
             {
                 "ref_refrigerator_type": _known_text(
@@ -259,10 +277,15 @@ def _product_source_detail(data):
                     or _ref_type_from_text(name)
                 ),
                 "ref_capacity": semantic_fields["ref_capacity"],
-                "sku_short_version": ref_sku_short_version_from_text(name) or appliance_model_number_from_text(name),
+                CASAS_REF_EVIDENCE_FIELD: extract_casas_ref_sku_evidence(
+                    spec_values,
+                    model=model,
+                ),
+                CASAS_REF_BRAND_FIELD: brand,
             }
         )
     if line == "LDY":
+        variant_text = _known_text(sku.get("name")) or name
         detail.update(
             {
                 "ldy_loading_type": semantic_fields["ldy_loading_type"],
@@ -273,8 +296,16 @@ def _product_source_detail(data):
                     or ldy_color_from_text(name)
                 )),
                 "ldy_capacity": semantic_fields["ldy_capacity"],
-                "sku_short_version": ldy_sku_short_version_from_text(name),
-                "sku": ldy_sku_from_text(name),
+                CASAS_LDY_EVIDENCE_FIELD: extract_casas_ldy_sku_evidence(
+                    description,
+                    spec_values,
+                    variant_text=variant_text,
+                ),
+                CASAS_LDY_BRAND_FIELD: _product_brand(
+                    product,
+                    sku,
+                    spec_values,
+                ),
             }
         )
     return detail
@@ -288,6 +319,17 @@ def _description_text(data):
     # Keep adjacent label/value cells together, but preserve boundaries between
     # separate specification rows for the semantic description parser.
     return _html_break_text(raw).replace("\n", "; ")
+
+
+def _product_brand(product, sku, spec_values):
+    for container in (product, sku):
+        raw = container.get("brand") if isinstance(container, dict) else ""
+        if isinstance(raw, dict):
+            raw = raw.get("name") or raw.get("label") or raw.get("value")
+        value = _known_text(raw)
+        if value:
+            return value
+    return _known_text(_first_spec(spec_values, ["marca"]))
 
 
 def _freetext_label_value(text, labels):

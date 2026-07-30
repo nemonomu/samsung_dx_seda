@@ -259,6 +259,40 @@ def _request_target(
     if extra_headers:
         headers.update({key: value for key, value in extra_headers.items() if value not in (None, "")})
     try:
+        from ..zenrows_usage import (
+            record_http_request_attempt,
+            usage_required,
+        )
+
+        usage_recorded = record_http_request_attempt(
+            method,
+            profile,
+            multiplier,
+        )
+        if usage_required() and not usage_recorded:
+            return ZenRowsResult(
+                False,
+                url,
+                profile,
+                error="usage_tracking_error:not_started",
+                params=public_params,
+                estimated_multiplier=multiplier,
+            )
+    except Exception as exc:
+        required = os.getenv(
+            "SEDA_ZENROWS_USAGE_REQUIRED",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "y"}
+        if required:
+            return ZenRowsResult(
+                False,
+                url,
+                profile,
+                error=f"usage_tracking_error:{type(exc).__name__}",
+                params=public_params,
+                estimated_multiplier=multiplier,
+            )
+    try:
         if method == "POST":
             response = requests.post(
                 ZENROWS_API_URL,

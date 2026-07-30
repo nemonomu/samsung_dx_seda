@@ -11,6 +11,29 @@ from pathlib import Path
 import requests
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .casas_bahia.sku_contract import (
+    PDP_HTML_MODEL_TOKEN as CASAS_TV_PDP_HTML_MODEL_TOKEN,
+    PRODUCT_SOURCE_MODEL_TOKEN as CASAS_TV_PRODUCT_SOURCE_MODEL_TOKEN,
+    exact_modelo_candidate as casas_tv_exact_modelo_candidate,
+    has_verified_model_token as casas_tv_has_verified_model_token,
+    replace_verified_model_token as replace_casas_tv_verified_model_token,
+    verified_model_value as casas_tv_verified_model_value,
+)
+from .casas_bahia.ldy_sku_contract import (
+    BRAND_FIELD as CASAS_LDY_BRAND_FIELD,
+    EVIDENCE_FIELD as CASAS_LDY_EVIDENCE_FIELD,
+    resolve_ldy_sku as resolve_casas_ldy_sku,
+)
+from .casas_bahia.field_extraction import is_standalone_dryer_title
+from .casas_bahia.recovery_contract import (
+    zenrows_fields as casas_bahia_zenrows_fields,
+)
+from .casas_bahia.ref_sku_contract import (
+    BRAND_FIELD as CASAS_REF_BRAND_FIELD,
+    EVIDENCE_FIELD as CASAS_REF_EVIDENCE_FIELD,
+    casas_ref_short_for_output,
+    resolve_casas_ref_sku,
+)
 from .detail_publish import (
     detail_run_lock,
     file_sha256,
@@ -828,18 +851,41 @@ def _merge_casas_bahia_apis(row):
         return
 
     product_id = row.get("retailer_product_id", "")
-    sku_id = sku_from_url(row.get("product_url", "")) or row.get("sku", "")
+    url_sku_id = sku_from_url(row.get("product_url", ""))
+    sku_id = url_sku_id or (
+        "" if _is_casas_bahia_ldy_row(row) else row.get("sku", "")
+    )
     seller_id = row.get("seller_id", "") or os.getenv("SEDA_CASAS_BAHIA_DEFAULT_SELLER_ID", "10037")
 
     try:
         from .casas_bahia.detail_api import fetch_freight, fetch_pickup, fetch_product_source, fetch_similar_names
 
-        if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_API", "1").lower() not in {"0", "false", "no", "n"}:
+        if (
+            os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_API", "1").lower()
+            not in {"0", "false", "no", "n"}
+            and not _skip_casas_sku_api(row, sku_id, "product_source")
+        ):
             product_source = fetch_product_source(sku_id)
             if product_source.get("success"):
                 product_detail = product_source.get("detail") or {}
                 if product_detail.get("retailer_sku_name"):
-                    _merge_authoritative_detail(row, product_detail)
+                    if _is_casas_bahia_ldy_row(row):
+                        _merge_casas_bahia_ldy_product_source(
+                            row,
+                            product_detail,
+                        )
+                    elif _is_casas_bahia_ref_row(row):
+                        _merge_casas_bahia_ref_detail(
+                            row,
+                            product_detail,
+                            identity_verified=True,
+                        )
+                    else:
+                        _merge_casas_bahia_authoritative_detail(
+                            row,
+                            product_detail,
+                            CASAS_TV_PRODUCT_SOURCE_MODEL_TOKEN,
+                        )
                     row["fetch_method"] = _append_token(
                         row.get("fetch_method", ""), product_source.get("method", "casas_bahia_product_source_api")
                     )
@@ -855,7 +901,11 @@ def _merge_casas_bahia_apis(row):
 
         product_id = row.get("retailer_product_id", "") or product_id
 
-        if os.getenv("SEDA_CASAS_BAHIA_FREIGHT_API", "1").lower() not in {"0", "false", "no", "n"}:
+        if (
+            os.getenv("SEDA_CASAS_BAHIA_FREIGHT_API", "1").lower()
+            not in {"0", "false", "no", "n"}
+            and not _skip_casas_sku_api(row, sku_id, "freight_api")
+        ):
             freight = fetch_freight(sku_id, seller_id, referer_url=row.get("product_url", ""))
             if freight.get("success"):
                 _merge_non_empty(row, freight.get("detail") or {})
@@ -866,7 +916,11 @@ def _merge_casas_bahia_apis(row):
             else:
                 row["parse_status"] = _append_token(row.get("parse_status", ""), f"freight_api_failed:{freight.get('error','unknown')}")
 
-        if os.getenv("SEDA_CASAS_BAHIA_PICKUP_API", "1").lower() not in {"0", "false", "no", "n"}:
+        if (
+            os.getenv("SEDA_CASAS_BAHIA_PICKUP_API", "1").lower()
+            not in {"0", "false", "no", "n"}
+            and not _skip_casas_sku_api(row, sku_id, "pickup_api")
+        ):
             pickup = fetch_pickup(sku_id, seller_id)
             if pickup.get("success"):
                 _merge_non_empty(row, pickup.get("detail") or {})
@@ -970,6 +1024,175 @@ def _merge_non_empty(row, detail):
 def _is_magalu_tv_row(row):
     line = str(row.get("product_line") or product_line()).strip().upper()
     return row.get("retailer") == "Magalu" and line == "TV"
+
+
+def _is_casas_bahia_tv_row(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return row.get("retailer") == "Casas Bahia" and line == "TV"
+
+
+def _is_casas_bahia_ldy_row(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return row.get("retailer") == "Casas Bahia" and line == "LDY"
+
+
+def _is_casas_bahia_ref_row(row):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return row.get("retailer") == "Casas Bahia" and line == "REF"
+
+
+def _skip_casas_sku_api(row, sku_id, api_name):
+    if sku_id or not _is_casas_bahia_ldy_row(row):
+        return False
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        f"{api_name}_skipped:missing_url_item",
+    )
+    return True
+
+
+def _merge_casas_bahia_ldy_product_source(row, detail):
+    resolution = resolve_casas_ldy_sku(
+        row.get("sku", ""),
+        row.get("retailer_sku_name", ""),
+        detail.get(CASAS_LDY_EVIDENCE_FIELD) or (),
+        brand=detail.get(CASAS_LDY_BRAND_FIELD, ""),
+    )
+    detail_status = detail.get("parse_status", "")
+    safe_detail = {
+        key: value
+        for key, value in detail.items()
+        if not str(key).startswith("_")
+        and key not in {"sku", "sku_short_version", "parse_status"}
+    }
+    _merge_authoritative_detail(row, safe_detail)
+    row["sku"] = resolution.sku
+    row["sku_short_version"] = resolution.short
+    if detail_status:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            detail_status,
+        )
+    for token in resolution.status_tokens:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            token,
+        )
+    return bool(resolution.sku)
+
+
+def _merge_casas_bahia_ref_detail(
+    row,
+    detail,
+    *,
+    identity_verified=False,
+):
+    if not _is_casas_bahia_ref_row(row) or not identity_verified:
+        return False
+    detail_status = detail.get("parse_status", "")
+    brand = detail.get(CASAS_REF_BRAND_FIELD, "")
+    evidence = detail.get(CASAS_REF_EVIDENCE_FIELD) or ()
+    if not evidence and detail.get("sku"):
+        evidence = (detail.get("sku"),)
+    safe_detail = {
+        key: value
+        for key, value in detail.items()
+        if not str(key).startswith("_")
+        and key not in {"sku", "sku_short_version", "parse_status"}
+    }
+    _merge_authoritative_detail(
+        row,
+        safe_detail,
+        identity_verified=True,
+    )
+    if brand:
+        row[CASAS_REF_BRAND_FIELD] = brand
+    resolution = resolve_casas_ref_sku(
+        row.get("sku") or row.get("sku_short_version", ""),
+        row.get("retailer_sku_name", ""),
+        evidence,
+        brand=brand,
+    )
+    row["sku"] = resolution.sku
+    row["sku_short_version"] = casas_ref_short_for_output(
+        row,
+        resolution.sku,
+    )
+    if detail_status:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            detail_status,
+        )
+    for token in resolution.status_tokens:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            token,
+        )
+    return bool(resolution.sku)
+
+
+def _mark_casas_tv_verified_sku(row, detail, token):
+    if not _is_casas_bahia_tv_row(row):
+        return False
+    candidate = casas_tv_exact_modelo_candidate(row, detail)
+    if not candidate or clean_text(row.get("sku")) != candidate:
+        return False
+    row["parse_status"] = replace_casas_tv_verified_model_token(
+        row.get("parse_status", ""),
+        token,
+    )
+    return True
+
+
+def _merge_casas_bahia_authoritative_detail(
+    row,
+    detail,
+    model_token,
+    *,
+    identity_verified=False,
+):
+    if not _is_casas_bahia_tv_row(row):
+        _merge_authoritative_detail(
+            row,
+            detail,
+            identity_verified=identity_verified,
+        )
+        return False
+
+    candidate = casas_tv_exact_modelo_candidate(row, detail)
+    preserve_product_source = (
+        model_token == CASAS_TV_PDP_HTML_MODEL_TOKEN
+        and casas_tv_has_verified_model_token(
+            row,
+            CASAS_TV_PRODUCT_SOURCE_MODEL_TOKEN,
+        )
+        and casas_tv_verified_model_value(
+            row,
+            sku_from_url(row.get("product_url", "")),
+        )
+    )
+    excluded = {"parse_status"}
+    if not candidate or preserve_product_source:
+        excluded.add("sku")
+    safe_detail = {
+        key: value
+        for key, value in detail.items()
+        if key not in excluded
+    }
+    detail_status = detail.get("parse_status", "")
+    _merge_authoritative_detail(
+        row,
+        safe_detail,
+        identity_verified=identity_verified,
+    )
+    if detail_status:
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            detail_status,
+        )
+    if not candidate or preserve_product_source:
+        return False
+    return _mark_casas_tv_verified_sku(row, detail, model_token)
 
 
 def _magalu_tv_sku_is_recovery_target(row):
@@ -1104,14 +1327,55 @@ def _merge_generic_product_detail(row, detail):
     """Apply product detail according to its identity proof strength."""
     mode = _detail_identity_mode(row, detail)
     if mode == "verified":
-        _merge_authoritative_detail(row, detail, identity_verified=True)
+        if _is_casas_bahia_tv_row(row):
+            _merge_casas_bahia_authoritative_detail(
+                row,
+                detail,
+                CASAS_TV_PDP_HTML_MODEL_TOKEN,
+                identity_verified=True,
+            )
+        elif _is_casas_bahia_ldy_row(row):
+            detail_status = detail.get("parse_status", "")
+            _merge_authoritative_detail(
+                row,
+                {
+                    key: value
+                    for key, value in detail.items()
+                    if key not in {"sku", "sku_short_version", "parse_status"}
+                },
+                identity_verified=True,
+            )
+            if detail_status:
+                row["parse_status"] = _append_token(
+                    row.get("parse_status", ""),
+                    detail_status,
+                )
+        elif _is_casas_bahia_ref_row(row):
+            _merge_casas_bahia_ref_detail(
+                row,
+                detail,
+                identity_verified=True,
+            )
+        else:
+            _merge_authoritative_detail(row, detail, identity_verified=True)
         return True
     if mode == "same_name":
         fields = tuple(
             key
             for key in detail
             if not str(key).startswith("_")
-            and not (_is_magalu_tv_row(row) and key == "sku")
+            and not (
+                (_is_magalu_tv_row(row) or _is_casas_bahia_tv_row(row))
+                and key == "sku"
+            )
+            and not (
+                _is_casas_bahia_ldy_row(row)
+                and key in {"sku", "sku_short_version"}
+            )
+            and not (
+                _is_casas_bahia_ref_row(row)
+                and key in {"sku", "sku_short_version"}
+            )
         )
         return _merge_missing_detail_fields(row, detail, fields)
     # Explicit conflict or absent identity: merge no product-bound fields.
@@ -1709,6 +1973,289 @@ def _backfill_magalu_zenrows_fields(
     print(
         f"[seda] zenrows field recovery updated={updated}/{len(candidates)} "
         f"attempted={attempted} unique={len(cache)} stopped={stopped_reason or 'no'}",
+        flush=True,
+    )
+    return rows
+
+
+_CASAS_ZENROWS_COMPLETE_TOKEN = "casas_zenrows_field_complete"
+_CASAS_ZENROWS_CONFIG_ERRORS = {
+    "zenrows_disabled",
+    "zenrows_dry_run",
+    "key_missing",
+}
+
+
+def _casas_zenrows_field_recovery_enabled():
+    scoped = os.getenv(
+        "SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK",
+        "0",
+    ).lower()
+    if scoped not in {"1", "true", "yes", "y"}:
+        return False
+    from .magalu.zenrows_client import dry_run, enabled
+
+    return enabled() and not dry_run()
+
+
+def _casas_zenrows_missing_fields(row):
+    if row.get("retailer") != "Casas Bahia":
+        return ()
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    fields = list(casas_bahia_zenrows_fields(line))
+    if line == "LDY" and is_standalone_dryer_title(
+        row.get("retailer_sku_name", "")
+    ):
+        fields = [
+            field
+            for field in fields
+            if field not in {"ldy_capacity", "ldy_loading_type"}
+        ]
+    return tuple(
+        field
+        for field in fields
+        if row.get(field) in ("", None, [], {})
+    )
+
+
+def _casas_zenrows_item_key(row):
+    parsed = urlsplit(str(row.get("product_url") or "").strip())
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    if host != "casasbahia.com.br" and not host.endswith(
+        ".casasbahia.com.br"
+    ):
+        return (), "invalid_product_host"
+    url_item = clean_text(sku_from_url(row.get("product_url", "")))
+    row_item = clean_text(row.get("item"))
+    if url_item and row_item and url_item.casefold() != row_item.casefold():
+        return (), "input_item_identity_mismatch"
+    item_id = url_item or row_item
+    if not item_id:
+        return (), "missing_item_id"
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    return (line, item_id.casefold()), ""
+
+
+def _casas_zenrows_completed(row):
+    return _CASAS_ZENROWS_COMPLETE_TOKEN in {
+        token.strip()
+        for token in str(row.get("parse_status") or "").split("+")
+        if token.strip()
+    }
+
+
+def _casas_zenrows_int_env(name, default, *, minimum=0, maximum=1000):
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _merge_casas_zenrows_field_result(
+    row,
+    result,
+    *,
+    trace_rows=None,
+    row_index="",
+    cache_hit=False,
+):
+    product_url = row.get("product_url", "")
+    missing_before = _casas_zenrows_missing_fields(row)
+    if cache_hit:
+        _record_subcall(
+            trace_rows,
+            row,
+            row_index,
+            product_url,
+            "casas_zenrows_field_pdp",
+            method="casas_zenrows_item_cache",
+            success=bool(result.get("success")),
+            error=result.get("error", ""),
+            detail="cached_result",
+        )
+    else:
+        for attempt_number, attempt in enumerate(
+            result.get("attempts") or (),
+            start=1,
+        ):
+            request_cost = (attempt.get("headers") or {}).get(
+                "X-Request-Cost",
+                "",
+            )
+            _record_subcall(
+                trace_rows,
+                row,
+                row_index,
+                product_url,
+                "casas_zenrows_field_pdp",
+                attempt=attempt_number,
+                method=(
+                    f"casas_zenrows_pdp:{attempt.get('profile', '')}:"
+                    f"{attempt.get('estimated_multiplier', '')}"
+                ),
+                success=bool(attempt.get("success")),
+                status_code=attempt.get("status_code", ""),
+                error=attempt.get("error", ""),
+                detail=(
+                    f"request_cost:{request_cost}"
+                    if request_cost
+                    else ""
+                ),
+            )
+    detail = result.get("detail") or {}
+    _merge_missing_detail_fields(row, detail, missing_before)
+    filled = tuple(field for field in missing_before if row.get(field))
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        _CASAS_ZENROWS_COMPLETE_TOKEN,
+    )
+    if filled:
+        row["fetch_method"] = _append_token(
+            row.get("fetch_method", ""),
+            "casas_zenrows_pdp",
+        )
+        row["parse_status"] = _append_token(
+            row.get("parse_status", ""),
+            f"casas_zenrows_field_recovered:{','.join(filled)}",
+        )
+        return True
+    row["parse_status"] = _append_token(
+        row.get("parse_status", ""),
+        f"casas_zenrows_field_failed:{result.get('error', 'no_target_values')}",
+    )
+    return False
+
+
+def _backfill_casas_zenrows_fields(
+    rows,
+    output,
+    checkpoint_every=5,
+    trace_rows=None,
+    checkpoint_writer=None,
+):
+    """Recover only missing, allowlisted Casas semantic fields once per item."""
+    if not _casas_zenrows_field_recovery_enabled():
+        return rows
+    candidates = []
+    requested_by_key = {}
+    for row_index, row in enumerate(rows, start=1):
+        missing = _casas_zenrows_missing_fields(row)
+        if not missing or _casas_zenrows_completed(row):
+            continue
+        cache_key, key_error = _casas_zenrows_item_key(row)
+        if key_error:
+            row["parse_status"] = _append_token(
+                row.get("parse_status", ""),
+                f"casas_zenrows_field_skipped:{key_error}",
+            )
+            continue
+        candidates.append((row_index, row, cache_key))
+        requested_by_key.setdefault(cache_key, set()).update(missing)
+    if not candidates:
+        return rows
+
+    from .casas_bahia.pdp_field_recovery import (
+        fetch_pdp_fields_via_zenrows,
+    )
+
+    failure_limit = _casas_zenrows_int_env(
+        "SEDA_CASAS_BAHIA_ZENROWS_FIELD_FAILURE_STREAK",
+        3,
+        minimum=1,
+        maximum=20,
+    )
+    cache = {}
+    attempted_items = 0
+    request_count = 0
+    updated = 0
+    failure_streak = 0
+    stopped_reason = ""
+    print(
+        "[seda] casas zenrows field recovery "
+        f"candidates={len(candidates)}",
+        flush=True,
+    )
+    for position, (row_index, row, cache_key) in enumerate(
+        candidates,
+        start=1,
+    ):
+        cache_hit = cache_key in cache
+        if cache_hit:
+            result = cache[cache_key]
+        else:
+            requested = tuple(
+                field
+                for field in casas_bahia_zenrows_fields(cache_key[0])
+                if field in requested_by_key[cache_key]
+            )
+            try:
+                result = fetch_pdp_fields_via_zenrows(
+                    row.get("product_url", ""),
+                    requested,
+                    max_requests=2,
+                )
+            except Exception as exc:
+                result = {
+                    "success": False,
+                    "detail": {},
+                    "error": f"exception:{type(exc).__name__}",
+                    "request_count": 0,
+                    "attempts": [],
+                }
+            cache[cache_key] = result
+            attempted_items += 1
+            request_count += int(result.get("request_count") or 0)
+        changed = _merge_casas_zenrows_field_result(
+            row,
+            result,
+            trace_rows=trace_rows,
+            row_index=row_index,
+            cache_hit=cache_hit,
+        )
+        if changed:
+            updated += 1
+        if not cache_hit:
+            requested_values = requested_by_key[cache_key]
+            target_success = any(
+                (result.get("detail") or {}).get(field)
+                for field in requested_values
+            )
+            if target_success:
+                failure_streak = 0
+            else:
+                failure_streak += 1
+            error = str(result.get("error") or "")
+            if (
+                error in _CASAS_ZENROWS_CONFIG_ERRORS
+                or error.startswith("unknown_profile:")
+            ):
+                stopped_reason = error or "configuration_error"
+                break
+            if failure_streak >= failure_limit:
+                stopped_reason = f"failure_streak:{failure_streak}"
+                break
+        print(
+            f"[seda] casas zenrows field {position}/{len(candidates)} "
+            f"item={_safe_log_value(row.get('item'))} "
+            f"cache={int(cache_hit)} updated={int(changed)} "
+            f"remaining={','.join(_casas_zenrows_missing_fields(row)) or 'none'}",
+            flush=True,
+        )
+        if (
+            checkpoint_every
+            and not cache_hit
+            and attempted_items % checkpoint_every == 0
+        ):
+            if checkpoint_writer:
+                checkpoint_writer(rows)
+            else:
+                write_csv(output, rows, columns=OUTPUT_COLUMNS)
+    print(
+        "[seda] casas zenrows field recovery "
+        f"updated={updated}/{len(candidates)} "
+        f"items={attempted_items} requests={request_count} "
+        f"stopped={stopped_reason or 'no'}",
         flush=True,
     )
     return rows
@@ -3027,6 +3574,17 @@ def _run_detail_main(root, *, is_worker):
             output,
             checkpoint_every=int(
                 os.getenv("SEDA_MAGALU_ZENROWS_FIELD_CHECKPOINT_EVERY", "5")
+            ),
+            trace_rows=subcall_trace_rows,
+            checkpoint_writer=checkpoint_writer,
+        )
+        enriched = _backfill_casas_zenrows_fields(
+            enriched,
+            output,
+            checkpoint_every=_casas_zenrows_int_env(
+                "SEDA_CASAS_BAHIA_ZENROWS_FIELD_CHECKPOINT_EVERY",
+                5,
+                maximum=100,
             ),
             trace_rows=subcall_trace_rows,
             checkpoint_writer=checkpoint_writer,

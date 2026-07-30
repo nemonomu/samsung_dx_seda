@@ -3,6 +3,7 @@ import smtplib
 from email.message import EmailMessage
 
 from .step00_config import product_line, csv_count, read_json, run_root, write_json
+from .zenrows_usage import summarize_usage
 
 
 def _send_email(subject, body):
@@ -45,12 +46,23 @@ def _retailer_report_label():
 
 
 def _email_subject(status):
-    prefix = "" if status.get("data_success") else "WARNING "
+    prefix = "" if _report_success(status) else "WARNING "
     return f"{prefix}[SEDA] {_retailer_report_label()} {product_line()} crawling report"
 
 
 def _format_success(value):
     return "SUCCESS" if value else "CHECK NEEDED"
+
+
+def _report_success(status):
+    usage = (
+        status.get("zenrows_usage")
+        if isinstance(status.get("zenrows_usage"), dict)
+        else {}
+    )
+    return bool(status.get("data_success")) and (
+        usage.get("tracking_status") == "complete"
+    )
 
 
 def _append_if(lines, label, value):
@@ -67,6 +79,11 @@ def _build_email_body(status):
     db_prepare = status.get("db_prepare") if isinstance(status.get("db_prepare"), dict) else {}
     db_load = status.get("db_load") if isinstance(status.get("db_load"), dict) else {}
     s3_sync = status.get("s3_sync") if isinstance(status.get("s3_sync"), dict) else {}
+    zenrows_usage = (
+        status.get("zenrows_usage")
+        if isinstance(status.get("zenrows_usage"), dict)
+        else {}
+    )
 
     final_rows = int(status.get("final_output_rows") or 0)
     inserted_rows = int(status.get("db_inserted_rows") or 0)
@@ -75,7 +92,7 @@ def _build_email_body(status):
     lines = [
         f"[SEDA] {_retailer_report_label()} {product_line()} crawling report",
         "",
-        f"Status: {_format_success(status.get('data_success'))}",
+        f"Status: {_format_success(_report_success(status))}",
         f"Product line: {product_line()}",
         f"Run date: {_run_date_from_status(status)}",
         "",
@@ -86,6 +103,17 @@ def _build_email_body(status):
         f"- Final targets: {status.get('final_target_rows')}",
         f"- Final output: {final_rows}",
         f"- DB inserted: {inserted_rows}",
+        "",
+        "ZenRows:",
+        (
+            "- HTTP requests (this execution): "
+            + (
+                str(int(zenrows_usage.get("http_calls") or 0))
+                if zenrows_usage.get("tracking_status") == "complete"
+                else "N/A"
+            )
+        ),
+        f"- Tracking status: {zenrows_usage.get('tracking_status') or 'unavailable'}",
         "",
         "DB:",
     ]
@@ -101,6 +129,11 @@ def _build_email_body(status):
         issues.append(f"DB inserted rows mismatch: inserted={inserted_rows}, final_output={final_rows}.")
     if s3_sync and s3_sync.get("success") is False:
         issues.append(f"S3 sync failed: {s3_sync.get('error') or s3_sync.get('skip_reason') or 'unknown reason'}")
+    if zenrows_usage.get("tracking_status") != "complete":
+        issues.append(
+            "ZenRows HTTP request tracking is unavailable: "
+            f"{zenrows_usage.get('error') or 'unknown reason'}."
+        )
 
     if issues:
         lines.extend(["", "Issues:"])
@@ -125,6 +158,7 @@ def main():
         "s3_sync": read_json(root / "s3" / "manifest_s3_sync.json"),
         "main_manifest": read_json(root / "main" / "manifest.json"),
         "bsr_manifest": read_json(root / "bsr" / "manifest.json"),
+        "zenrows_usage": summarize_usage(root),
     }
     db_load = status.get("db_load") or {}
     status["db_inserted_rows"] = int((db_load.get("inserted") or 0) if isinstance(db_load, dict) else 0)
@@ -133,7 +167,11 @@ def main():
         and db_load.get("success") is True
         and status["db_inserted_rows"] == status["final_output_rows"]
     )
-    status["success"] = status["data_success"]
+    status["zenrows_tracking_success"] = (
+        status["zenrows_usage"].get("tracking_status") == "complete"
+    )
+    status["report_success"] = _report_success(status)
+    status["success"] = status["report_success"]
     output = root / "status" / "status_summary.json"
     write_json(output, status)
 
@@ -146,7 +184,7 @@ def main():
         email_status = f"failed:{type(exc).__name__}: {exc}"
     status["email_status"] = email_status
     status["email_subject"] = subject
-    status["success"] = status["data_success"] and email_status == "sent"
+    status["success"] = status["report_success"] and email_status == "sent"
     write_json(output, status)
     print(f"[seda] wrote {output} email={email_status}")
     if not status["success"]:

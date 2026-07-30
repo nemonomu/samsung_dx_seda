@@ -1305,6 +1305,10 @@ def _listing_row(retailer, text, url, source_url, run_id, rank):
     original, final = _price_fields(text)
     rating, rating_count = _rating_fields(text)
     now = datetime.now().isoformat(timespec="seconds")
+    name = _name_from_listing_text(text)
+    listing_sku = sku_from_url(url)
+    if retailer == "Casas Bahia" and product_line() in {"REF", "LDY"}:
+        listing_sku = _casas_bahia_listing_sku(name)
     return {
         "retailer": retailer,
         "country": DEFAULT_COUNTRY,
@@ -1313,13 +1317,13 @@ def _listing_row(retailer, text, url, source_url, run_id, rank):
         "main_rank": "" if run_id == "bsr" else rank,
         "bsr_rank": rank if run_id == "bsr" else "",
         "product_url": url,
-        "retailer_sku_name": _name_from_listing_text(text),
+        "retailer_sku_name": name,
         "original_sku_price": original,
         "final_sku_price": final,
         "savings": _savings_from_text(text),
         "sku_status": "Sponsored" if re.search(r"patrocinado|sponsored", text, re.I) else "",
         "discount_type": _discount_text(text) if retailer != "Magalu" else _coupon_text_from_text(text),
-        "sku": sku_from_url(url),
+        "sku": listing_sku,
         "screen_size": screen_size_from_text(text),
         "model_year": model_year_from_text(text),
         "star_rating": "",
@@ -1382,6 +1386,8 @@ _AUDITED_SEMANTIC_DETAIL_FIELDS = {
     "ldy_capacity",
     "ldy_loading_type",
 }
+
+CASAS_TV_EXACT_MODELO_FIELD = "_casas_tv_exact_modelo"
 
 
 def parse_detail(html_text, retailer, base_url, product_url):
@@ -1528,6 +1534,7 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
         "final_sku_price": final,
         "savings": _savings_from_text(_visible_text(html_text)),
         "sku": model,
+        CASAS_TV_EXACT_MODELO_FIELD: bool(model) and line == "TV",
         "screen_size": screen_size,
         "estimated_annual_electricity_use": energy_use,
         "model_year": _first_spec_value(specs, ["ano de lancamento"]),
@@ -1538,7 +1545,80 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
     for field_name in ("ref_capacity", "ldy_capacity", "ldy_loading_type"):
         if field_name in semantic_fields:
             detail[field_name] = semantic_fields[field_name]
+    if detail["_detail_identity_verified"]:
+        safe_recovery = {}
+        if line == "TV":
+            safe_recovery.update(
+                {
+                    "screen_size": screen_size,
+                    "estimated_annual_electricity_use": energy_use,
+                    "model_year": detail["model_year"],
+                }
+            )
+        elif line == "REF":
+            safe_recovery.update(
+                {
+                    "ref_refrigerator_type": _casas_pdp_ref_type(
+                        title,
+                        semantic_specs,
+                    ),
+                    "ref_capacity": semantic_fields.get("ref_capacity", ""),
+                }
+            )
+        elif line == "LDY":
+            safe_recovery.update(
+                {
+                    "ldy_loading_type": semantic_fields.get(
+                        "ldy_loading_type",
+                        "",
+                    ),
+                    "ldy_color": _casas_pdp_ldy_color(
+                        semantic_specs,
+                        title,
+                    ),
+                    "ldy_capacity": semantic_fields.get("ldy_capacity", ""),
+                }
+            )
+        detail["_casas_pdp_safe_recovery"] = safe_recovery
     return detail
+
+
+def _casas_pdp_ref_type(title, specs):
+    title_type = magalu_ref_refrigerator_type_from_title(title)
+    spec_types = []
+    wanted = {
+        "tipo",
+        "tipo de refrigerador",
+        "tipo de geladeira",
+        "quantidade de portas",
+    }
+    for label, values in (specs or {}).items():
+        normalized_label = normalize_field_key(label)
+        if normalized_label not in wanted:
+            continue
+        for value in values if isinstance(values, (list, tuple)) else (values,):
+            candidate = value
+            if (
+                normalized_label == "quantidade de portas"
+                and re.fullmatch(r"[1-4]", clean_text(value))
+            ):
+                candidate = f"{clean_text(value)} portas"
+            canonical = canonicalize_ref_refrigerator_type(candidate)
+            if canonical and canonical not in spec_types:
+                spec_types.append(canonical)
+    return select_magalu_ref_refrigerator_type(title_type, spec_types)
+
+
+def _casas_pdp_ldy_color(specs, title):
+    wanted = {"cor", "cor do produto"}
+    for label, values in (specs or {}).items():
+        if normalize_field_key(label) not in wanted:
+            continue
+        for value in values if isinstance(values, (list, tuple)) else (values,):
+            color = ldy_color_from_text(value)
+            if color:
+                return color
+    return ldy_color_from_text(title)
 
 
 def _casas_bahia_next_product(html_text):

@@ -7,6 +7,7 @@ from pathlib import Path
 from seda.common.retailer_runner import configure_retailer, run_module, step_env
 from seda.detail_publish import assert_detail_publish_complete
 from seda.step00_config import csv_count, dated_run_root, product_line, run_root
+from seda.zenrows_usage import start_execution as start_zenrows_usage_execution
 
 
 TRUE_VALUES = {"1", "true", "yes", "y"}
@@ -223,6 +224,8 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
         for step in steps:
             print(f"  {step.key} {step.name:<18} {step.module}")
         return
+    if not args.dry_run:
+        start_zenrows_usage_execution()
     for step in chosen:
         if _requires_detail_completion(step) and not args.dry_run:
             assert_detail_publish_complete(run_root())

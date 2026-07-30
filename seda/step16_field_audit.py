@@ -39,7 +39,11 @@ PARSER_CRITERIA = {
         "Magalu: retailer detail targets first. Preserve target ranges/approximate values when no reliable exact "
         "Casas Bahia title capacity exists."
     ),
-    "sku_short_version": "Short model code from retailer_sku_name, e.g. RS58 or RF29D.",
+    "sku_short_version": (
+        "Casas Bahia REF: derive a verified retailer-specific short rule from the resolved full SKU, "
+        "otherwise store the full SKU unchanged. Casas Bahia LDY: derive a verified Samsung family "
+        "only from the resolved SKU; other retailer/product contracts remain unchanged."
+    ),
 }
 
 

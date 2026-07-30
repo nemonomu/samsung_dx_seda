@@ -230,18 +230,22 @@ def extract_fields(specs, title, description, line, allow_title_fallback=True):
         )
     if line == "LDY":
         if product_title:
-            fields["ldy_capacity"] = _ldy_capacity(
-                specs,
-                title,
-                description,
-                allow_title_fallback=allow_title_fallback,
-            )
-            fields["ldy_loading_type"] = _ldy_loading_type(
-                specs,
-                title,
-                description,
-                allow_title_fallback=allow_title_fallback,
-            )
+            if _is_standalone_dryer_title(title):
+                fields["ldy_capacity"] = ""
+                fields["ldy_loading_type"] = ""
+            else:
+                fields["ldy_capacity"] = _ldy_capacity(
+                    specs,
+                    title,
+                    description,
+                    allow_title_fallback=allow_title_fallback,
+                )
+                fields["ldy_loading_type"] = _ldy_loading_type(
+                    specs,
+                    title,
+                    description,
+                    allow_title_fallback=allow_title_fallback,
+                )
         else:
             fields["ldy_capacity"] = ""
             fields["ldy_loading_type"] = ""
@@ -283,7 +287,11 @@ def extract_fields_by_sources(specs, title, descriptions, line):
             allow_title_fallback=True,
         )
     global_ldy_capacity = ''
-    if normalized_line == 'LDY' and _is_ldy_title(title):
+    if (
+        normalized_line == 'LDY'
+        and _is_ldy_title(title)
+        and not _is_standalone_dryer_title(title)
+    ):
         global_ldy_capacity = _ldy_capacity(
             specs,
             title,
@@ -291,7 +299,11 @@ def extract_fields_by_sources(specs, title, descriptions, line):
             allow_title_fallback=True,
         )
     global_ldy_loading_type = ''
-    if normalized_line == 'LDY' and _is_ldy_title(title):
+    if (
+        normalized_line == 'LDY'
+        and _is_ldy_title(title)
+        and not _is_standalone_dryer_title(title)
+    ):
         global_ldy_loading_type = _ldy_loading_type(
             specs,
             title,
@@ -1193,6 +1205,11 @@ def _is_standalone_dryer_title(title):
     return bool(re.search(r"\bsecadora(?:\s+de\s+roupas?)?\b", key)) and not bool(
         re.search(r"\b(?:lava\s+e\s+seca|lavadora|maquina\s+de\s+lavar|tanquinho)\b", key)
     )
+
+
+def is_standalone_dryer_title(title):
+    """Public guard used by recovery paths to preserve intentional blanks."""
+    return _is_standalone_dryer_title(title)
 
 
 def _is_ldy_title(title):

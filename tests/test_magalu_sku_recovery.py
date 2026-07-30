@@ -545,13 +545,14 @@ class MagaluSkuRecoveryTests(unittest.TestCase):
     def test_magalu_descriptive_filter_does_not_change_casas_ldy_sku(self):
         row = {
             "retailer": "Casas Bahia",
-            "sku": "Lavadora XPTO",
+            "retailer_sku_name": "Lavadora Panasonic 17kg NA-F170B7W",
+            "sku": "NA-F170B7W",
         }
         with patch.dict(
             os.environ,
             {"SEDA_ACTIVE_RETAILER": "casas_bahia", "SEDA_PRODUCT_LINE": "LDY"},
         ):
-            self.assertEqual(_sku_for_output(row, "item-1"), "Lavadora XPTO")
+            self.assertEqual(_sku_for_output(row, "item-1"), "NA-F170B7W")
 
     def test_recovered_and_unresolved_final_db_contract(self):
         with patch.dict(

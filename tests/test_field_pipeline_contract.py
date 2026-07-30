@@ -16,6 +16,11 @@ from seda.casas_bahia.detail_api import (
     fetch_product_source,
 )
 from seda.casas_bahia.field_extraction import extract_fields as extract_casas_fields
+from seda.casas_bahia.sku_contract import (
+    PDP_HTML_MODEL_TOKEN,
+    PRODUCT_SOURCE_MODEL_TOKEN,
+    casas_tv_title_model,
+)
 from seda.common.field_rules import extract_ldy_capacity_from_title, extract_ref_capacity_from_title
 from seda.common.translations import (
     PRESERVE_TRANSLATION_FIELDS_KEY,
@@ -25,7 +30,12 @@ from seda.magalu import detail_api as magalu_detail_api
 from seda.magalu.field_extraction import extract_fields as extract_magalu_fields
 from seda.magalu.search_api import SEARCH_QUERY
 from seda.magalu.zenrows_client import ZenRowsResult
-from seda.parsers import _casas_bahia_next_product, _magalu_product_row, parse_detail
+from seda.parsers import (
+    CASAS_TV_EXACT_MODELO_FIELD,
+    _casas_bahia_next_product,
+    _magalu_product_row,
+    parse_detail,
+)
 from seda import step14_db_load
 from seda.step00_config import OUTPUT_COLUMNS, write_csv
 from seda.step08_detail_enrichment import (
@@ -521,6 +531,28 @@ class FieldPipelineContractTests(unittest.TestCase):
         with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "REF"}):
             detail = _product_source_detail(data)
         self.assertEqual(detail["retailer_sku_name"], "Geladeira SKU 305L")
+
+    def test_casas_product_source_tv_model_comes_from_exact_modelo_spec(self):
+        data = {
+            "product": {
+                "id": 10,
+                "name": 'Smart TV TCL 55" QLED',
+                "specGroups": [
+                    {
+                        "name": "Especificacoes",
+                        "specs": [
+                            {"name": "Modelo", "value": "55C855"},
+                            {"name": "Tamanho da tela", "value": '55"'},
+                        ],
+                    }
+                ],
+            },
+            "sku": {"id": "123", "name": 'Smart TV TCL 55" QLED'},
+        }
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            detail = _product_source_detail(data)
+        self.assertEqual(detail["sku"], "55C855")
+        self.assertIs(detail[CASAS_TV_EXACT_MODELO_FIELD], True)
 
     def test_casas_product_source_adjacent_html_cells_keep_specs(self):
         def source(name, description):
@@ -3214,7 +3246,7 @@ class FieldPipelineContractTests(unittest.TestCase):
         cases = (
             ("TV", "Smart TV TCL 55 4K", "Smart TV TCL 55 4K"),
             ("REF", "Geladeira Consul 377L", ""),
-            ("LDY", "Lavadora Midea 13kg", "MODEL-LDY"),
+            ("LDY", "Lavadora Brastemp 16kg BWF16AB", "BWF16AB"),
         )
         for line, product_name, expected_sku in cases:
             with self.subTest(product_line=line):
@@ -3223,7 +3255,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                     "retailer": "Casas Bahia",
                     "product_url": "https://www.casasbahia.com.br/produto/p/123",
                     "retailer_sku_name": product_name,
-                    "sku": "MODEL-LDY",
+                    "sku": "BWF16AB",
                 }
                 with patch.dict(
                     os.environ,
@@ -3239,6 +3271,306 @@ class FieldPipelineContractTests(unittest.TestCase):
                             formatted["retailer_sku_name"],
                         ),
                     )
+
+    def test_casas_tv_verified_product_source_model_precedes_html_and_title(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv/p/123",
+            "retailer_sku_name": 'Smart TV TCL 55" 55TITLE',
+            "sku": "55HTML",
+            "parse_status": PDP_HTML_MODEL_TOKEN,
+        }
+        result = {
+            "success": True,
+            "detail": {
+                "retailer_sku_name": row["retailer_sku_name"],
+                "sku": "55REST",
+                CASAS_TV_EXACT_MODELO_FIELD: True,
+            },
+            "method": "casas_bahia_product_source_direct",
+            "headers": {},
+        }
+        env = {
+            "SEDA_PRODUCT_LINE": "TV",
+            "SEDA_ACTIVE_RETAILER": "casas_bahia",
+            "SEDA_CASAS_BAHIA_API_ENRICH": "1",
+            "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_API": "1",
+            "SEDA_CASAS_BAHIA_FREIGHT_API": "0",
+            "SEDA_CASAS_BAHIA_PICKUP_API": "0",
+            "SEDA_CASAS_BAHIA_RECS_API": "0",
+            "SEDA_CASAS_BAHIA_REVIEW_API": "0",
+        }
+        with patch.dict(os.environ, env), patch(
+            "seda.casas_bahia.detail_api.fetch_product_source",
+            return_value=result,
+        ):
+            _merge_casas_bahia_apis(row)
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(row["sku"], "55REST")
+        self.assertIn(PRODUCT_SOURCE_MODEL_TOKEN, row["parse_status"].split("+"))
+        self.assertEqual(formatted["sku"], "55REST")
+        self.assertEqual(formatted["item"], "123")
+        self.assertEqual(_db_value("sku", formatted["sku"]), "55REST")
+
+    def test_casas_tv_product_source_without_model_does_not_publish_numeric_id(self):
+        title = 'Smart TV AOC LED 43" Full HD Wi-Fi Roku TV'
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv/p/1576811625",
+            "retailer_sku_name": title,
+            "sku": "1576811625",
+            "parse_status": "",
+        }
+        result = {
+            "success": True,
+            "detail": {
+                "retailer_sku_name": title,
+                "sku": "",
+                CASAS_TV_EXACT_MODELO_FIELD: False,
+            },
+            "method": "casas_bahia_product_source_direct",
+            "headers": {},
+        }
+        env = {
+            "SEDA_PRODUCT_LINE": "TV",
+            "SEDA_ACTIVE_RETAILER": "casas_bahia",
+            "SEDA_CASAS_BAHIA_API_ENRICH": "1",
+            "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_API": "1",
+            "SEDA_CASAS_BAHIA_FREIGHT_API": "0",
+            "SEDA_CASAS_BAHIA_PICKUP_API": "0",
+            "SEDA_CASAS_BAHIA_RECS_API": "0",
+            "SEDA_CASAS_BAHIA_REVIEW_API": "0",
+        }
+        with patch.dict(os.environ, env), patch(
+            "seda.casas_bahia.detail_api.fetch_product_source",
+            return_value=result,
+        ):
+            _merge_casas_bahia_apis(row)
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertNotIn(PRODUCT_SOURCE_MODEL_TOKEN, row["parse_status"].split("+"))
+        self.assertEqual(formatted["sku"], title)
+        self.assertNotEqual(formatted["sku"], row["sku"])
+
+    def test_casas_tv_verified_html_model_gets_provenance_and_unverified_does_not(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv/p/123",
+            "retailer_sku_name": 'Smart TV TCL 55" QLED',
+            "sku": "123",
+            "parse_status": "",
+        }
+        payload = {
+            "props": {
+                "initialState": {
+                    "Product": {
+                        "product": {
+                            "id": "internal-product-id",
+                            "name": row["retailer_sku_name"],
+                            "description": "",
+                            "specGroups": [
+                                {
+                                    "name": "Especificacoes",
+                                    "specs": [
+                                        {"name": "Modelo", "value": "55C855"},
+                                        {"name": "Tamanho da tela", "value": '55"'},
+                                    ],
+                                }
+                            ],
+                        },
+                        "sku": {
+                            "id": "123",
+                            "name": row["retailer_sku_name"],
+                        },
+                    }
+                }
+            }
+        }
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+        )
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            verified = parse_detail(
+                html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                row["product_url"],
+            )
+            self.assertIs(verified["_detail_identity_verified"], True)
+            self.assertEqual(verified["sku"], "55C855")
+            self.assertIs(verified[CASAS_TV_EXACT_MODELO_FIELD], True)
+            self.assertTrue(_merge_generic_product_detail(row, verified))
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(row["sku"], "55C855")
+        self.assertIn(PDP_HTML_MODEL_TOKEN, row["parse_status"].split("+"))
+        self.assertEqual(formatted["sku"], "55C855")
+
+        listing = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "retailer_sku_name": 'Smart TV TCL 55" QLED',
+            "sku": "123",
+            "parse_status": "",
+        }
+        same_name_only = {
+            "retailer_sku_name": listing["retailer_sku_name"],
+            "sku": "RECOMMENDATION-55",
+        }
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "TV"}):
+            _merge_generic_product_detail(listing, same_name_only)
+        self.assertEqual(listing["sku"], "123")
+        self.assertNotIn(PDP_HTML_MODEL_TOKEN, listing["parse_status"].split("+"))
+
+    def test_casas_tv_html_requires_exact_modelo_and_url_identity_for_token(self):
+        title = 'Smart TV TCL 55" QLED'
+        payload = {
+            "props": {
+                "initialState": {
+                    "Product": {
+                        "product": {
+                            "id": "internal-product-id",
+                            "name": title,
+                            "description": "",
+                            "specGroups": [
+                                {
+                                    "name": "Especificacoes",
+                                    "specs": [
+                                        {"name": "Tamanho da tela", "value": '55"'},
+                                    ],
+                                }
+                            ],
+                        },
+                        "sku": {"id": "123", "name": title},
+                    }
+                }
+            }
+        }
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+            + '<script type="application/ld+json">'
+            + json.dumps({"@type": "Product", "name": title, "sku": "123"})
+            + "</script>"
+        )
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv/p/123",
+            "retailer_sku_name": title,
+            "sku": "123",
+            "parse_status": "",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            detail = parse_detail(
+                html,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                row["product_url"],
+            )
+            self.assertIs(detail["_detail_identity_verified"], True)
+            self.assertIs(detail[CASAS_TV_EXACT_MODELO_FIELD], False)
+            self.assertEqual(detail["sku"], "123")
+            self.assertTrue(_merge_generic_product_detail(row, detail))
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertNotIn(PDP_HTML_MODEL_TOKEN, row["parse_status"].split("+"))
+        self.assertEqual(formatted["sku"], title)
+
+        payload["props"]["initialState"]["Product"]["product"]["specGroups"][0][
+            "specs"
+        ].append({"name": "Modelo", "value": "55C855"})
+        no_url_row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "product_url": "https://www.casasbahia.com.br/smart-tv",
+            "retailer_sku_name": title,
+            "sku": "",
+            "parse_status": "",
+        }
+        html_with_model = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload)
+            + "</script>"
+        )
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            no_url_detail = parse_detail(
+                html_with_model,
+                "Casas Bahia",
+                "https://www.casasbahia.com.br",
+                no_url_row["product_url"],
+            )
+            self.assertIs(no_url_detail[CASAS_TV_EXACT_MODELO_FIELD], True)
+            self.assertTrue(_merge_generic_product_detail(no_url_row, no_url_detail))
+            no_url_formatted = _format_row(
+                no_url_row,
+                datetime(2026, 7, 30, 12, 0, 0),
+            )
+        self.assertNotIn(
+            PDP_HTML_MODEL_TOKEN,
+            no_url_row["parse_status"].split("+"),
+        )
+        self.assertEqual(no_url_formatted["sku"], title)
+
+    def test_casas_tv_title_model_is_conservative_before_whole_title_fallback(self):
+        cases = (
+            (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA',
+                "55QNED73ASA",
+            ),
+            (
+                'Smart TV HQ QLED 65" 4K 3 HDMI 2 USB RJ45 HQ-QLED65SM',
+                "HQ-QLED65SM",
+            ),
+            (
+                'Smart TV 32" Full HD TL056M',
+                "TL056M",
+            ),
+            (
+                'Smart TV 55" TCL 55P7K 4K QLED 60Hz HDR10+ Dolby Vision',
+                "55P7K",
+            ),
+            (
+                'Smart TV 55" 55A1 + Smart TV 43" 43B2',
+                "",
+            ),
+            (
+                'Smart TV 85" Crystal UHD 4K U8100F + Vision AI TV 50" QLED 4K',
+                "",
+            ),
+            (
+                'Smart TV AOC LED 43" Full HD Wi-Fi Roku TV',
+                "",
+            ),
+        )
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(casas_tv_title_model(title), expected)
+
+        title = 'Smart TV 55" 55A1 + Smart TV 43" 43B2'
+        row = {
+            "retailer_sku_name": title,
+            "sku": "A7",
+            "parse_status": "",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(formatted["sku"], title)
 
     def test_casas_tv_product_name_sku_does_not_replace_missing_item_identity(self):
         row = {

@@ -58,6 +58,18 @@ class SplitOrchestratorTests(unittest.TestCase):
                 "seda.magalu.step12_local_cleanup",
             ],
         )
+        usage_ids = [
+            call.kwargs["env"]["SEDA_ZENROWS_USAGE_EXECUTION_ID"]
+            for call in run.call_args_list
+        ]
+        self.assertEqual(len(set(usage_ids)), 1)
+        self.assertRegex(usage_ids[0], r"^[0-9a-f]{32}$")
+        self.assertTrue(
+            all(
+                call.kwargs["env"]["SEDA_ZENROWS_USAGE_REQUIRED"] == "1"
+                for call in run.call_args_list
+            )
+        )
 
     def test_real_detail_consumer_is_gated_before_module_execution(self):
         chosen = [
