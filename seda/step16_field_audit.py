@@ -298,7 +298,7 @@ def _note_for(name):
         "invalid_price_format": "Price should be formatted as R$9.999,99.",
         "review_comments_gt_star_ratings": "count_of_reviews is comments; it should not be greater than count_of_star_ratings.",
         "invalid_star_rating": "star_rating should be a number from 0 to 5.",
-        "empty_sku": "sku is model number per ERD; keep blank if model number is unavailable.",
+        "empty_sku": "sku must follow the retailer/product-line output contract; keep blank only when that contract allows it or the source value is unavailable.",
         "similar_missing_delimiter": "Multiple similar names should use the configured delimiter.",
         "review_missing_delimiter": "Multiple review bodies should use the configured delimiter.",
         "energy_value_other": "Energy source is raw Consumo de energia text; check unusual text but do not infer missing unit.",

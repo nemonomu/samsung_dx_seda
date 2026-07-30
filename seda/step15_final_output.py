@@ -279,6 +279,15 @@ def _run_datetime():
 def _format_row(row, now):
     item = _item_from_url(row.get("product_url", ""))
     sku = _sku_for_output(row, item)
+    item_for_output = row.get("item") or item
+    if (
+        not item_for_output
+        and not (
+            _active_retailer() == "casas_bahia"
+            and product_line() == "TV"
+        )
+    ):
+        item_for_output = sku
     original_sku_price = _price_for_output(row.get("original_sku_price", ""))
     final_sku_price = _price_for_output(row.get("final_sku_price", ""))
     if original_sku_price and final_sku_price and _prices_equal(original_sku_price, final_sku_price):
@@ -286,7 +295,7 @@ def _format_row(row, now):
     formatted = {
         "country": "SEDA",
         "product": product_line(),
-        "item": row.get("item") or item or sku,
+        "item": item_for_output,
         "account_name": _account_name_for_output(row),
         "page_type": _page_type(row),
         "retailer_sku_name": row.get("retailer_sku_name", ""),
@@ -368,8 +377,11 @@ def _screen_size_for_output(row):
 
 def _sku_for_output(row, item):
     line = product_line()
-    if _active_retailer() == "casas_bahia" and line in {"TV", "REF"}:
-        return ""
+    if _active_retailer() == "casas_bahia":
+        if line == "TV":
+            return row.get("retailer_sku_name") or ""
+        if line == "REF":
+            return ""
     sku = str(row.get("sku") or "").strip()
     if not sku:
         return ""

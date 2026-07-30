@@ -3195,6 +3195,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                     "product_line": "TV",
                     "retailer": retailer,
                     "product_url": product_url,
+                    "retailer_sku_name": "Smart TV Produto",
                     "sku": "SHOULD_BE_BLANK",
                 }
                 with patch.dict(
@@ -3207,7 +3208,53 @@ class FieldPipelineContractTests(unittest.TestCase):
                 if expected_account == "Magalu":
                     self.assertTrue(formatted["batch_id"].startswith("m_"))
                 else:
-                    self.assertEqual(formatted["sku"], "")
+                    self.assertEqual(formatted["sku"], row["retailer_sku_name"])
+
+    def test_casas_tv_sku_uses_product_name_without_changing_ref_or_ldy(self):
+        cases = (
+            ("TV", "Smart TV TCL 55 4K", "Smart TV TCL 55 4K"),
+            ("REF", "Geladeira Consul 377L", ""),
+            ("LDY", "Lavadora Midea 13kg", "MODEL-LDY"),
+        )
+        for line, product_name, expected_sku in cases:
+            with self.subTest(product_line=line):
+                row = {
+                    "product_line": line,
+                    "retailer": "Casas Bahia",
+                    "product_url": "https://www.casasbahia.com.br/produto/p/123",
+                    "retailer_sku_name": product_name,
+                    "sku": "MODEL-LDY",
+                }
+                with patch.dict(
+                    os.environ,
+                    {"SEDA_PRODUCT_LINE": line, "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+                ):
+                    formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+                self.assertEqual(formatted["sku"], expected_sku)
+                if line == "TV":
+                    self.assertEqual(
+                        _db_value("sku", formatted["sku"]),
+                        _db_value(
+                            "retailer_sku_name",
+                            formatted["retailer_sku_name"],
+                        ),
+                    )
+
+    def test_casas_tv_product_name_sku_does_not_replace_missing_item_identity(self):
+        row = {
+            "product_line": "TV",
+            "retailer": "Casas Bahia",
+            "product_url": "https://www.casasbahia.com.br/produto-sem-id",
+            "retailer_sku_name": "Smart TV Samsung 55 QLED",
+            "sku": "MODEL-TV",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(formatted["sku"], row["retailer_sku_name"])
+        self.assertEqual(formatted["item"], "")
 
     def test_final_source_context_rejects_empty_missing_and_unknown_values(self):
         env = {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "magalu"}
