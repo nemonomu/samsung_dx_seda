@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urlsplit
 
 from ..parsers import (
     CASAS_TV_EXACT_MODELO_FIELD,
@@ -82,12 +83,20 @@ def casas_tv_title_model(text, screen_size_hint=""):
 
 
 def casas_tv_sku_for_output(row, url_item=""):
-    """Publish only a Modelo proven for this PDP identity.
+    """Publish a title model first, then an identity-proven PDP Modelo.
 
-    Read-only DB recovery is applied separately in Step 15. An unverified
-    listing/title candidate must stay blank so that recovery can run and a
-    missing historical value saves as NULL instead of a product name.
+    The title path is limited to the conservative model extractor and a valid
+    current item/URL identity. It never publishes the whole product title.
+    Read-only DB recovery is applied separately when both paths stay blank.
     """
+    if not _current_item_matches_url(row, url_item):
+        return ""
+    title_model = casas_tv_title_model(
+        row.get("retailer_sku_name", ""),
+        screen_size_hint=row.get("screen_size", ""),
+    )
+    if _is_distinct_from_identity(title_model, row, url_item):
+        return title_model
     return verified_model_value(row, url_item)
 
 
@@ -148,3 +157,21 @@ def _is_distinct_from_identity(candidate, row, url_item):
     }
     identities.discard("")
     return candidate_key not in identities
+
+
+def _current_item_matches_url(row, url_item):
+    try:
+        parsed = urlsplit(clean_text(row.get("product_url")))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").casefold()
+    if host != "casasbahia.com.br" and not host.endswith(
+        ".casasbahia.com.br"
+    ):
+        return False
+    parsed_item = clean_text(sku_from_url(row.get("product_url"))).casefold()
+    url_key = clean_text(url_item).casefold()
+    if not parsed_item or not url_key or parsed_item != url_key:
+        return False
+    row_key = clean_text(row.get("item")).casefold()
+    return not row_key or row_key == url_key

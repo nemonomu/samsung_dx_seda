@@ -3266,12 +3266,12 @@ class FieldPipelineContractTests(unittest.TestCase):
                 if line == "TV":
                     self.assertIsNone(_db_value("sku", formatted["sku"]))
 
-    def test_casas_tv_verified_product_source_model_precedes_html_and_title(self):
+    def test_casas_tv_verified_product_source_model_replaces_listing_sku(self):
         row = {
             "retailer": "Casas Bahia",
             "product_line": "TV",
             "product_url": "https://www.casasbahia.com.br/smart-tv/p/123",
-            "retailer_sku_name": 'Smart TV TCL 55" 55TITLE',
+            "retailer_sku_name": 'Smart TV TCL 55" 4K',
             "sku": "55HTML",
             "parse_status": PDP_HTML_MODEL_TOKEN,
         }
@@ -3587,7 +3587,7 @@ class FieldPipelineContractTests(unittest.TestCase):
         )
         self.assertEqual(no_url_formatted["sku"], "")
 
-    def test_casas_tv_title_model_is_diagnostic_only_without_verified_model(self):
+    def test_casas_tv_title_model_is_used_before_verified_model(self):
         cases = (
             (
                 'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA',
@@ -3622,6 +3622,28 @@ class FieldPipelineContractTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual(casas_tv_title_model(title), expected)
 
+        title_row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "item": "123",
+            "product_url": "https://www.casasbahia.com.br/tv/p/123",
+            "retailer_sku_name": (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
+            "screen_size": "55 inches",
+            "sku": "55REST",
+            "parse_status": PRODUCT_SOURCE_MODEL_TOKEN,
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            title_formatted = _format_row(
+                title_row,
+                datetime(2026, 7, 30, 12, 0, 0),
+            )
+        self.assertEqual(title_formatted["sku"], "55QNED73ASA")
+
         title = 'Smart TV 55" 55A1 + Smart TV 43" 43B2'
         row = {
             "retailer_sku_name": title,
@@ -3640,7 +3662,9 @@ class FieldPipelineContractTests(unittest.TestCase):
             "product_line": "TV",
             "retailer": "Casas Bahia",
             "product_url": "https://www.casasbahia.com.br/produto-sem-id",
-            "retailer_sku_name": "Smart TV Samsung 55 QLED",
+            "retailer_sku_name": (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
             "sku": "MODEL-TV",
         }
         with patch.dict(
@@ -3650,6 +3674,45 @@ class FieldPipelineContractTests(unittest.TestCase):
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
         self.assertEqual(formatted["sku"], "")
         self.assertEqual(formatted["item"], "")
+
+    def test_casas_tv_title_model_rejects_item_url_identity_mismatch(self):
+        row = {
+            "product_line": "TV",
+            "retailer": "Casas Bahia",
+            "item": "999",
+            "product_url": "https://www.casasbahia.com.br/tv/p/123",
+            "retailer_sku_name": (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
+            "sku": "MODEL-VERIFIED",
+            "parse_status": PRODUCT_SOURCE_MODEL_TOKEN,
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(formatted["sku"], "")
+        self.assertEqual(formatted["item"], "999")
+
+    def test_casas_tv_title_model_rejects_non_casas_host(self):
+        row = {
+            "product_line": "TV",
+            "retailer": "Casas Bahia",
+            "item": "123",
+            "product_url": "https://example.com/tv/p/123",
+            "retailer_sku_name": (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
+            "sku": "",
+            "parse_status": "",
+        }
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
+        self.assertEqual(formatted["sku"], "")
 
     def test_final_source_context_rejects_empty_missing_and_unknown_values(self):
         env = {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "magalu"}

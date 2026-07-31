@@ -450,6 +450,31 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
             row["parse_status"].split("+"),
         )
 
+    def test_high_confidence_tv_title_model_does_not_spend_zenrows(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "item": "123",
+            "product_url": "https://www.casasbahia.com.br/tv/p/123",
+            "retailer_sku_name": (
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
+            "sku": "",
+            "screen_size": "55 inches",
+            "estimated_annual_electricity_use": "26,5",
+            "model_year": "2025",
+        }
+        fetch = Mock()
+        with patch(
+            "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+            return_value=True,
+        ), patch(
+            "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+            fetch,
+        ):
+            _backfill_casas_zenrows_fields([row], "unused.csv")
+        fetch.assert_not_called()
+
     def test_standalone_dryer_intentional_blanks_do_not_spend(self):
         row = {
             "retailer": "Casas Bahia",

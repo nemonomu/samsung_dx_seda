@@ -2,8 +2,8 @@
 
 The lookup runs once per batch, never writes to the database, and accepts
 history only when account, product line, item and the URL /p/{item} identity
-all agree. Audited fields remain blank-only; an unverified Casas TV SKU is
-treated as missing even when a listing candidate or product title is present.
+all agree. A Casas TV SKU is satisfied by a conservative title model or an
+identity-proven PDP Modelo; remaining blanks may use the latest DB value.
 """
 
 import os

@@ -251,6 +251,38 @@ class CasasBahiaLastKnownDbTests(unittest.TestCase):
         self.assertFalse(last_known_db.recovered_from_last_known_db(row, "sku"))
         self.assertEqual(stats["eligible_rows"], 0)
 
+    def test_tv_title_model_prevents_sku_history_query(self):
+        row = self._row(
+            retailer_sku_name=(
+                'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA'
+            ),
+            sku="",
+            screen_size="55 inches",
+            estimated_annual_electricity_use="26,5",
+            model_year="2025",
+            parse_status="listing_casas_bahia_partner_api",
+        )
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(stats["eligible_rows"], 0)
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+            clear=False,
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 31, 12, 0, 0))
+        self.assertEqual(formatted["sku"], "55QNED73ASA")
+
     def test_ref_and_ldy_sku_mismatch_status_keeps_legacy_field_recovery(self):
         cases = (
             (
