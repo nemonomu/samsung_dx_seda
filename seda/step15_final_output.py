@@ -400,6 +400,8 @@ def _sku_for_output(row, item):
     line = product_line()
     if _active_retailer() == "casas_bahia":
         if line == "TV":
+            if recovered_from_casas_last_known_db(row, "sku"):
+                return str(row.get("sku") or "").strip()
             return casas_tv_sku_for_output(row, item)
         if line == "REF":
             return casas_ref_sku_for_output(row, item)

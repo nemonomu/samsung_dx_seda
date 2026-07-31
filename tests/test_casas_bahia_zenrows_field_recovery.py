@@ -5,8 +5,9 @@ from unittest.mock import Mock, patch
 
 from seda.casas_bahia import pdp_field_recovery
 from seda.casas_bahia.detail_api import fetch_product_source
+from seda.casas_bahia.sku_contract import PDP_HTML_MODEL_TOKEN
 from seda.magalu.zenrows_client import ZenRowsResult
-from seda.parsers import parse_detail
+from seda.parsers import CASAS_TV_EXACT_MODELO_FIELD, parse_detail
 from seda.step08_detail_enrichment import (
     _backfill_casas_zenrows_fields,
 )
@@ -74,6 +75,54 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
             [call.kwargs["profile"] for call in request.call_args_list],
             ["premium_html", "pdp_js_full"],
         )
+
+    def test_tv_sku_10x_accepts_only_exact_modelo_and_forces_br(self):
+        request = Mock(return_value=self._result("premium_html"))
+        detail = {
+            "_detail_identity_verified": True,
+            CASAS_TV_EXACT_MODELO_FIELD: True,
+            "sku": "QLED 50 4K P7K",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/1582420985",
+                ("sku",),
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["detail"]["sku"], "QLED 50 4K P7K")
+        self.assertIs(result["detail"][CASAS_TV_EXACT_MODELO_FIELD], True)
+        self.assertEqual(
+            request.call_args.kwargs["extra"],
+            {"proxy_country": "br"},
+        )
+
+    def test_tv_sku_without_exact_modelo_tries_25x_then_rejects(self):
+        request = Mock(
+            side_effect=(
+                self._result("premium_html"),
+                self._result("pdp_js_full"),
+            )
+        )
+        detail = {
+            "_detail_identity_verified": True,
+            CASAS_TV_EXACT_MODELO_FIELD: False,
+            "sku": "1582420985",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/1582420985",
+                ("sku",),
+            )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["request_count"], 2)
+        self.assertNotIn("sku", result["detail"])
 
     def test_partial_10x_preserves_25x_configuration_error(self):
         failed = ZenRowsResult(
@@ -354,6 +403,52 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
         self.assertEqual(rows[0]["ref_refrigerator_type"], "Duplex")
         self.assertEqual(rows[0]["sku"], "KEEP")
         self.assertEqual(rows[1]["sku"], "KEEP2")
+
+    def test_parent_backfill_replaces_unverified_tv_listing_sku_with_modelo(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "TV",
+            "item": "1582420985",
+            "product_url": (
+                "https://www.casasbahia.com.br/smart-tv/p/1582420985"
+            ),
+            "retailer_sku_name": 'Smart TV TCL QLED 50" 4K P7K',
+            "sku": "P7K",
+            "screen_size": '50"',
+            "estimated_annual_electricity_use": "100 W",
+            "model_year": "2025",
+            "parse_status": (
+                "listing_casas_bahia_partner_api+"
+                "product_source_failed:sku_mismatch:999"
+            ),
+        }
+        result = {
+            "success": True,
+            "detail": {
+                "sku": "QLED 50 4K P7K",
+                CASAS_TV_EXACT_MODELO_FIELD: True,
+            },
+            "identity_verified": True,
+            "error": "",
+            "request_count": 1,
+            "attempts": [],
+        }
+        fetch = Mock(return_value=result)
+        with patch(
+            "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+            return_value=True,
+        ), patch(
+            "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+            fetch,
+        ):
+            _backfill_casas_zenrows_fields([row], "unused.csv")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(row["sku"], "QLED 50 4K P7K")
+        self.assertIn(PDP_HTML_MODEL_TOKEN, row["parse_status"].split("+"))
+        self.assertIn(
+            "casas_zenrows_field_recovered:sku",
+            row["parse_status"].split("+"),
+        )
 
     def test_standalone_dryer_intentional_blanks_do_not_spend(self):
         row = {

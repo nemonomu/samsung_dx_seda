@@ -2,7 +2,8 @@
 
 The lookup runs once per batch, never writes to the database, and accepts
 history only when account, product line, item and the URL /p/{item} identity
-all agree.  Existing non-blank current values are never overwritten.
+all agree. Audited fields remain blank-only; an unverified Casas TV SKU is
+treated as missing even when a listing candidate or product title is present.
 """
 
 import os
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 from ..step00_config import db_connect, output_table
 from .field_extraction import is_standalone_dryer_title
 from .recovery_contract import last_known_fields
+from .sku_contract import casas_tv_sku_for_output
 from .ref_sku_contract import (
     LAST_KNOWN_SELECTED_TOKEN,
     casas_ref_short_for_output,
@@ -26,6 +28,7 @@ from .ref_sku_contract import (
 TRUE_VALUES = {"1", "true", "yes", "y"}
 CASAS_ACCOUNT_KEYS = ("casasbahia", "casasbahiacombr")
 RECOVERED_FIELDS_KEY = "_casas_bahia_last_known_db_recovered_fields"
+TV_LAST_KNOWN_SELECTED_TOKEN = "casas_tv_sku_last_known_selected"
 
 
 def backfill_casas_bahia_last_known_fields(
@@ -34,7 +37,7 @@ def backfill_casas_bahia_last_known_fields(
     active_retailer,
     product_line_value,
 ):
-    """Fill only final-output blanks and return non-sensitive counters."""
+    """Fill final-output blanks or an unverified TV SKU and return counters."""
     line = str(product_line_value or "").strip().upper()
     fields = last_known_fields(line)
     stats = _empty_stats()
@@ -84,16 +87,20 @@ def backfill_casas_bahia_last_known_fields(
             continue
         changed = False
         for field in fields:
+            if not _field_recovery_allowed(row, line, field):
+                continue
             if not _current_field_needs_recovery(row, field):
                 continue
-            if field == "sku":
+            if field == "sku" and line == "REF":
                 value = _latest_ref_sku(candidates)
+            elif field == "sku" and line == "TV":
+                value = _latest_tv_sku(candidates)
             else:
                 value = _latest_stored_value(candidates, field)
             if not value:
                 continue
             row[field] = value
-            if field == "sku":
+            if field == "sku" and line == "REF":
                 row["sku_short_version"] = casas_ref_short_for_output(
                     row,
                     value,
@@ -101,6 +108,11 @@ def backfill_casas_bahia_last_known_fields(
                 row["parse_status"] = _append_token(
                     row.get("parse_status", ""),
                     LAST_KNOWN_SELECTED_TOKEN,
+                )
+            elif field == "sku" and line == "TV":
+                row["parse_status"] = _append_token(
+                    row.get("parse_status", ""),
+                    TV_LAST_KNOWN_SELECTED_TOKEN,
                 )
             _mark_recovered_field(row, field)
             recovered_field_counts[field] += 1
@@ -141,13 +153,11 @@ def _eligible_row(row, line, fields):
     ).strip().upper()
     if row_line != line:
         return False
-    status_key = str(row.get("parse_status") or "").casefold()
-    if "identity_mismatch" in status_key or "identity_conflict" in status_key:
-        return False
     if not _current_identity_key(row):
         return False
     return any(
-        _current_field_needs_recovery(row, field)
+        _field_recovery_allowed(row, line, field)
+        and _current_field_needs_recovery(row, field)
         for field in fields
     )
 
@@ -267,6 +277,23 @@ def _latest_ref_sku(candidates):
     return ""
 
 
+def _latest_tv_sku(candidates):
+    """Return the newest stored TV SKU, excluding known fallback artifacts."""
+    for candidate in candidates:
+        value = str(candidate.get("sku") or "").strip()
+        if not value:
+            continue
+        value_key = _normalized_text(value)
+        title_key = _normalized_text(candidate.get("retailer_sku_name"))
+        item_key = _current_identity_key(candidate)
+        if title_key and value_key == title_key:
+            continue
+        if item_key and value.casefold() == item_key:
+            continue
+        return value
+    return ""
+
+
 def _mark_recovered_field(row, field):
     recovered = row.get(RECOVERED_FIELDS_KEY)
     if not isinstance(recovered, set):
@@ -299,8 +326,29 @@ def _current_field_needs_recovery(row, field):
         return False
     if field == "sku":
         item = _current_identity_key(row)
-        return not bool(casas_ref_sku_for_output(row, item))
+        if line == "TV":
+            if recovered_from_last_known_db(row, "sku"):
+                return False
+            return not bool(casas_tv_sku_for_output(row, item))
+        if line == "REF":
+            return not bool(casas_ref_sku_for_output(row, item))
+        return False
     return not _nonblank(row.get(field))
+
+
+def _field_recovery_allowed(row, line, field):
+    status_key = str(row.get("parse_status") or "").casefold()
+    has_identity_conflict = (
+        "identity_mismatch" in status_key
+        or "identity_conflict" in status_key
+        or (line == "TV" and "sku_mismatch" in status_key)
+    )
+    if not has_identity_conflict:
+        return True
+    # A conflicting detail response invalidates its fields, but it does not
+    # invalidate the current row's independently verified item == URL key.
+    # Only TV SKU is allowed to use DB history in this situation.
+    return line == "TV" and field == "sku"
 
 
 def _historical_identity_valid(row, expected_item):
@@ -333,6 +381,10 @@ def _current_identity_key(row):
 
 def _nonblank(value):
     return value is not None and bool(str(value).strip())
+
+
+def _normalized_text(value):
+    return " ".join(str(value or "").split()).casefold()
 
 
 def _canonical_retailer(value):

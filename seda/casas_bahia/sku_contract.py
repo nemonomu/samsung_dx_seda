@@ -82,19 +82,13 @@ def casas_tv_title_model(text, screen_size_hint=""):
 
 
 def casas_tv_sku_for_output(row, url_item=""):
-    """Apply exact-model, conservative-title, then whole-title priority."""
-    candidate = verified_model_value(row, url_item)
-    if candidate:
-        return candidate
+    """Publish only a Modelo proven for this PDP identity.
 
-    raw_title = row.get("retailer_sku_name")
-    raw_title = "" if raw_title is None else str(raw_title)
-    title = clean_text(raw_title)
-    title_model = casas_tv_title_model(
-        title,
-        screen_size_hint=row.get("screen_size"),
-    )
-    return title_model or raw_title
+    Read-only DB recovery is applied separately in Step 15. An unverified
+    listing/title candidate must stay blank so that recovery can run and a
+    missing historical value saves as NULL instead of a product name.
+    """
+    return verified_model_value(row, url_item)
 
 
 def verified_model_value(row, url_item=""):

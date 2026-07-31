@@ -17,6 +17,7 @@ from .casas_bahia.sku_contract import (
     exact_modelo_candidate as casas_tv_exact_modelo_candidate,
     has_verified_model_token as casas_tv_has_verified_model_token,
     replace_verified_model_token as replace_casas_tv_verified_model_token,
+    casas_tv_sku_for_output,
     verified_model_value as casas_tv_verified_model_value,
 )
 from .casas_bahia.ldy_sku_contract import (
@@ -60,6 +61,7 @@ from .magalu.field_extraction import (
 )
 from .magalu.recovery_contract import MAGALU_RECOVERY_FIELD_MAP
 from .parsers import (
+    CASAS_TV_EXACT_MODELO_FIELD,
     _html_target_label_value_pairs,
     _url_product_identity_matches,
     clean_text,
@@ -1998,6 +2000,18 @@ def _casas_zenrows_field_recovery_enabled():
     return enabled() and not dry_run()
 
 
+def _casas_zenrows_field_satisfied(row, field):
+    line = str(row.get("product_line") or product_line()).strip().upper()
+    if line == "TV" and field == "sku":
+        return bool(
+            casas_tv_sku_for_output(
+                row,
+                clean_text(sku_from_url(row.get("product_url", ""))),
+            )
+        )
+    return row.get(field) not in ("", None, [], {})
+
+
 def _casas_zenrows_missing_fields(row):
     if row.get("retailer") != "Casas Bahia":
         return ()
@@ -2014,7 +2028,7 @@ def _casas_zenrows_missing_fields(row):
     return tuple(
         field
         for field in fields
-        if row.get(field) in ("", None, [], {})
+        if not _casas_zenrows_field_satisfied(row, field)
     )
 
 
@@ -2104,8 +2118,30 @@ def _merge_casas_zenrows_field_result(
                 ),
             )
     detail = result.get("detail") or {}
-    _merge_missing_detail_fields(row, detail, missing_before)
-    filled = tuple(field for field in missing_before if row.get(field))
+    _merge_missing_detail_fields(
+        row,
+        detail,
+        tuple(field for field in missing_before if field != "sku"),
+    )
+    if (
+        "sku" in missing_before
+        and result.get("identity_verified") is True
+        and detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True
+    ):
+        _merge_casas_bahia_authoritative_detail(
+            row,
+            {
+                "sku": detail.get("sku", ""),
+                CASAS_TV_EXACT_MODELO_FIELD: True,
+            },
+            CASAS_TV_PDP_HTML_MODEL_TOKEN,
+            identity_verified=True,
+        )
+    filled = tuple(
+        field
+        for field in missing_before
+        if _casas_zenrows_field_satisfied(row, field)
+    )
     row["parse_status"] = _append_token(
         row.get("parse_status", ""),
         _CASAS_ZENROWS_COMPLETE_TOKEN,
@@ -2134,7 +2170,7 @@ def _backfill_casas_zenrows_fields(
     trace_rows=None,
     checkpoint_writer=None,
 ):
-    """Recover only missing, allowlisted Casas semantic fields once per item."""
+    """Recover missing allowlisted fields or a verified TV Modelo per item."""
     if not _casas_zenrows_field_recovery_enabled():
         return rows
     candidates = []

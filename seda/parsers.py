@@ -62,6 +62,7 @@ CASAS_BAHIA_DOM_LABELS = {
     "polegada",
     "polegadas",
     "tamanho da tela",
+    "modelo",
 }
 
 def clean_text(value):

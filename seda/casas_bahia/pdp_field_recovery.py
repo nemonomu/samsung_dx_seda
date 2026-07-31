@@ -1,8 +1,8 @@
-"""Paid Casas PDP recovery for already-missing safe semantic fields only."""
+"""Paid Casas PDP recovery for missing safe fields and verified TV Modelo."""
 
 import os
 
-from ..parsers import parse_detail
+from ..parsers import CASAS_TV_EXACT_MODELO_FIELD, parse_detail
 from .recovery_contract import CASAS_ZENROWS_FIELD_MAP
 
 
@@ -122,9 +122,18 @@ def fetch_pdp_fields_via_zenrows(
         safe_internal = detail.get("_casas_pdp_safe_recovery")
         safe_internal = safe_internal if isinstance(safe_internal, dict) else {}
         for field in requested:
-            value = detail.get(field) or safe_internal.get(field)
+            if field == "sku":
+                value = (
+                    detail.get("sku")
+                    if detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True
+                    else ""
+                )
+            else:
+                value = detail.get(field) or safe_internal.get(field)
             if value not in ("", None, [], {}) and field not in available:
                 available[field] = value
+                if field == "sku":
+                    available[CASAS_TV_EXACT_MODELO_FIELD] = True
         if all(available.get(field) for field in requested):
             last_error = ""
             break

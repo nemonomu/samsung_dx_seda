@@ -3,6 +3,7 @@
 
 CASAS_ZENROWS_FIELD_MAP = {
     "TV": (
+        "sku",
         "screen_size",
         "estimated_annual_electricity_use",
         "model_year",
@@ -21,6 +22,7 @@ CASAS_ZENROWS_FIELD_MAP = {
 
 CASAS_LAST_KNOWN_DB_FIELD_MAP = {
     "TV": (
+        "sku",
         "screen_size",
         "estimated_annual_electricity_use",
         "model_year",

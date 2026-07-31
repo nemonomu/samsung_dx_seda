@@ -3240,11 +3240,11 @@ class FieldPipelineContractTests(unittest.TestCase):
                 if expected_account == "Magalu":
                     self.assertTrue(formatted["batch_id"].startswith("m_"))
                 else:
-                    self.assertEqual(formatted["sku"], row["retailer_sku_name"])
+                    self.assertEqual(formatted["sku"], "")
 
-    def test_casas_tv_sku_uses_product_name_without_changing_ref_or_ldy(self):
+    def test_casas_tv_sku_requires_verified_model_without_changing_ref_or_ldy(self):
         cases = (
-            ("TV", "Smart TV TCL 55 4K", "Smart TV TCL 55 4K"),
+            ("TV", "Smart TV TCL 55 4K", ""),
             ("REF", "Geladeira Consul 377L", ""),
             ("LDY", "Lavadora Brastemp 16kg BWF16AB", "BWF16AB"),
         )
@@ -3264,13 +3264,7 @@ class FieldPipelineContractTests(unittest.TestCase):
                     formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
                 self.assertEqual(formatted["sku"], expected_sku)
                 if line == "TV":
-                    self.assertEqual(
-                        _db_value("sku", formatted["sku"]),
-                        _db_value(
-                            "retailer_sku_name",
-                            formatted["retailer_sku_name"],
-                        ),
-                    )
+                    self.assertIsNone(_db_value("sku", formatted["sku"]))
 
     def test_casas_tv_verified_product_source_model_precedes_html_and_title(self):
         row = {
@@ -3350,7 +3344,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             _merge_casas_bahia_apis(row)
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
         self.assertNotIn(PRODUCT_SOURCE_MODEL_TOKEN, row["parse_status"].split("+"))
-        self.assertEqual(formatted["sku"], title)
+        self.assertEqual(formatted["sku"], "")
         self.assertNotEqual(formatted["sku"], row["sku"])
 
     def test_casas_tv_verified_html_model_gets_provenance_and_unverified_does_not(self):
@@ -3428,6 +3422,75 @@ class FieldPipelineContractTests(unittest.TestCase):
         self.assertEqual(listing["sku"], "123")
         self.assertNotIn(PDP_HTML_MODEL_TOKEN, listing["parse_status"].split("+"))
 
+    def test_casas_tv_verified_dom_modelo_is_published_for_reported_items(self):
+        cases = (
+            (
+                "1582420985",
+                'Smart TV TCL QLED 50" 4K P7K Google TV',
+                "QLED 50 4K P7K",
+                "listing_casas_bahia_partner_api+"
+                "product_source_failed:sku_mismatch:999",
+            ),
+            (
+                "1582487695",
+                'Smart TV Samsung Vision AI 55" QLED 4K Q7F 2025',
+                "QLED 55 4K Q7F",
+                "listing_casas_bahia_partner_api+"
+                "casas_zenrows_field_failed:identity_conflict",
+            ),
+        )
+        for item, title, model, prior_status in cases:
+            payload = {
+                "props": {
+                    "initialState": {
+                        "Product": {
+                            "product": {
+                                "id": f"internal-{item}",
+                                "name": title,
+                                "description": "",
+                                "specGroups": [],
+                            },
+                            "sku": {"id": item, "name": title},
+                        }
+                    }
+                }
+            }
+            html = (
+                '<script id="__NEXT_DATA__" type="application/json">'
+                + json.dumps(payload)
+                + "</script>"
+                + f"<section><span>Modelo</span><span>{model}</span></section>"
+            )
+            row = {
+                "retailer": "Casas Bahia",
+                "product_line": "TV",
+                "item": item,
+                "product_url": f"https://www.casasbahia.com.br/tv/p/{item}",
+                "retailer_sku_name": title,
+                "sku": "P7K" if item == "1582420985" else "Q7F",
+                "parse_status": prior_status,
+            }
+            with self.subTest(item=item), patch.dict(
+                os.environ,
+                {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+            ):
+                detail = parse_detail(
+                    html,
+                    "Casas Bahia",
+                    "https://www.casasbahia.com.br",
+                    row["product_url"],
+                )
+                self.assertIs(detail["_detail_identity_verified"], True)
+                self.assertIs(detail[CASAS_TV_EXACT_MODELO_FIELD], True)
+                self.assertEqual(detail["sku"], model)
+                self.assertTrue(_merge_generic_product_detail(row, detail))
+                formatted = _format_row(
+                    row,
+                    datetime(2026, 7, 31, 12, 0, 0),
+                )
+            self.assertIn(PDP_HTML_MODEL_TOKEN, row["parse_status"].split("+"))
+            self.assertEqual(formatted["sku"], model)
+
     def test_casas_tv_html_requires_exact_modelo_and_url_identity_for_token(self):
         title = 'Smart TV TCL 55" QLED'
         payload = {
@@ -3484,7 +3547,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             self.assertTrue(_merge_generic_product_detail(row, detail))
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
         self.assertNotIn(PDP_HTML_MODEL_TOKEN, row["parse_status"].split("+"))
-        self.assertEqual(formatted["sku"], title)
+        self.assertEqual(formatted["sku"], "")
 
         payload["props"]["initialState"]["Product"]["product"]["specGroups"][0][
             "specs"
@@ -3522,9 +3585,9 @@ class FieldPipelineContractTests(unittest.TestCase):
             PDP_HTML_MODEL_TOKEN,
             no_url_row["parse_status"].split("+"),
         )
-        self.assertEqual(no_url_formatted["sku"], title)
+        self.assertEqual(no_url_formatted["sku"], "")
 
-    def test_casas_tv_title_model_is_conservative_before_whole_title_fallback(self):
+    def test_casas_tv_title_model_is_diagnostic_only_without_verified_model(self):
         cases = (
             (
                 'Smart TV LG 55" QNED Processador AI A7 55QNED73ASA',
@@ -3570,7 +3633,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
         ):
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
-        self.assertEqual(formatted["sku"], title)
+        self.assertEqual(formatted["sku"], "")
 
     def test_casas_tv_product_name_sku_does_not_replace_missing_item_identity(self):
         row = {
@@ -3585,7 +3648,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
         ):
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
-        self.assertEqual(formatted["sku"], row["retailer_sku_name"])
+        self.assertEqual(formatted["sku"], "")
         self.assertEqual(formatted["item"], "")
 
     def test_final_source_context_rejects_empty_missing_and_unknown_values(self):

@@ -7,7 +7,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from seda.casas_bahia import last_known_db
+from seda.casas_bahia.sku_contract import PRODUCT_SOURCE_MODEL_TOKEN
 from seda.common.translations import PRESERVE_TRANSLATION_FIELDS_KEY
+from seda.step14_db_load import _db_value
 from seda.step15_final_output import _format_row, _write_manifest
 
 
@@ -88,6 +90,246 @@ class CasasBahiaLastKnownDbTests(unittest.TestCase):
             )
         self.assertEqual(row["screen_size"], "")
         self.assertEqual(stats["recovered_rows"], 0)
+
+    def test_tv_identity_conflict_recovers_only_latest_non_artifact_sku(self):
+        title = 'Smart TV TCL QLED 50" 4K P7K Google TV'
+        row = self._row(
+            item="1582420985",
+            retailer_sku_name=title,
+            sku=title,
+            screen_size="",
+            estimated_annual_electricity_use="",
+            model_year="",
+            parse_status="casas_zenrows_field_failed:identity_conflict",
+        )
+        history = [
+            self._row(
+                item="1582420985",
+                account_name="CasasBahia",
+                retailer_sku_name=title,
+                sku=title,
+                screen_size="50 inches",
+                estimated_annual_electricity_use="100 W",
+                model_year="2025",
+            ),
+            self._row(
+                item="1582420985",
+                account_name="CasasBahia",
+                retailer_sku_name=title,
+                sku="QLED 50 4K P7K",
+                screen_size="50 inches",
+                estimated_annual_electricity_use="100 W",
+                model_year="2025",
+            ),
+        ]
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            return_value=history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        self.assertEqual(row["sku"], "QLED 50 4K P7K")
+        self.assertEqual(row["screen_size"], "")
+        self.assertEqual(row["estimated_annual_electricity_use"], "")
+        self.assertEqual(row["model_year"], "")
+        self.assertTrue(last_known_db.recovered_from_last_known_db(row, "sku"))
+        self.assertIn(
+            last_known_db.TV_LAST_KNOWN_SELECTED_TOKEN,
+            row["parse_status"].split("+"),
+        )
+        self.assertEqual(stats["recovered_fields"], {"sku": 1})
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+            clear=False,
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 31, 12, 0, 0))
+        self.assertEqual(formatted["sku"], "QLED 50 4K P7K")
+
+    def test_tv_only_artifact_history_stays_null(self):
+        title = 'Smart TV Samsung Vision AI 55" QLED 4K Q7F 2025'
+        row = self._row(
+            item="1582487695",
+            retailer_sku_name=title,
+            sku="Q7F",
+            screen_size="55 inches",
+            estimated_annual_electricity_use="26,5",
+            model_year="2025",
+            parse_status="listing_casas_bahia_partner_api",
+        )
+        history = [
+            self._row(
+                item="1582487695",
+                retailer_sku_name=title,
+                sku=title,
+            ),
+            self._row(
+                item="1582487695",
+                retailer_sku_name=title,
+                sku="1582487695",
+            ),
+        ]
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            return_value=history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        self.assertEqual(stats["recovered_rows"], 0)
+        self.assertFalse(last_known_db.recovered_from_last_known_db(row, "sku"))
+        with patch.dict(
+            os.environ,
+            {"SEDA_PRODUCT_LINE": "TV", "SEDA_ACTIVE_RETAILER": "casas_bahia"},
+            clear=False,
+        ):
+            formatted = _format_row(row, datetime(2026, 7, 31, 12, 0, 0))
+        self.assertEqual(formatted["sku"], "")
+        self.assertIsNone(_db_value("sku", formatted["sku"]))
+
+    def test_tv_verified_model_is_not_replaced_by_history(self):
+        row = self._row(
+            sku="QLED 55 4K Q7F",
+            screen_size="",
+            estimated_annual_electricity_use="26,5",
+            model_year="2025",
+            parse_status=PRODUCT_SOURCE_MODEL_TOKEN,
+        )
+        history = [
+            self._row(
+                sku="OLDER-MODEL",
+                screen_size="55 inches",
+                estimated_annual_electricity_use="26,5",
+                model_year="2025",
+            )
+        ]
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            return_value=history,
+        ):
+            last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        self.assertEqual(row["sku"], "QLED 55 4K Q7F")
+        self.assertEqual(row["screen_size"], "55 inches")
+        self.assertFalse(last_known_db.recovered_from_last_known_db(row, "sku"))
+
+    def test_tv_verified_model_survives_stale_failure_without_db_query(self):
+        row = self._row(
+            sku="QLED 55 4K Q7F",
+            screen_size="55 inches",
+            estimated_annual_electricity_use="26,5",
+            model_year="2025",
+            parse_status=(
+                "product_source_failed:sku_mismatch:999+"
+                + PRODUCT_SOURCE_MODEL_TOKEN
+            ),
+        )
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(row["sku"], "QLED 55 4K Q7F")
+        self.assertFalse(last_known_db.recovered_from_last_known_db(row, "sku"))
+        self.assertEqual(stats["eligible_rows"], 0)
+
+    def test_ref_and_ldy_sku_mismatch_status_keeps_legacy_field_recovery(self):
+        cases = (
+            (
+                "REF",
+                self._row(
+                    line="REF",
+                    retailer_sku_name="Geladeira Consul CRM44MK 377L",
+                    sku="CRM44MK",
+                    sku_short_version="CRM44MK",
+                    ref_refrigerator_type="Duplex",
+                    ref_capacity="",
+                    parse_status="product_source_failed:sku_mismatch:999",
+                ),
+                self._row(
+                    line="REF",
+                    retailer_sku_name="Geladeira Consul CRM44MK 377L",
+                    sku="CRM44MK",
+                    sku_short_version="CRM44MK",
+                    ref_refrigerator_type="Duplex",
+                    ref_capacity="377L",
+                ),
+                "ref_capacity",
+                "377L",
+            ),
+            (
+                "LDY",
+                self._row(
+                    line="LDY",
+                    retailer_sku_name="Lavadora Midea 13kg",
+                    ldy_loading_type="Top load",
+                    ldy_color="Branco",
+                    ldy_capacity="",
+                    parse_status="product_source_failed:sku_mismatch:999",
+                ),
+                self._row(
+                    line="LDY",
+                    retailer_sku_name="Lavadora Midea 13kg",
+                    ldy_loading_type="Top load",
+                    ldy_color="Branco",
+                    ldy_capacity="13kg",
+                ),
+                "ldy_capacity",
+                "13kg",
+            ),
+        )
+        for line, row, historical, field, expected in cases:
+            with self.subTest(line=line), self._enabled(), patch.object(
+                last_known_db,
+                "_read_history",
+                return_value=[historical],
+            ):
+                stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                    [row],
+                    active_retailer="casas_bahia",
+                    product_line_value=line,
+                )
+            self.assertEqual(row[field], expected)
+            self.assertEqual(stats["recovered_fields"], {field: 1})
+
+    def test_tv_current_item_url_mismatch_never_queries_history(self):
+        row = self._row(
+            item="123",
+            sku="",
+            parse_status="identity_conflict",
+        )
+        row["product_url"] = "https://www.casasbahia.com.br/produto/p/999"
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="TV",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(stats["eligible_rows"], 0)
 
     def test_ref_legacy_full_in_short_column_is_promoted_atomically(self):
         row = self._row(
