@@ -23,6 +23,8 @@ from .casas_bahia.sku_contract import (
 from .casas_bahia.ldy_sku_contract import (
     BRAND_FIELD as CASAS_LDY_BRAND_FIELD,
     EVIDENCE_FIELD as CASAS_LDY_EVIDENCE_FIELD,
+    casas_ldy_short_for_output,
+    casas_ldy_sku_for_output,
     resolve_ldy_sku as resolve_casas_ldy_sku,
 )
 from .casas_bahia.field_extraction import is_standalone_dryer_title
@@ -33,6 +35,8 @@ from .casas_bahia.ref_sku_contract import (
     BRAND_FIELD as CASAS_REF_BRAND_FIELD,
     EVIDENCE_FIELD as CASAS_REF_EVIDENCE_FIELD,
     casas_ref_short_for_output,
+    casas_ref_sku_for_output,
+    normalize_ref_sku,
     resolve_casas_ref_sku,
 )
 from .detail_publish import (
@@ -1053,12 +1057,27 @@ def _skip_casas_sku_api(row, sku_id, api_name):
     return True
 
 
-def _merge_casas_bahia_ldy_product_source(row, detail):
+def _merge_casas_bahia_ldy_detail(
+    row,
+    detail,
+    *,
+    identity_verified=False,
+):
+    if not _is_casas_bahia_ldy_row(row) or not identity_verified:
+        return False
+    brand = detail.get(CASAS_LDY_BRAND_FIELD, "")
+    evidence = detail.get(CASAS_LDY_EVIDENCE_FIELD) or ()
+    if not evidence and detail.get("sku"):
+        evidence = (detail.get("sku"),)
+    title = (
+        detail.get("retailer_sku_name")
+        or row.get("retailer_sku_name", "")
+    )
     resolution = resolve_casas_ldy_sku(
         row.get("sku", ""),
-        row.get("retailer_sku_name", ""),
-        detail.get(CASAS_LDY_EVIDENCE_FIELD) or (),
-        brand=detail.get(CASAS_LDY_BRAND_FIELD, ""),
+        title,
+        evidence,
+        brand=brand,
     )
     detail_status = detail.get("parse_status", "")
     safe_detail = {
@@ -1067,9 +1086,14 @@ def _merge_casas_bahia_ldy_product_source(row, detail):
         if not str(key).startswith("_")
         and key not in {"sku", "sku_short_version", "parse_status"}
     }
-    _merge_authoritative_detail(row, safe_detail)
+    _merge_authoritative_detail(
+        row,
+        safe_detail,
+        identity_verified=True,
+    )
+    if brand:
+        row[CASAS_LDY_BRAND_FIELD] = brand
     row["sku"] = resolution.sku
-    row["sku_short_version"] = resolution.short
     if detail_status:
         row["parse_status"] = _append_token(
             row.get("parse_status", ""),
@@ -1080,7 +1104,19 @@ def _merge_casas_bahia_ldy_product_source(row, detail):
             row.get("parse_status", ""),
             token,
         )
+    row["sku_short_version"] = casas_ldy_short_for_output(
+        row,
+        resolution.sku,
+    )
     return bool(resolution.sku)
+
+
+def _merge_casas_bahia_ldy_product_source(row, detail):
+    return _merge_casas_bahia_ldy_detail(
+        row,
+        detail,
+        identity_verified=True,
+    )
 
 
 def _merge_casas_bahia_ref_detail(
@@ -1096,6 +1132,10 @@ def _merge_casas_bahia_ref_detail(
     evidence = detail.get(CASAS_REF_EVIDENCE_FIELD) or ()
     if not evidence and detail.get("sku"):
         evidence = (detail.get("sku"),)
+    title = (
+        detail.get("retailer_sku_name")
+        or row.get("retailer_sku_name", "")
+    )
     safe_detail = {
         key: value
         for key, value in detail.items()
@@ -1109,13 +1149,16 @@ def _merge_casas_bahia_ref_detail(
     )
     if brand:
         row[CASAS_REF_BRAND_FIELD] = brand
+    previous_sku = normalize_ref_sku(row.get("sku", ""))
     resolution = resolve_casas_ref_sku(
         row.get("sku") or row.get("sku_short_version", ""),
-        row.get("retailer_sku_name", ""),
+        title,
         evidence,
         brand=brand,
     )
     row["sku"] = resolution.sku
+    if previous_sku != normalize_ref_sku(resolution.sku):
+        row["sku_short_version"] = ""
     row["sku_short_version"] = casas_ref_short_for_output(
         row,
         resolution.sku,
@@ -1337,21 +1380,11 @@ def _merge_generic_product_detail(row, detail):
                 identity_verified=True,
             )
         elif _is_casas_bahia_ldy_row(row):
-            detail_status = detail.get("parse_status", "")
-            _merge_authoritative_detail(
+            _merge_casas_bahia_ldy_detail(
                 row,
-                {
-                    key: value
-                    for key, value in detail.items()
-                    if key not in {"sku", "sku_short_version", "parse_status"}
-                },
+                detail,
                 identity_verified=True,
             )
-            if detail_status:
-                row["parse_status"] = _append_token(
-                    row.get("parse_status", ""),
-                    detail_status,
-                )
         elif _is_casas_bahia_ref_row(row):
             _merge_casas_bahia_ref_detail(
                 row,
@@ -2002,13 +2035,15 @@ def _casas_zenrows_field_recovery_enabled():
 
 def _casas_zenrows_field_satisfied(row, field):
     line = str(row.get("product_line") or product_line()).strip().upper()
-    if line == "TV" and field == "sku":
-        return bool(
-            casas_tv_sku_for_output(
-                row,
-                clean_text(sku_from_url(row.get("product_url", ""))),
-            )
-        )
+    if field == "sku":
+        item = clean_text(sku_from_url(row.get("product_url", "")))
+        if line == "TV":
+            return bool(casas_tv_sku_for_output(row, item))
+        if line == "REF":
+            return bool(casas_ref_sku_for_output(row, item))
+        if line == "LDY":
+            return bool(casas_ldy_sku_for_output(row, item))
+        return False
     return row.get(field) not in ("", None, [], {})
 
 
@@ -2123,20 +2158,32 @@ def _merge_casas_zenrows_field_result(
         detail,
         tuple(field for field in missing_before if field != "sku"),
     )
-    if (
-        "sku" in missing_before
-        and result.get("identity_verified") is True
-        and detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True
-    ):
-        _merge_casas_bahia_authoritative_detail(
-            row,
-            {
-                "sku": detail.get("sku", ""),
-                CASAS_TV_EXACT_MODELO_FIELD: True,
-            },
-            CASAS_TV_PDP_HTML_MODEL_TOKEN,
-            identity_verified=True,
-        )
+    if "sku" in missing_before and result.get("identity_verified") is True:
+        line = str(
+            row.get("product_line") or product_line()
+        ).strip().upper()
+        if line == "TV" and detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True:
+            _merge_casas_bahia_authoritative_detail(
+                row,
+                {
+                    "sku": detail.get("sku", ""),
+                    CASAS_TV_EXACT_MODELO_FIELD: True,
+                },
+                CASAS_TV_PDP_HTML_MODEL_TOKEN,
+                identity_verified=True,
+            )
+        elif line == "REF":
+            _merge_casas_bahia_ref_detail(
+                row,
+                {"sku": detail.get("sku", "")},
+                identity_verified=True,
+            )
+        elif line == "LDY":
+            _merge_casas_bahia_ldy_detail(
+                row,
+                {"sku": detail.get("sku", "")},
+                identity_verified=True,
+            )
     filled = tuple(
         field
         for field in missing_before
@@ -2170,7 +2217,7 @@ def _backfill_casas_zenrows_fields(
     trace_rows=None,
     checkpoint_writer=None,
 ):
-    """Recover missing allowlisted fields or a verified TV Modelo per item."""
+    """Recover missing allowlisted fields or a validated line-specific SKU."""
     if not _casas_zenrows_field_recovery_enabled():
         return rows
     candidates = []
@@ -2229,6 +2276,7 @@ def _backfill_casas_zenrows_fields(
                 result = fetch_pdp_fields_via_zenrows(
                     row.get("product_url", ""),
                     requested,
+                    product_line_value=cache_key[0],
                     max_requests=2,
                 )
             except Exception as exc:

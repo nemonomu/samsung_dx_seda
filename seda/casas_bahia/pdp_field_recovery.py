@@ -1,8 +1,19 @@
-"""Paid Casas PDP recovery for missing safe fields and verified TV Modelo."""
+"""Paid Casas PDP recovery for missing safe fields and validated SKU values."""
 
 import os
 
 from ..parsers import CASAS_TV_EXACT_MODELO_FIELD, parse_detail
+from ..step00_config import product_line
+from .ldy_sku_contract import (
+    BRAND_FIELD as LDY_BRAND_FIELD,
+    EVIDENCE_FIELD as LDY_EVIDENCE_FIELD,
+    resolve_ldy_sku,
+)
+from .ref_sku_contract import (
+    BRAND_FIELD as REF_BRAND_FIELD,
+    EVIDENCE_FIELD as REF_EVIDENCE_FIELD,
+    resolve_casas_ref_sku,
+)
 from .recovery_contract import CASAS_ZENROWS_FIELD_MAP
 
 
@@ -17,9 +28,11 @@ def fetch_pdp_fields_via_zenrows(
     product_url,
     requested_fields,
     *,
+    product_line_value=None,
     timeout=None,
     max_requests=2,
 ):
+    line = str(product_line_value or product_line()).strip().upper()
     safe_fields = set(_all_safe_fields())
     requested = tuple(
         field
@@ -123,16 +136,12 @@ def fetch_pdp_fields_via_zenrows(
         safe_internal = safe_internal if isinstance(safe_internal, dict) else {}
         for field in requested:
             if field == "sku":
-                value = (
-                    detail.get("sku")
-                    if detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True
-                    else ""
-                )
+                value = _validated_sku(detail, line)
             else:
                 value = detail.get(field) or safe_internal.get(field)
             if value not in ("", None, [], {}) and field not in available:
                 available[field] = value
-                if field == "sku":
+                if field == "sku" and line == "TV":
                     available[CASAS_TV_EXACT_MODELO_FIELD] = True
         if all(available.get(field) for field in requested):
             last_error = ""
@@ -167,4 +176,55 @@ def _all_safe_fields():
             for fields in CASAS_ZENROWS_FIELD_MAP.values()
             for field in fields
         )
+    )
+
+
+def _validated_sku(detail, line):
+    """Return only a product-line contract-approved PDP SKU."""
+    if line == "TV":
+        return (
+            detail.get("sku", "")
+            if detail.get(CASAS_TV_EXACT_MODELO_FIELD) is True
+            else ""
+        )
+
+    title = detail.get("retailer_sku_name", "")
+    if line == "REF":
+        evidence = _detail_evidence(
+            detail,
+            REF_EVIDENCE_FIELD,
+            preserve_dict_entries=False,
+        )
+        return resolve_casas_ref_sku(
+            "",
+            title,
+            evidence,
+            brand=detail.get(REF_BRAND_FIELD, ""),
+        ).sku
+
+    if line == "LDY":
+        evidence = _detail_evidence(
+            detail,
+            LDY_EVIDENCE_FIELD,
+            preserve_dict_entries=True,
+        )
+        return resolve_ldy_sku(
+            "",
+            title,
+            evidence,
+            brand=detail.get(LDY_BRAND_FIELD, ""),
+        ).sku
+    return ""
+
+
+def _detail_evidence(detail, field, *, preserve_dict_entries):
+    raw = detail.get(field)
+    if raw in ("", None, [], {}, ()):
+        raw = detail.get("sku", "")
+    values = raw if isinstance(raw, (list, tuple)) else (raw,)
+    if preserve_dict_entries:
+        return tuple(values)
+    return tuple(
+        value.get("value", "") if isinstance(value, dict) else value
+        for value in values
     )

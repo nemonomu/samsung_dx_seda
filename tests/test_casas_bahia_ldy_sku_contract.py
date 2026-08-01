@@ -8,7 +8,9 @@ from seda.casas_bahia.detail_html_backfill import _merge as merge_html_backfill
 from seda.casas_bahia.ldy_sku_contract import (
     BRAND_FIELD,
     EVIDENCE_FIELD,
+    LAST_KNOWN_SELECTED_TOKEN,
     SHORT_DERIVED_TOKEN,
+    casas_ldy_sku_for_output,
     casas_ldy_short_for_output,
     derive_samsung_short,
     extract_product_source_evidence,
@@ -247,9 +249,12 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
             formatted = _format_row(row, datetime(2026, 7, 30, 12, 0, 0))
         fetch.assert_called_once_with("1577377527")
         self.assertEqual(row["sku"], "MF201W110WB/WK-01")
-        self.assertEqual(row["sku_short_version"], "")
+        self.assertEqual(row["sku_short_version"], "MF201W110WB/WK-01")
         self.assertEqual(formatted["sku"], "MF201W110WB/WK-01")
-        self.assertEqual(formatted["sku_short_version"], "")
+        self.assertEqual(
+            formatted["sku_short_version"],
+            "MF201W110WB/WK-01",
+        )
         self.assertEqual(_db_value("sku", formatted["sku"]), "MF201W110WB/WK-01")
 
     def test_product_source_merge_clears_stale_short_atomically(self):
@@ -278,7 +283,7 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
         ):
             _merge_casas_bahia_apis(row)
         self.assertEqual(row["sku"], "NA-F170B7W")
-        self.assertEqual(row["sku_short_version"], "")
+        self.assertEqual(row["sku_short_version"], "NA-F170B7W")
 
     def test_missing_url_item_never_uses_manufacturer_sku_as_api_id(self):
         row = {
@@ -299,7 +304,7 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
             row["parse_status"].split("+"),
         )
 
-    def test_verified_generic_html_does_not_overwrite_ldy_sku(self):
+    def test_verified_generic_html_preserves_valid_title_sku_atomically(self):
         row = {
             "retailer": "Casas Bahia",
             "product_line": "LDY",
@@ -320,7 +325,7 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
         with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "LDY"}):
             self.assertTrue(_merge_generic_product_detail(row, detail))
         self.assertEqual(row["sku"], "PLR14A")
-        self.assertEqual(row["sku_short_version"], "")
+        self.assertEqual(row["sku_short_version"], "PLR14A")
         self.assertEqual(row["ldy_capacity"], "14kg")
         self.assertIn(
             "casas_ldy_sku_title_selected",
@@ -330,6 +335,35 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
             "detail_casas_bahia_html",
             row["parse_status"].split("+"),
         )
+
+    def test_verified_generic_html_uses_reference_not_marketing_modelo(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "LDY",
+            "retailer_sku_name": "Lavadora Midea 13kg",
+            "sku": "",
+            "sku_short_version": "",
+            "ldy_capacity": "",
+            "parse_status": "",
+        }
+        detail = {
+            "retailer_sku_name": row["retailer_sku_name"],
+            "sku": "Wave Agitator",
+            EVIDENCE_FIELD: (
+                {
+                    "value": "MA512W130A/WK-05",
+                    "source": "pdp_spec:referencia",
+                },
+            ),
+            "ldy_capacity": "13kg",
+            "_detail_identity_verified": True,
+            "parse_status": "detail_casas_bahia_html",
+        }
+        with patch.dict(os.environ, {"SEDA_PRODUCT_LINE": "LDY"}):
+            self.assertTrue(_merge_generic_product_detail(row, detail))
+        self.assertEqual(row["sku"], "MA512W130A/WK-05")
+        self.assertEqual(row["sku_short_version"], "MA512W130A/WK-05")
+        self.assertEqual(row["ldy_capacity"], "13kg")
 
     def test_standalone_html_backfill_does_not_overwrite_ldy_sku(self):
         row = {
@@ -394,7 +428,7 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
                     "parse_status": SHORT_DERIVED_TOKEN,
                 },
                 "NA-F170B7W",
-                "",
+                "NA-F170B7W",
             ),
         )
         env = {
@@ -470,7 +504,46 @@ class CasasBahiaLdySkuContractTests(unittest.TestCase):
         }
         self.assertEqual(
             casas_ldy_short_for_output(row, "WW11T4040BXFAZ"),
+            "WW11T4040BXFAZ",
+        )
+
+    def test_last_known_db_token_preserves_only_a_valid_final_sku(self):
+        valid = {
+            "retailer_sku_name": "Lavadora 13kg",
+            "sku": "MF200D130WB/WK-02",
+            "parse_status": LAST_KNOWN_SELECTED_TOKEN,
+        }
+        invalid = {
+            "retailer_sku_name": "Lavadora 13kg",
+            "sku": "1570578247",
+            "parse_status": LAST_KNOWN_SELECTED_TOKEN,
+        }
+        self.assertEqual(
+            casas_ldy_sku_for_output(valid, "1570578247"),
+            "MF200D130WB/WK-02",
+        )
+        self.assertEqual(
+            casas_ldy_short_for_output(valid, "MF200D130WB/WK-02"),
+            "MF200D130WB/WK-02",
+        )
+        self.assertEqual(
+            casas_ldy_sku_for_output(invalid, "1570578247"),
             "",
+        )
+        self.assertEqual(
+            casas_ldy_short_for_output(invalid, "1570578247"),
+            "",
+        )
+
+    def test_samsung_short_is_computed_from_final_sku_not_stale_storage(self):
+        row = {
+            "retailer_sku_name": "Lavadora Samsung WW11T4040BXFAZ",
+            "sku_short_version": "WRONG",
+            "parse_status": SHORT_DERIVED_TOKEN,
+        }
+        self.assertEqual(
+            casas_ldy_short_for_output(row, "WW11T4040BXFAZ"),
+            "WW11T",
         )
 
     @staticmethod

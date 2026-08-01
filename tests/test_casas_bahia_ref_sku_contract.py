@@ -6,6 +6,7 @@ from unittest.mock import patch
 from seda.casas_bahia.ref_sku_contract import (
     BRAND_FIELD,
     EVIDENCE_FIELD,
+    LAST_KNOWN_SELECTED_TOKEN,
     casas_ref_short_for_output,
     casas_ref_title_sku,
     resolve_casas_ref_sku,
@@ -130,6 +131,32 @@ class CasasBahiaRefSkuContractTests(unittest.TestCase):
         self.assertEqual(row["sku"], "MD-RT411FGF01")
         self.assertEqual(row["sku_short_version"], "MD-RT411FGF01")
         self.assertEqual(row["ref_capacity"], "411L")
+
+    def test_new_verified_sku_cannot_reuse_stale_trusted_short(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "REF",
+            "product_url": "https://www.casasbahia.com.br/geladeira/p/123",
+            "item": "123",
+            "retailer_sku_name": "Geladeira antiga OLD123",
+            "sku": "OLD123",
+            "sku_short_version": "OLD123",
+            "parse_status": LAST_KNOWN_SELECTED_TOKEN,
+        }
+        detail = {
+            "retailer_sku_name": "Geladeira Consul CRM44MK 377L",
+            EVIDENCE_FIELD: ("CRM44MK",),
+            BRAND_FIELD: "Consul",
+        }
+        self.assertTrue(
+            _merge_casas_bahia_ref_detail(
+                row,
+                detail,
+                identity_verified=True,
+            )
+        )
+        self.assertEqual(row["sku"], "CRM44MK")
+        self.assertEqual(row["sku_short_version"], "CRM44MK")
 
     def test_final_output_uses_title_full_and_derived_short(self):
         row = {

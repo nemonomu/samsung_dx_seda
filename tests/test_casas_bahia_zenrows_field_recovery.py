@@ -5,6 +5,18 @@ from unittest.mock import Mock, patch
 
 from seda.casas_bahia import pdp_field_recovery
 from seda.casas_bahia.detail_api import fetch_product_source
+from seda.casas_bahia.ldy_sku_contract import (
+    BRAND_FIELD as LDY_BRAND_FIELD,
+    EVIDENCE_FIELD as LDY_EVIDENCE_FIELD,
+)
+from seda.casas_bahia.ref_sku_contract import (
+    BRAND_FIELD as REF_BRAND_FIELD,
+    EVIDENCE_FIELD as REF_EVIDENCE_FIELD,
+)
+from seda.casas_bahia.recovery_contract import (
+    CASAS_LAST_KNOWN_DB_FIELD_MAP,
+    CASAS_ZENROWS_FIELD_MAP,
+)
 from seda.casas_bahia.sku_contract import PDP_HTML_MODEL_TOKEN
 from seda.magalu.zenrows_client import ZenRowsResult
 from seda.parsers import CASAS_TV_EXACT_MODELO_FIELD, parse_detail
@@ -119,6 +131,125 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
             result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
                 "https://www.casasbahia.com.br/produto/p/1582420985",
                 ("sku",),
+            )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["request_count"], 2)
+        self.assertNotIn("sku", result["detail"])
+
+    def test_ref_sku_uses_only_ref_contract_validated_private_evidence(self):
+        request = Mock(return_value=self._result("premium_html"))
+        detail = {
+            "_detail_identity_verified": True,
+            "retailer_sku_name": "Geladeira HQ Frost Free 140 litros",
+            "sku": "220V",
+            REF_EVIDENCE_FIELD: ("HQ-140RDF",),
+            REF_BRAND_FIELD: "HQ",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/123",
+                ("sku",),
+                product_line_value="REF",
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["detail"], {"sku": "HQ-140RDF"})
+
+    def test_ref_sku_invalid_raw_modelo_tries_25x_then_rejects(self):
+        request = Mock(
+            side_effect=(
+                self._result("premium_html"),
+                self._result("pdp_js_full"),
+            )
+        )
+        detail = {
+            "_detail_identity_verified": True,
+            "retailer_sku_name": "Geladeira HQ Frost Free 140 litros",
+            "sku": "220V",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/123",
+                ("sku",),
+                product_line_value="REF",
+            )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["request_count"], 2)
+        self.assertNotIn("sku", result["detail"])
+
+    def test_ldy_sku_uses_only_ldy_contract_validated_private_evidence(self):
+        request = Mock(return_value=self._result("premium_html"))
+        detail = {
+            "_detail_identity_verified": True,
+            "retailer_sku_name": "Lavadora Midea 13kg",
+            "sku": "220V",
+            LDY_EVIDENCE_FIELD: (
+                {
+                    "value": "MF200D130WB/WK-02",
+                    "source": "pdp_modelo",
+                },
+            ),
+            LDY_BRAND_FIELD: "Midea",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/123",
+                ("sku",),
+                product_line_value="LDY",
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["detail"], {"sku": "MF200D130WB/WK-02"})
+
+    def test_ldy_sku_falls_back_to_valid_raw_modelo(self):
+        request = Mock(return_value=self._result("premium_html"))
+        detail = {
+            "_detail_identity_verified": True,
+            "retailer_sku_name": "Lavadora Philco 14kg",
+            "sku": "PLR14A",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/123",
+                ("sku",),
+                product_line_value="LDY",
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["request_count"], 1)
+        self.assertEqual(result["detail"], {"sku": "PLR14A"})
+
+    def test_ldy_sku_invalid_raw_modelo_tries_25x_then_rejects(self):
+        request = Mock(
+            side_effect=(
+                self._result("premium_html"),
+                self._result("pdp_js_full"),
+            )
+        )
+        detail = {
+            "_detail_identity_verified": True,
+            "retailer_sku_name": "Lavadora Philco 14kg",
+            "sku": "220V",
+        }
+        with patch(
+            "seda.magalu.zenrows_client.request_url",
+            request,
+        ), patch.object(pdp_field_recovery, "parse_detail", return_value=detail):
+            result = pdp_field_recovery.fetch_pdp_fields_via_zenrows(
+                "https://www.casasbahia.com.br/produto/p/123",
+                ("sku",),
+                product_line_value="LDY",
             )
         self.assertFalse(result["success"])
         self.assertEqual(result["request_count"], 2)
@@ -257,6 +388,69 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
                 for field, value in expected.items():
                     self.assertEqual(safe[field], value)
 
+    def test_verified_pdp_exposes_reference_evidence_to_each_sku_validator(self):
+        cases = (
+            (
+                "REF",
+                "Geladeira HQ Frost Free 140 litros",
+                (
+                    ("Marca", "HQ"),
+                    ("Modelo", "220V"),
+                    ("Refer\u00eancia", "HQ-140RDF"),
+                ),
+                REF_EVIDENCE_FIELD,
+                "HQ-140RDF",
+            ),
+            (
+                "LDY",
+                "Lavadora Midea 13kg",
+                (
+                    ("Marca", "Midea"),
+                    ("Modelo", "Wave Agitator"),
+                    ("Refer\u00eancia", "MA512W130A/WK-05"),
+                ),
+                LDY_EVIDENCE_FIELD,
+                "MA512W130A/WK-05",
+            ),
+        )
+        for line, title, specs, evidence_field, expected in cases:
+            product = {
+                "id": 1,
+                "name": title,
+                "sku": {"id": "123"},
+                "specGroups": [
+                    {
+                        "name": "Especificacoes",
+                        "specs": [
+                            {"name": label, "value": value}
+                            for label, value in specs
+                        ],
+                    }
+                ],
+            }
+            payload = {"props": {"pageProps": {"product": product}}}
+            html = (
+                '<script id="__NEXT_DATA__" type="application/json">'
+                + json.dumps(payload)
+                + "</script>"
+            )
+            with self.subTest(line=line), patch.dict(
+                os.environ,
+                {"SEDA_PRODUCT_LINE": line},
+                clear=False,
+            ):
+                detail = parse_detail(
+                    html,
+                    "Casas Bahia",
+                    "https://www.casasbahia.com.br",
+                    "https://www.casasbahia.com.br/produto/p/123",
+                )
+                self.assertTrue(detail[evidence_field])
+                self.assertEqual(
+                    pdp_field_recovery._validated_sku(detail, line),
+                    expected,
+                )
+
     def test_standalone_dryer_pdp_does_not_create_capacity_or_loading(self):
         product = {
             "id": 1,
@@ -360,18 +554,20 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
                 "product_line": "REF",
                 "item": "123",
                 "product_url": "https://www.casasbahia.com.br/a/p/123",
+                "retailer_sku_name": "Geladeira Consul CRM44MK 377L",
                 "ref_capacity": "377L",
                 "ref_refrigerator_type": "",
-                "sku": "KEEP",
+                "sku": "CRM44MK",
             },
             {
                 "retailer": "Casas Bahia",
                 "product_line": "REF",
                 "item": "123",
                 "product_url": "https://www.casasbahia.com.br/a/p/123",
+                "retailer_sku_name": "Geladeira Consul CRM44MK 377L",
                 "ref_capacity": "",
                 "ref_refrigerator_type": "",
-                "sku": "KEEP2",
+                "sku": "CRM44MK",
             },
         ]
         result = {
@@ -401,8 +597,90 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
         self.assertEqual(rows[0]["ref_capacity"], "377L")
         self.assertEqual(rows[1]["ref_capacity"], "400L")
         self.assertEqual(rows[0]["ref_refrigerator_type"], "Duplex")
-        self.assertEqual(rows[0]["sku"], "KEEP")
-        self.assertEqual(rows[1]["sku"], "KEEP2")
+        self.assertEqual(rows[0]["sku"], "CRM44MK")
+        self.assertEqual(rows[1]["sku"], "CRM44MK")
+        self.assertEqual(
+            fetch.call_args.kwargs["product_line_value"],
+            "REF",
+        )
+
+    def test_parent_backfill_merges_only_ref_validated_sku_and_short(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "REF",
+            "item": "123",
+            "product_url": "https://www.casasbahia.com.br/a/p/123",
+            "retailer_sku_name": "Geladeira HQ Frost Free 140 litros",
+            "sku": "123",
+            "sku_short_version": "STALE",
+            "ref_capacity": "140L",
+            "ref_refrigerator_type": "1 porta",
+        }
+        fetch = Mock(
+            return_value={
+                "success": True,
+                "detail": {"sku": "HQ-140RDF"},
+                "identity_verified": True,
+                "error": "",
+                "request_count": 1,
+                "attempts": [],
+            }
+        )
+        with patch(
+            "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+            return_value=True,
+        ), patch(
+            "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+            fetch,
+        ):
+            _backfill_casas_zenrows_fields([row], "unused.csv")
+        self.assertEqual(row["sku"], "HQ-140RDF")
+        self.assertEqual(row["sku_short_version"], "HQ-140RDF")
+        self.assertEqual(
+            fetch.call_args.kwargs["product_line_value"],
+            "REF",
+        )
+
+    def test_parent_backfill_merges_only_ldy_validated_sku_and_short(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "LDY",
+            "item": "123",
+            "product_url": "https://www.casasbahia.com.br/a/p/123",
+            "retailer_sku_name": "Lavadora Midea 13kg",
+            "sku": "123",
+            "sku_short_version": "STALE",
+            "ldy_capacity": "13kg",
+            "ldy_loading_type": "Front load",
+            "ldy_color": "Branco",
+        }
+        fetch = Mock(
+            return_value={
+                "success": True,
+                "detail": {"sku": "MF200D130WB/WK-02"},
+                "identity_verified": True,
+                "error": "",
+                "request_count": 1,
+                "attempts": [],
+            }
+        )
+        with patch(
+            "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+            return_value=True,
+        ), patch(
+            "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+            fetch,
+        ):
+            _backfill_casas_zenrows_fields([row], "unused.csv")
+        self.assertEqual(row["sku"], "MF200D130WB/WK-02")
+        self.assertEqual(
+            row["sku_short_version"],
+            "MF200D130WB/WK-02",
+        )
+        self.assertEqual(
+            fetch.call_args.kwargs["product_line_value"],
+            "LDY",
+        )
 
     def test_parent_backfill_replaces_unverified_tv_listing_sku_with_modelo(self):
         row = {
@@ -475,13 +753,50 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
             _backfill_casas_zenrows_fields([row], "unused.csv")
         fetch.assert_not_called()
 
+    def test_complete_valid_ref_and_ldy_rows_do_not_spend_zenrows(self):
+        rows = (
+            {
+                "retailer": "Casas Bahia",
+                "product_line": "REF",
+                "item": "123",
+                "product_url": "https://www.casasbahia.com.br/a/p/123",
+                "retailer_sku_name": "Geladeira Consul CRM44MK 377L",
+                "sku": "CRM44MK",
+                "ref_capacity": "377L",
+                "ref_refrigerator_type": "Duplex",
+            },
+            {
+                "retailer": "Casas Bahia",
+                "product_line": "LDY",
+                "item": "124",
+                "product_url": "https://www.casasbahia.com.br/a/p/124",
+                "retailer_sku_name": "Lavadora Philco PLR14A 14kg",
+                "sku": "PLR14A",
+                "ldy_capacity": "14kg",
+                "ldy_loading_type": "Top load",
+                "ldy_color": "Preto",
+            },
+        )
+        for row in rows:
+            fetch = Mock()
+            with self.subTest(line=row["product_line"]), patch(
+                "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+                return_value=True,
+            ), patch(
+                "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+                fetch,
+            ):
+                _backfill_casas_zenrows_fields([row], "unused.csv")
+            fetch.assert_not_called()
+
     def test_standalone_dryer_intentional_blanks_do_not_spend(self):
         row = {
             "retailer": "Casas Bahia",
             "product_line": "LDY",
             "item": "123",
             "product_url": "https://www.casasbahia.com.br/a/p/123",
-            "retailer_sku_name": "Secadora de Roupas Electrolux 11kg",
+            "retailer_sku_name": "Secadora de Roupas Electrolux STH11 11kg",
+            "sku": "STH11",
             "ldy_capacity": "",
             "ldy_loading_type": "",
             "ldy_color": "Branco",
@@ -496,6 +811,47 @@ class CasasBahiaZenRowsFieldRecoveryTests(unittest.TestCase):
         ):
             _backfill_casas_zenrows_fields([row], "unused.csv")
         fetch.assert_not_called()
+
+    def test_ref_ldy_sku_recovery_maps_remain_separate(self):
+        self.assertEqual(
+            CASAS_ZENROWS_FIELD_MAP["REF"],
+            ("sku", "ref_refrigerator_type", "ref_capacity"),
+        )
+        self.assertEqual(
+            CASAS_ZENROWS_FIELD_MAP["LDY"],
+            ("sku", "ldy_loading_type", "ldy_color", "ldy_capacity"),
+        )
+        self.assertEqual(
+            CASAS_LAST_KNOWN_DB_FIELD_MAP["LDY"],
+            ("sku", "ldy_loading_type", "ldy_color", "ldy_capacity"),
+        )
+
+    def test_item_url_identity_mismatch_never_spends_zenrows(self):
+        row = {
+            "retailer": "Casas Bahia",
+            "product_line": "LDY",
+            "item": "123",
+            "product_url": "https://www.casasbahia.com.br/a/p/999",
+            "retailer_sku_name": "Lavadora Midea 13kg",
+            "sku": "",
+            "ldy_capacity": "13kg",
+            "ldy_loading_type": "Front load",
+            "ldy_color": "Branco",
+        }
+        fetch = Mock()
+        with patch(
+            "seda.step08_detail_enrichment._casas_zenrows_field_recovery_enabled",
+            return_value=True,
+        ), patch(
+            "seda.casas_bahia.pdp_field_recovery.fetch_pdp_fields_via_zenrows",
+            fetch,
+        ):
+            _backfill_casas_zenrows_fields([row], "unused.csv")
+        fetch.assert_not_called()
+        self.assertIn(
+            "casas_zenrows_field_skipped:input_item_identity_mismatch",
+            row["parse_status"].split("+"),
+        )
 
     def test_unexpected_paid_fetch_exception_does_not_abort_pipeline(self):
         row = {

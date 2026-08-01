@@ -8,11 +8,13 @@ from ..parsers import clean_text, is_appliance_spec_token, remove_accents
 EVIDENCE_FIELD = "_casas_ldy_sku_evidence"
 BRAND_FIELD = "_casas_ldy_brand"
 SHORT_DERIVED_TOKEN = "casas_ldy_sku_short_derived"
+LAST_KNOWN_SELECTED_TOKEN = "casas_ldy_sku_last_known_selected"
 _RESOLVED_SELECTION_TOKENS = frozenset(
     {
         "casas_ldy_sku_title_selected",
         "casas_ldy_sku_existing_selected",
         "casas_ldy_sku_product_source_selected",
+        LAST_KNOWN_SELECTED_TOKEN,
     }
 )
 
@@ -165,9 +167,10 @@ def resolve_ldy_sku(existing_sku, title, evidence, brand=""):
     else:
         statuses.append("casas_ldy_sku_unresolved")
 
-    short = derive_samsung_short(chosen, brand=brand, title=title)
-    if short:
+    derived_short = derive_samsung_short(chosen, brand=brand, title=title)
+    if derived_short:
         statuses.append(SHORT_DERIVED_TOKEN)
+    short = derived_short or chosen
     return LdySkuResolution(chosen, short, tuple(dict.fromkeys(statuses)))
 
 
@@ -195,11 +198,14 @@ def casas_ldy_sku_for_output(row, item=""):
 
 def casas_ldy_short_for_output(row, resolved_sku):
     row = row or {}
-    expected = samsung_short_family_from_sku(resolved_sku)
-    if not expected:
+    sku = normalize_ldy_sku(resolved_sku)
+    if not is_valid_ldy_manufacturer_sku(sku):
         return ""
+    expected = samsung_short_family_from_sku(sku)
+    if not expected:
+        return sku
     derived = derive_samsung_short(
-        resolved_sku,
+        sku,
         brand=row.get(BRAND_FIELD, ""),
         title=row.get("retailer_sku_name", ""),
     )
@@ -209,7 +215,7 @@ def casas_ldy_short_for_output(row, resolved_sku):
     stored = normalize_ldy_sku(row.get("sku_short_version", ""))
     if SHORT_DERIVED_TOKEN in tokens and stored == expected:
         return expected
-    return ""
+    return sku
 
 
 def derive_samsung_short(sku, brand="", title=""):

@@ -2,8 +2,8 @@
 
 The lookup runs once per batch, never writes to the database, and accepts
 history only when account, product line, item and the URL /p/{item} identity
-all agree. A Casas TV SKU is satisfied by a conservative title model or an
-identity-proven PDP Modelo; remaining blanks may use the latest DB value.
+all agree. Product-line SKU validators decide whether a current or historical
+value is safe; remaining blanks may use the latest validated DB value.
 """
 
 import os
@@ -13,6 +13,13 @@ from urllib.parse import urlsplit
 
 from ..step00_config import db_connect, output_table
 from .field_extraction import is_standalone_dryer_title
+from .ldy_sku_contract import (
+    LAST_KNOWN_SELECTED_TOKEN as LDY_LAST_KNOWN_SELECTED_TOKEN,
+    casas_ldy_short_for_output,
+    casas_ldy_sku_for_output,
+    is_valid_ldy_manufacturer_sku,
+    normalize_ldy_sku,
+)
 from .recovery_contract import last_known_fields
 from .sku_contract import casas_tv_sku_for_output
 from .ref_sku_contract import (
@@ -37,7 +44,7 @@ def backfill_casas_bahia_last_known_fields(
     active_retailer,
     product_line_value,
 ):
-    """Fill final-output blanks or an unverified TV SKU and return counters."""
+    """Fill final-output blanks or an unverified SKU and return counters."""
     line = str(product_line_value or "").strip().upper()
     fields = last_known_fields(line)
     stats = _empty_stats()
@@ -93,6 +100,8 @@ def backfill_casas_bahia_last_known_fields(
                 continue
             if field == "sku" and line == "REF":
                 value = _latest_ref_sku(candidates)
+            elif field == "sku" and line == "LDY":
+                value = _latest_ldy_sku(candidates)
             elif field == "sku" and line == "TV":
                 value = _latest_tv_sku(candidates)
             else:
@@ -113,6 +122,15 @@ def backfill_casas_bahia_last_known_fields(
                 row["parse_status"] = _append_token(
                     row.get("parse_status", ""),
                     TV_LAST_KNOWN_SELECTED_TOKEN,
+                )
+            elif field == "sku" and line == "LDY":
+                row["parse_status"] = _append_token(
+                    row.get("parse_status", ""),
+                    LDY_LAST_KNOWN_SELECTED_TOKEN,
+                )
+                row["sku_short_version"] = casas_ldy_short_for_output(
+                    row,
+                    value,
                 )
             _mark_recovered_field(row, field)
             recovered_field_counts[field] += 1
@@ -277,6 +295,15 @@ def _latest_ref_sku(candidates):
     return ""
 
 
+def _latest_ldy_sku(candidates):
+    """Return the newest stored LDY SKU accepted by the LDY validator."""
+    for candidate in candidates:
+        current = normalize_ldy_sku(candidate.get("sku"))
+        if is_valid_ldy_manufacturer_sku(current):
+            return current
+    return ""
+
+
 def _latest_tv_sku(candidates):
     """Return the newest stored TV SKU, excluding known fallback artifacts."""
     for candidate in candidates:
@@ -332,6 +359,8 @@ def _current_field_needs_recovery(row, field):
             return not bool(casas_tv_sku_for_output(row, item))
         if line == "REF":
             return not bool(casas_ref_sku_for_output(row, item))
+        if line == "LDY":
+            return not bool(casas_ldy_sku_for_output(row, item))
         return False
     return not _nonblank(row.get(field))
 
@@ -347,8 +376,8 @@ def _field_recovery_allowed(row, line, field):
         return True
     # A conflicting detail response invalidates its fields, but it does not
     # invalidate the current row's independently verified item == URL key.
-    # Only TV SKU is allowed to use DB history in this situation.
-    return line == "TV" and field == "sku"
+    # Only a product-line-validated SKU may use DB history in this situation.
+    return line in {"TV", "REF", "LDY"} and field == "sku"
 
 
 def _historical_identity_valid(row, expected_item):

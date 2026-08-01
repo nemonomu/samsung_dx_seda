@@ -1557,6 +1557,17 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
                 }
             )
         elif line == "REF":
+            from .casas_bahia.ref_sku_contract import (
+                BRAND_FIELD as ref_brand_field,
+                EVIDENCE_FIELD as ref_evidence_field,
+                extract_product_source_evidence as extract_ref_sku_evidence,
+            )
+
+            detail[ref_brand_field] = specs.get("marca", "")
+            detail[ref_evidence_field] = extract_ref_sku_evidence(
+                semantic_specs,
+                model=model,
+            )
             safe_recovery.update(
                 {
                     "ref_refrigerator_type": _casas_pdp_ref_type(
@@ -1567,6 +1578,25 @@ def _parse_casas_bahia_html_detail(html_text, base_url, product_url):
                 }
             )
         elif line == "LDY":
+            from .casas_bahia.ldy_sku_contract import (
+                BRAND_FIELD as ldy_brand_field,
+                EVIDENCE_FIELD as ldy_evidence_field,
+                extract_product_source_evidence as extract_ldy_sku_evidence,
+            )
+
+            detail[ldy_brand_field] = specs.get("marca", "")
+            detail[ldy_evidence_field] = extract_ldy_sku_evidence(
+                "\n".join(
+                    value
+                    for value in (
+                        next_description_text,
+                        meta_description_text,
+                    )
+                    if value
+                ),
+                semantic_specs,
+                variant_text=title,
+            )
             safe_recovery.update(
                 {
                     "ldy_loading_type": semantic_fields.get(

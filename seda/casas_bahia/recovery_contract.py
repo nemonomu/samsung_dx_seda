@@ -9,10 +9,12 @@ CASAS_ZENROWS_FIELD_MAP = {
         "model_year",
     ),
     "REF": (
+        "sku",
         "ref_refrigerator_type",
         "ref_capacity",
     ),
     "LDY": (
+        "sku",
         "ldy_loading_type",
         "ldy_color",
         "ldy_capacity",
@@ -33,6 +35,7 @@ CASAS_LAST_KNOWN_DB_FIELD_MAP = {
         "ref_capacity",
     ),
     "LDY": (
+        "sku",
         "ldy_loading_type",
         "ldy_color",
         "ldy_capacity",

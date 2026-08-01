@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from seda.casas_bahia import last_known_db
+from seda.casas_bahia.ldy_sku_contract import LAST_KNOWN_SELECTED_TOKEN
 from seda.casas_bahia.sku_contract import PRODUCT_SOURCE_MODEL_TOKEN
 from seda.common.translations import PRESERVE_TRANSLATION_FIELDS_KEY
 from seda.step14_db_load import _db_value
@@ -426,6 +427,207 @@ class CasasBahiaLastKnownDbTests(unittest.TestCase):
                 product_line_value="REF",
             )
         self.assertEqual(row["sku"], "")
+
+    def test_ldy_uses_newest_valid_stored_sku_and_recomputes_short(self):
+        row = self._row(
+            line="LDY",
+            retailer_sku_name="Lavadora Samsung 11kg",
+            sku="",
+            sku_short_version="STALE",
+            ldy_loading_type="Top load",
+            ldy_color="Branco",
+            ldy_capacity="11kg",
+        )
+        history = [
+            self._row(
+                line="LDY",
+                retailer_sku_name="Lavadora Samsung 11kg",
+                sku="220V",
+                sku_short_version="WRONG",
+            ),
+            self._row(
+                line="LDY",
+                retailer_sku_name="Lavadora Samsung 11kg",
+                sku="WW11T4040BXFAZ",
+                sku_short_version="UNTRUSTED",
+            ),
+        ]
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            return_value=history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="LDY",
+            )
+        self.assertEqual(row["sku"], "WW11T4040BXFAZ")
+        self.assertEqual(row["sku_short_version"], "WW11T")
+        self.assertIn(
+            LAST_KNOWN_SELECTED_TOKEN,
+            row["parse_status"].split("+"),
+        )
+        self.assertTrue(last_known_db.recovered_from_last_known_db(row, "sku"))
+        self.assertEqual(stats["recovered_fields"], {"sku": 1})
+
+    def test_ldy_does_not_promote_legacy_short_or_invalid_sku(self):
+        row = self._row(
+            line="LDY",
+            retailer_sku_name="Lavadora sem modelo explicito",
+            sku="",
+            sku_short_version="",
+            ldy_loading_type="Top load",
+            ldy_color="Branco",
+            ldy_capacity="13kg",
+        )
+        history = [
+            self._row(
+                line="LDY",
+                retailer_sku_name="Lavadora sem modelo explicito",
+                sku="",
+                sku_short_version="WW11T",
+            ),
+            self._row(
+                line="LDY",
+                retailer_sku_name="Lavadora sem modelo explicito",
+                sku="AGITADOR",
+                sku_short_version="PLR14A",
+            ),
+        ]
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            return_value=history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="LDY",
+            )
+        self.assertEqual(row["sku"], "")
+        self.assertEqual(row["sku_short_version"], "")
+        self.assertEqual(stats["recovered_rows"], 0)
+
+    def test_ref_and_ldy_identity_conflict_recovers_only_sku(self):
+        cases = (
+            (
+                "REF",
+                "Geladeira Consul 377L",
+                "CRM44MK",
+                "ref_capacity",
+                "377L",
+            ),
+            (
+                "LDY",
+                "Lavadora Philco 14kg",
+                "PLR14A",
+                "ldy_capacity",
+                "14kg",
+            ),
+        )
+        for line, title, sku, other_field, historical_other in cases:
+            row = self._row(
+                line=line,
+                retailer_sku_name=title,
+                sku="",
+                sku_short_version="",
+                parse_status="casas_zenrows_field_failed:identity_conflict",
+                **{other_field: ""},
+            )
+            historical = self._row(
+                line=line,
+                retailer_sku_name=title,
+                sku=sku,
+                sku_short_version=sku,
+                **{other_field: historical_other},
+            )
+            with self.subTest(line=line), self._enabled(), patch.object(
+                last_known_db,
+                "_read_history",
+                return_value=[historical],
+            ):
+                stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                    [row],
+                    active_retailer="casas_bahia",
+                    product_line_value=line,
+                )
+            self.assertEqual(row["sku"], sku)
+            self.assertEqual(row["sku_short_version"], sku)
+            self.assertEqual(row[other_field], "")
+            self.assertEqual(stats["recovered_fields"], {"sku": 1})
+
+    def test_ldy_valid_current_sku_skips_history_query(self):
+        row = self._row(
+            line="LDY",
+            retailer_sku_name="Lavadora Philco PLR14A 14kg",
+            sku="PLR14A",
+            sku_short_version="PLR14A",
+            ldy_loading_type="Top load",
+            ldy_color="Preto",
+            ldy_capacity="14kg",
+        )
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="LDY",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(stats["eligible_rows"], 0)
+
+    def test_ref_valid_complete_row_skips_history_query(self):
+        row = self._row(
+            line="REF",
+            retailer_sku_name="Geladeira Consul CRM44MK 377L",
+            sku="CRM44MK",
+            sku_short_version="CRM44MK",
+            ref_refrigerator_type="Duplex",
+            ref_capacity="377L",
+        )
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="REF",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(stats["eligible_rows"], 0)
+
+    def test_ldy_current_item_url_mismatch_never_queries_history(self):
+        row = self._row(
+            line="LDY",
+            item="123",
+            retailer_sku_name="Lavadora sem modelo explicito",
+            sku="",
+            ldy_loading_type="Top load",
+            ldy_color="Branco",
+            ldy_capacity="13kg",
+        )
+        row["product_url"] = "https://www.casasbahia.com.br/produto/p/999"
+        read_history = Mock()
+        with self._enabled(), patch.object(
+            last_known_db,
+            "_read_history",
+            read_history,
+        ):
+            stats = last_known_db.backfill_casas_bahia_last_known_fields(
+                [row],
+                active_retailer="casas_bahia",
+                product_line_value="LDY",
+            )
+        read_history.assert_not_called()
+        self.assertEqual(stats["eligible_rows"], 0)
 
     def test_standalone_dryer_capacity_and_loading_stay_blank(self):
         row = self._row(
