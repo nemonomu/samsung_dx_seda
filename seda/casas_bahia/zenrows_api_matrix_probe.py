@@ -175,20 +175,6 @@ def _case_matrix(targets, args):
 
     return [
         {
-            "name": "chain_session_cookie_auto_global",
-            "target_type": "chain",
-            "url": freight_url,
-            "steps": _chain_steps(
-                listing_url,
-                pdp_url,
-                freight_url,
-                first,
-                args.zipcode,
-                session_id,
-                {"mode": "auto", "original_status": "true"},
-            ),
-        },
-        {
             "name": "chain_session_cookie_auto_br",
             "target_type": "chain",
             "url": freight_url,
@@ -200,30 +186,6 @@ def _case_matrix(targets, args):
                 args.zipcode,
                 session_id,
                 {"mode": "auto", "proxy_country": "br", "original_status": "true"},
-            ),
-        },
-        {
-            "name": "chain_session_cookie_js_premium_global",
-            "target_type": "chain",
-            "url": freight_url,
-            "steps": _chain_steps(
-                listing_url,
-                pdp_url,
-                freight_url,
-                first,
-                args.zipcode,
-                session_id,
-                {
-                    "js_render": "true",
-                    "premium_proxy": "true",
-                    "wait": str(args.wait_ms),
-                    "block_resources": args.block_resources,
-                    "original_status": "true",
-                },
-                freight_params={
-                    "premium_proxy": "true",
-                    "original_status": "true",
-                },
             ),
         },
         {
@@ -259,12 +221,6 @@ def _case_matrix(targets, args):
             "params": {"mode": "auto", "proxy_country": "br", "original_status": "true"},
         },
         {
-            "name": "pdp_auto_global",
-            "target_type": "pdp",
-            "url": pdp_url,
-            "params": {"mode": "auto", "original_status": "true"},
-        },
-        {
             "name": "pdp_premium_br_headers",
             "target_type": "pdp",
             "url": pdp_url,
@@ -290,30 +246,11 @@ def _case_matrix(targets, args):
             },
         },
         {
-            "name": "pdp_js_premium_global",
-            "target_type": "pdp",
-            "url": pdp_url,
-            "params": {
-                "js_render": "true",
-                "premium_proxy": "true",
-                "wait": str(args.wait_ms),
-                "block_resources": args.block_resources,
-                "original_status": "true",
-            },
-        },
-        {
             "name": "freight_auto_br",
             "target_type": "freight",
             "url": freight_url,
             "headers": _freight_headers(first, args.zipcode),
             "params": {"mode": "auto", "proxy_country": "br", "custom_headers": "true", "original_status": "true"},
-        },
-        {
-            "name": "freight_auto_global",
-            "target_type": "freight",
-            "url": freight_url,
-            "headers": _freight_headers(first, args.zipcode),
-            "params": {"mode": "auto", "custom_headers": "true", "original_status": "true"},
         },
         {
             "name": "freight_premium_br_headers",
@@ -356,12 +293,13 @@ def _case_matrix(targets, args):
             },
         },
         {
-            "name": "batch_listing_js_premium_global",
+            "name": "batch_listing_js_premium_br",
             "target_type": "batch",
             "url": batch_listing_url,
             "params": {
                 "js_render": "true",
                 "premium_proxy": "true",
+                "proxy_country": "br",
                 "wait": str(args.wait_ms),
                 "block_resources": args.block_resources,
                 "js_instructions": json.dumps([{"evaluate": batch_js}, {"wait": 1000}], ensure_ascii=False),

@@ -61,7 +61,13 @@ def fetch_url(url, mode=None, timeout=None):
             trace_item["inner_attempts"] = result.attempts
         trace.append(trace_item)
         result.attempts = trace[:]
-        if result.text and len(result.text) > 500 and not blocked:
+        listing_error = bool(result.error) and _is_magalu_listing_url(url)
+        if (
+            result.text
+            and len(result.text) > 500
+            and not blocked
+            and not listing_error
+        ):
             return result
         last = result
         time.sleep(float(os.getenv("SEDA_RETRY_SLEEP_SECONDS", "1")))
@@ -72,6 +78,8 @@ def fetch_url(url, mode=None, timeout=None):
 def fetch_attempts(mode):
     if mode == "magalu_browser_first":
         attempts = ["browser", "graphql", "uc", "requests", "zenrows"]
+    elif mode == "magalu_browser_zenrows":
+        attempts = ["browser", "zenrows"]
     elif mode in {"auto", "uc_first"} or mode.endswith("_uc_first"):
         attempts = ["uc", "graphql", "requests", "zenrows"]
     elif mode == "magalu_graphql_first":
@@ -203,7 +211,8 @@ def _fetch_graphql(url, timeout):
 
 def _fetch_zenrows(url, timeout):
     zenrows_timeout = int(os.getenv("SEDA_ZENROWS_TIMEOUT", os.getenv("ZENROWS_TIMEOUT", str(timeout))))
-    if _is_magalu_listing_url(url):
+    is_magalu_listing = _is_magalu_listing_url(url)
+    if is_magalu_listing:
         profile_hint = os.getenv("SEDA_ZENROWS_LISTING_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "listing_js_full"))
     else:
         profile_hint = os.getenv("SEDA_ZENROWS_HTML_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
@@ -213,14 +222,24 @@ def _fetch_zenrows(url, timeout):
     for attempt, profile in enumerate(profiles, start=1):
         result = _fetch_zenrows_once(url, zenrows_timeout, profile, attempt, max_attempts)
         blocked_reason = blocked_html_reason(result.text, result.status_code)
-        if not blocked_reason:
+        failure_reason = ""
+        if blocked_reason:
+            failure_reason = f"blocked_html:{blocked_reason}"
+            result.error = result.error or failure_reason
+        elif is_magalu_listing:
+            payload_error = _magalu_listing_payload_error(url, result.text)
+            if payload_error:
+                failure_reason = f"invalid_listing_payload:{payload_error}"
+                result.error = result.error or failure_reason
+            elif result.error:
+                failure_reason = result.error
+        if not failure_reason:
             return result
-        result.error = result.error or f"blocked_html:{blocked_reason}"
         last = result
         if attempt < max_attempts:
             sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS", "2"))
             print(
-                f"[seda] zenrows fetch fallback blocked_reason={blocked_reason} "
+                f"[seda] zenrows fetch fallback failure_reason={failure_reason} "
                 f"attempt={attempt}/{max_attempts} profile={profile} next_profile={profiles[attempt]} "
                 f"sleep={sleep_seconds}",
                 flush=True,
@@ -290,6 +309,27 @@ def _fetch_zenrows_once(url, zenrows_timeout, profile_hint, attempt=1, max_attem
 
 def _is_magalu_listing_url(url):
     return "magazineluiza.com.br" in str(url or "") and "/busca/" in str(url or "")
+
+
+def _magalu_listing_payload_error(url, text):
+    if not _is_magalu_listing_url(url):
+        return ""
+    if not str(text or "").strip():
+        return "empty_html"
+    try:
+        from .magalu.browser_session import _magalu_search_payload_state
+
+        state = _magalu_search_payload_state(
+            url,
+            url,
+            text,
+            browser_text="",
+        )
+    except Exception as exc:
+        return f"validator_error:{type(exc).__name__}"
+    if state.get("valid"):
+        return ""
+    return str(state.get("error") or "invalid_search_payload")
 
 
 def _fetch_uc(url, timeout):

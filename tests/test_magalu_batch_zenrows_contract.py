@@ -43,7 +43,7 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
             "if not defined seda_magalu_last_known_db_fallback set seda_magalu_last_known_db_fallback=1",
             "if not defined seda_magalu_last_known_history_limit set seda_magalu_last_known_history_limit=30",
             "if not defined seda_magalu_last_known_db_timeout_ms set seda_magalu_last_known_db_timeout_ms=15000",
-            "if not defined seda_magalu_listing_allow_zenrows set seda_magalu_listing_allow_zenrows=0",
+            "if not defined seda_magalu_listing_allow_zenrows set seda_magalu_listing_allow_zenrows=1",
         )
         for name in MAGALU_FULL_BATCHES:
             with self.subTest(batch=name):
@@ -71,6 +71,22 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
                 text = self._text(name)
                 for line in required:
                     self.assertIn(line, text)
+
+    def test_full_batches_use_isolated_profile_and_bounded_listing_recovery(self):
+        required = (
+            "if not defined seda_magalu_listing_fetch_mode set seda_magalu_listing_fetch_mode=magalu_browser_zenrows",
+            "if not defined seda_magalu_listing_allow_zenrows set seda_magalu_listing_allow_zenrows=1",
+            "if not defined seda_magalu_listing_zenrows_profile set seda_magalu_listing_zenrows_profile=premium_html",
+            "if not defined seda_magalu_listing_zenrows_fallback_profiles set seda_magalu_listing_zenrows_fallback_profiles=listing_next_data_js_wait",
+            "if not defined seda_magalu_listing_zenrows_timeout set seda_magalu_listing_zenrows_timeout=45",
+            "if not defined seda_magalu_browser_profile set \"seda_magalu_browser_profile=c:/tmp/seda_magalu_profiles/",
+            "%seda_run_timestamp%",
+        )
+        for name in MAGALU_FULL_BATCHES:
+            with self.subTest(batch=name):
+                text = self._text(name)
+                for token in required:
+                    self.assertIn(token, text)
 
     def test_casas_batches_default_zenrows_only_when_user_did_not_set_switches(self):
         required = (

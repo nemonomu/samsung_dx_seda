@@ -37,7 +37,7 @@ def ensure_execute_allowed(execute):
 def connection_url():
     params = {
         "apikey": os.getenv("ZENROWS_API_KEY", "").strip(),
-        "proxy_country": os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", "br"),
+        "proxy_country": "br",
         "session_ttl": os.getenv("SEDA_ZENROWS_BROWSER_SESSION_TTL", "2m"),
     }
     return "wss://browser.zenrows.com?" + urlencode(params)
@@ -45,7 +45,7 @@ def connection_url():
 
 def public_connection_params():
     return {
-        "proxy_country": os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", "br"),
+        "proxy_country": "br",
         "session_ttl": os.getenv("SEDA_ZENROWS_BROWSER_SESSION_TTL", "2m"),
     }
 

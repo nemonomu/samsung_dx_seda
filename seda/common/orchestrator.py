@@ -91,6 +91,7 @@ def _magalu_listing_env(package_name):
         "SEDA_ZENROWS_DRY_RUN": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN", "0"),
         "SEDA_ZENROWS_LISTING_PROFILE": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_PROFILE", "listing_js_full"),
         "SEDA_ZENROWS_TIMEOUT": os.getenv("SEDA_MAGALU_LISTING_ZENROWS_TIMEOUT", "180"),
+        "SEDA_ZENROWS_PROXY_COUNTRY": "br",
     }
 
 

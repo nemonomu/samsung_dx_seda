@@ -12,6 +12,7 @@ Before answering any question or starting any task in this repository, read this
 - Application code must obtain the key only through the existing environment-loading contract and use it without exposing the value.
 - Business modules must use the centralized ZenRows client. They must not read an env file or handle the raw key directly.
 - A missing or invalid key may be reported only as a boolean/status error such as `key_missing`; the value or a derivative of it must never be shown.
+- Every supported ZenRows proxy request must use `proxy_country=br`. The centralized client enforces this value after all profile, environment, and caller options, so callers must not override it.
 
 ## Approved loading contract
 

@@ -32,11 +32,14 @@ class ZenRowsClientTest(unittest.TestCase):
         self.assertEqual(result.error, "request_error:RuntimeError")
         self.assertNotIn("prepared request failed", result.error)
 
-    def test_request_json_forwards_post_with_br_premium_profile(self):
+    def test_request_json_forces_br_after_environment_and_caller_options(self):
         response = Mock(ok=True, status_code=200, text='{"data":{"item":{"id":"abc"}}}')
         response.headers = {"X-Request-Cost": "0.01"}
         payload = {"operationName": "itemQuery", "variables": {"itemId": "abc"}}
-        with self._enabled_env(), patch(
+        with self._enabled_env(), patch.dict(
+            os.environ,
+            {"SEDA_ZENROWS_PROXY_COUNTRY": "de"},
+        ), patch(
             "seda.magalu.zenrows_client.api_key",
             return_value=sentinel.api_key,
         ), patch(
@@ -47,7 +50,10 @@ class ZenRowsClientTest(unittest.TestCase):
                 "https://federation.magazineluiza.com.br/graphql?operationName=itemQuery",
                 payload,
                 profile="premium_html",
-                extra={"custom_headers": "true"},
+                extra={
+                    "custom_headers": "true",
+                    "proxy_country": "us",
+                },
                 extra_headers={"content-type": "application/json"},
             )
 
@@ -57,6 +63,7 @@ class ZenRowsClientTest(unittest.TestCase):
         self.assertEqual(result.params["proxy_country"], "br")
         _, kwargs = request_post.call_args
         self.assertEqual(kwargs["json"], payload)
+        self.assertEqual(kwargs["params"]["proxy_country"], "br")
         self.assertEqual(kwargs["headers"]["content-type"], "application/json")
         self.assertNotIn("apikey", result.params)
 

@@ -625,7 +625,7 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
     extra = {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_PROXY_COUNTRY", "br"),
+        "proxy_country": "br",
         "json_response": "true",
         "wait": os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_WAIT", "15000"),
         "js_instructions": json.dumps(instructions, separators=(",", ":")),

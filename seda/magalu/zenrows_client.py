@@ -7,6 +7,7 @@ import requests
 
 
 ZENROWS_API_URL = "https://api.zenrows.com/v1/"
+ZENROWS_PROXY_COUNTRY = "br"
 
 
 PROFILE_PARAMS = {
@@ -15,12 +16,12 @@ PROFILE_PARAMS = {
     # Cheapest adaptive probe for listing/detail HTML. ZenRows decides whether JS/proxy is needed.
     "auto_html": {
         "mode": "auto",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
     },
     # Adaptive mode plus browser-like headers. Useful when the site expects referer/language context.
     "auto_custom_headers": {
         "mode": "auto",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "custom_headers": "true",
     },
     # Browser rendering without residential proxy. Confirms whether JavaScript alone is enough.
@@ -32,13 +33,13 @@ PROFILE_PARAMS = {
     # Brazil residential IP, no browser rendering. Good first attempt for SSR __NEXT_DATA__.
     "premium_html": {
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
     },
     # Protected-page baseline: browser rendering plus Brazil residential proxy.
     "js_premium_html": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait": "5000",
         "block_resources": "image,media,font,stylesheet",
     },
@@ -46,7 +47,7 @@ PROFILE_PARAMS = {
     "js_premium_original_status": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait": "5000",
         "original_status": "true",
         "block_resources": "image,media,font,stylesheet",
@@ -62,21 +63,21 @@ PROFILE_PARAMS = {
     "pdp_js_full": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait": "8000",
         "block_resources": "image,media,font,stylesheet",
     },
     # Extract only the Next.js data script. Lower response size than full PDP HTML.
     "pdp_next_data": {
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "css_extractor": json.dumps({"next_data": "script#__NEXT_DATA__"}, separators=(",", ":")),
     },
     # Browser-rendered full listing HTML. Use for diagnosing whether Magalu renders Next data or a challenge page.
     "listing_js_full": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait": "8000",
         "block_resources": "image,media,font,stylesheet",
     },
@@ -84,7 +85,7 @@ PROFILE_PARAMS = {
     "listing_next_data_js_wait": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait": "8000",
         "block_resources": "image,media,font,stylesheet",
         "css_extractor": json.dumps({"next_data": "script#__NEXT_DATA__"}, separators=(",", ":")),
@@ -93,7 +94,7 @@ PROFILE_PARAMS = {
     "listing_next_data_js": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait_for": "script#__NEXT_DATA__",
         "block_resources": "image,media,font,stylesheet",
         "css_extractor": json.dumps({"next_data": "script#__NEXT_DATA__"}, separators=(",", ":")),
@@ -102,7 +103,7 @@ PROFILE_PARAMS = {
     "pdp_next_data_js": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "wait_for": "script#__NEXT_DATA__",
         "block_resources": "image,media,font,stylesheet",
         "css_extractor": json.dumps({"next_data": "script#__NEXT_DATA__"}, separators=(",", ":")),
@@ -111,7 +112,7 @@ PROFILE_PARAMS = {
     "xhr_discovery": {
         "js_render": "true",
         "premium_proxy": "true",
-        "proxy_country": "br",
+        "proxy_country": ZENROWS_PROXY_COUNTRY,
         "json_response": "true",
         "wait": "3000",
         "block_resources": "image,media,font,stylesheet",
@@ -160,9 +161,6 @@ def api_key():
 def build_params(profile, extra=None):
     profile = profile or os.getenv("SEDA_ZENROWS_PROFILE", "auto_html")
     params = dict(PROFILE_PARAMS.get(profile, PROFILE_PARAMS["auto_html"]))
-    proxy_country = os.getenv("SEDA_ZENROWS_PROXY_COUNTRY", params.get("proxy_country", "br"))
-    if _supports_proxy_country(params):
-        params["proxy_country"] = proxy_country
     session_id = os.getenv("SEDA_ZENROWS_SESSION_ID", "").strip()
     if session_id:
         params["session_id"] = session_id
@@ -170,6 +168,10 @@ def build_params(profile, extra=None):
         params["custom_headers"] = "true"
     if extra:
         params.update({key: value for key, value in extra.items() if value not in (None, "")})
+    if _supports_proxy_country(params):
+        params["proxy_country"] = ZENROWS_PROXY_COUNTRY
+    else:
+        params.pop("proxy_country", None)
     return params
 
 
@@ -348,7 +350,6 @@ def fetch_listing_next_data_html(url, profile=None, timeout=None):
     html_text = _result_to_next_data_html(result.text)
     if html_text:
         result.text = html_text
-        result.success = True
     return result
 
 

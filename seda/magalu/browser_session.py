@@ -149,6 +149,28 @@ def _is_bad_browser_state(url, html):
     return re.search(r"\brobot\b", haystack) is not None
 
 
+def _is_magalu_search_login_redirect(url, browser_text=""):
+    try:
+        parsed = urlparse(str(url or ""))
+        hostname = (parsed.hostname or "").lower()
+    except (TypeError, ValueError):
+        hostname = ""
+        parsed = None
+    location = ""
+    if parsed is not None:
+        location = _ascii_lower(f"{parsed.path}\n{parsed.fragment}")
+    redirected = (
+        hostname == "sacola.magazineluiza.com.br"
+        and "/cliente/login" in location
+    )
+    bag_error = (
+        hostname == "sacola.magazineluiza.com.br"
+        and "ocorreu um erro ao recuperar a sacola"
+        in _ascii_lower(browser_text)
+    )
+    return redirected or bag_error
+
+
 def _restart_page(reason=""):
     close_page(force=True)
     sleep_seconds = _env_float("SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS", 3)
@@ -320,6 +342,7 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
     trace = []
     last_error = ""
     last_html = ""
+    terminal_redirects = 0
     requested_page = _requested_search_page(url)
     expected_sort_type, expected_sort_orientation = _expected_search_sort(url)
 
@@ -388,6 +411,7 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 "fallback_success": state.get("fallback_success", 0),
                 "fallback_empty": state.get("fallback_empty", 0),
                 "fallback_error": state.get("fallback_error", ""),
+                "terminal_redirect": bool(state.get("terminal_redirect")),
             }
             trace.append(trace_item)
             if wait_result.get("success"):
@@ -416,13 +440,41 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
                 f"sort={state.get('selected_sort_type', '')}:{state.get('selected_sort_orientation', '')} "
                 f"source={state.get('source', '')}"
             )
-            retry_left = attempt < attempts or cycle < max_cycles
+            is_terminal_redirect = bool(state.get("terminal_redirect"))
+            if is_terminal_redirect:
+                terminal_redirects += 1
+            terminal_redirect_exhausted = (
+                is_terminal_redirect and terminal_redirects >= 2
+            )
+            retry_left = (
+                not terminal_redirect_exhausted
+                and (attempt < attempts or cycle < max_cycles)
+            )
+            terminal_suffix = (
+                f" terminal_redirects={terminal_redirects}"
+                if is_terminal_redirect
+                else ""
+            )
             _diag_log(
                 "stage=listing "
                 f"page={requested_page} action=next_data status={'retry' if retry_left else 'failed'} "
                 f"attempt={attempt}/{attempts} products={state.get('products', 0)} "
-                f"error={_short_text(last_error, 100)}"
+                f"error={_short_text(last_error, 100)}{terminal_suffix}"
             )
+            if is_terminal_redirect:
+                if terminal_redirect_exhausted:
+                    _stop_loading(page)
+                    _diag_log(
+                        "fetch failed terminal_redirect "
+                        f"count={terminal_redirects} error={_short_text(last_error)}"
+                    )
+                    return {
+                        "success": False,
+                        "text": last_html,
+                        "error": last_error,
+                        "trace": trace,
+                    }
+                continue
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
             if _trace_oom(trace, attempt, page):
@@ -454,9 +506,15 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
     while time.perf_counter() <= deadline:
         snapshot = _read_search_next_data_snapshot(page)
         last_html = snapshot.get("html", "")
+        actual_url = snapshot.get("url", "")
+        if not actual_url:
+            try:
+                actual_url = str(page.url or "")
+            except Exception:
+                actual_url = ""
         state = _magalu_search_payload_state(
             expected_url,
-            snapshot.get("url", ""),
+            actual_url,
             last_html,
             browser_text=snapshot.get("browser_text", ""),
         )
@@ -497,7 +555,11 @@ def _wait_for_magalu_search_payload(page, expected_url, timeout_seconds, poll_se
             )
             return {"success": True, "html": last_html, "state": state, "error": ""}
         last_error = state.get("error") or snapshot.get("error") or last_error
-        if state.get("blocked") or state.get("too_large"):
+        if (
+            state.get("blocked")
+            or state.get("too_large")
+            or state.get("terminal_redirect")
+        ):
             _diag_log(f"wait break error={_short_text(last_error)}")
             break
         time.sleep(poll_seconds)
@@ -663,7 +725,12 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
         "selected_sort_orientation": "",
         "blocked": False,
         "too_large": False,
+        "terminal_redirect": False,
     }
+    if _is_magalu_search_login_redirect(actual_url, browser_text):
+        state["terminal_redirect"] = True
+        state["error"] = "browser_html_search_login_redirect"
+        return state
     data = extract_next_data(html)
     if not data:
         if _is_bad_browser_state(actual_url, browser_text):
@@ -721,7 +788,12 @@ def _magalu_search_payload_state(expected_url, actual_url, html, browser_text=""
 
 
 def _trigger_search_navigation(page, url, refresh=False):
-    if refresh:
+    current_url = ""
+    try:
+        current_url = str(page.url or "")
+    except Exception:
+        pass
+    if refresh and _same_magalu_search_request(current_url, url):
         try:
             page.run_cdp("Page.reload", ignoreCache=True)
             return "cdp_reload", ""
@@ -1384,6 +1456,15 @@ def _same_page_path(left, right):
     return (
         left_parsed.netloc.lower() == right_parsed.netloc.lower()
         and left_parsed.path.rstrip("/") == right_parsed.path.rstrip("/")
+    )
+
+
+def _same_magalu_search_request(left, right):
+    if not _same_page_path(left, right):
+        return False
+    return (
+        _requested_search_page(left) == _requested_search_page(right)
+        and _expected_search_sort(left) == _expected_search_sort(right)
     )
 
 
