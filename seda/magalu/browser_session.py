@@ -17,6 +17,13 @@ from .graphql_contract import (
 _PAGE = None
 _PAGE_CREATED_AT = 0.0
 _PAGE_USE_COUNT = 0
+_SEARCH_BROWSER_SKIP_REASON = ""
+
+
+def _reset_search_browser_circuit():
+    """Reset process-local listing recovery state (primarily for tests)."""
+    global _SEARCH_BROWSER_SKIP_REASON
+    _SEARCH_BROWSER_SKIP_REASON = ""
 
 
 def _diag_enabled():
@@ -283,6 +290,27 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
     search_recycle_attempts = _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1)
     should_validate_search = validate_search_payload and _is_magalu_search_url(url)
     if should_validate_search:
+        if _SEARCH_BROWSER_SKIP_REASON:
+            requested_page = _requested_search_page(url)
+            error = "browser_html_search_login_redirect_circuit_open"
+            _diag_log(
+                "stage=listing "
+                f"page={requested_page} action=browser status=skipped "
+                f"reason={_SEARCH_BROWSER_SKIP_REASON}"
+            )
+            return {
+                "success": False,
+                "text": "",
+                "error": error,
+                "trace": [
+                    {
+                        "method": "browser_skip",
+                        "error": error,
+                        "reason": _SEARCH_BROWSER_SKIP_REASON,
+                        "circuit_open": True,
+                    }
+                ],
+            }
         return _fetch_search_page_html(url, wait_seconds=wait_seconds, attempts=attempts, recycle_attempts=search_recycle_attempts)
 
     wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_BROWSER_WAIT_SECONDS", 5)
@@ -332,6 +360,7 @@ def fetch_page_html(url, wait_seconds=None, attempts=None, validate_search_paylo
 
 
 def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attempts=None):
+    global _SEARCH_BROWSER_SKIP_REASON
     wait_seconds = float(wait_seconds) if wait_seconds is not None else _env_float("SEDA_MAGALU_SEARCH_BROWSER_WAIT_SECONDS", 0.25)
     attempts = max(1, int(attempts) if attempts is not None else _env_int("SEDA_MAGALU_SEARCH_BROWSER_HTML_ATTEMPTS", 3))
     recycle_attempts = max(0, int(recycle_attempts) if recycle_attempts is not None else _env_int("SEDA_MAGALU_BROWSER_SEARCH_RECYCLE_ATTEMPTS", 1))
@@ -464,6 +493,7 @@ def _fetch_search_page_html(url, wait_seconds=None, attempts=None, recycle_attem
             if is_terminal_redirect:
                 if terminal_redirect_exhausted:
                     _stop_loading(page)
+                    _SEARCH_BROWSER_SKIP_REASON = "browser_html_search_login_redirect"
                     _diag_log(
                         "fetch failed terminal_redirect "
                         f"count={terminal_redirects} error={_short_text(last_error)}"

@@ -310,6 +310,26 @@ def _request_target(
                 headers=headers,
                 timeout=timeout,
             )
+    except (requests.exceptions.Timeout, TimeoutError):
+        # Normalize timeout subclasses before inheritance information is lost.
+        # Never persist the exception text: prepared URLs may contain the key.
+        return ZenRowsResult(
+            False,
+            url,
+            profile,
+            error="request_error:Timeout",
+            params=public_params,
+            estimated_multiplier=multiplier,
+        )
+    except requests.exceptions.ConnectionError:
+        return ZenRowsResult(
+            False,
+            url,
+            profile,
+            error="request_error:ConnectionError",
+            params=public_params,
+            estimated_multiplier=multiplier,
+        )
     except Exception as exc:
         # requests exceptions may include the full prepared ZenRows URL. That URL
         # contains the API key in its query string, so never persist str(exc).

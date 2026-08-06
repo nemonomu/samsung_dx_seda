@@ -5,13 +5,14 @@ from unittest.mock import Mock, call, patch, sentinel
 
 from seda import transport
 from seda.common.orchestrator import _magalu_listing_env
-from seda.magalu import zenrows_client
+from seda.magalu import browser_session, zenrows_client
 
 
 SEARCH_URL = (
     "https://www.magazineluiza.com.br/busca/tv/"
     "?page=1&sortType=score&sortOrientation=desc"
 )
+SEARCH_URL_PAGE_2 = SEARCH_URL.replace("page=1", "page=2")
 
 
 def _listing_html(page=1, sort_type="score", orientation="desc"):
@@ -43,6 +44,14 @@ def _listing_html(page=1, sort_type="score", orientation="desc"):
 
 
 class MagaluListingTransportFallbackTests(unittest.TestCase):
+    def setUp(self):
+        transport._reset_magalu_listing_recovery_state()
+        browser_session._reset_search_browser_circuit()
+
+    def tearDown(self):
+        transport._reset_magalu_listing_recovery_state()
+        browser_session._reset_search_browser_circuit()
+
     def test_listing_subprocess_forces_br_country_and_maps_scoped_settings(self):
         with patch.dict(
             os.environ,
@@ -122,6 +131,60 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
 
         self.assertIs(result, zenrows_result)
         zenrows.assert_called_once_with(SEARCH_URL, 1)
+
+    def test_browser_circuit_skip_continues_to_zenrows_fallback(self):
+        browser_session._SEARCH_BROWSER_SKIP_REASON = (
+            "browser_html_search_login_redirect"
+        )
+        zenrows_result = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "SEDA_ALLOW_ZENROWS": "1",
+                "SEDA_RETRY_SLEEP_SECONDS": "0",
+            },
+        ), patch.object(
+            transport,
+            "_fetch_zenrows",
+            return_value=zenrows_result,
+        ) as zenrows:
+            result = transport.fetch_url(
+                SEARCH_URL,
+                mode="magalu_browser_zenrows",
+                timeout=1,
+            )
+
+        self.assertIs(result, zenrows_result)
+        self.assertEqual(
+            result.attempts[0]["inner_attempts"][0]["method"],
+            "browser_skip",
+        )
+        zenrows.assert_called_once_with(SEARCH_URL, 1)
+
+    def test_browser_only_mode_preserves_circuit_failure(self):
+        browser_session._SEARCH_BROWSER_SKIP_REASON = (
+            "browser_html_search_login_redirect"
+        )
+        result = transport.fetch_url(
+            SEARCH_URL,
+            mode="browser",
+            timeout=1,
+        )
+
+        self.assertFalse(result.text)
+        self.assertIn(
+            "browser_html_search_login_redirect_circuit_open",
+            result.error,
+        )
+        self.assertEqual(
+            result.attempts[0]["inner_attempts"][0]["method"],
+            "browser_skip",
+        )
 
     def test_listing_semantic_validator_accepts_valid_payload(self):
         self.assertEqual(
@@ -204,6 +267,317 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
                 call(SEARCH_URL, 45, "premium_html", 1, 2),
                 call(SEARCH_URL, 45, "listing_next_data_js_wait", 2, 2),
             ],
+        )
+
+    def test_semantic_invalid_10x_is_skipped_on_later_listing_page(self):
+        invalid = transport.FetchResult(
+            url=SEARCH_URL,
+            text="<html>not a listing</html>" + ("x" * 600),
+            status_code=200,
+            method="zenrows",
+        )
+        first_valid = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        second_valid = transport.FetchResult(
+            url=SEARCH_URL_PAGE_2,
+            text=_listing_html(page=2),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[invalid, first_valid, second_valid],
+        ) as fetch:
+            first = transport._fetch_zenrows(SEARCH_URL, 45)
+            second = transport._fetch_zenrows(SEARCH_URL_PAGE_2, 45)
+
+        self.assertIs(first, first_valid)
+        self.assertIs(second, second_valid)
+        self.assertEqual(
+            fetch.call_args_list,
+            [
+                call(SEARCH_URL, 45, "premium_html", 1, 2),
+                call(SEARCH_URL, 45, "listing_next_data_js_wait", 2, 2),
+                call(SEARCH_URL_PAGE_2, 45, "listing_next_data_js_wait", 1, 1),
+            ],
+        )
+
+    def test_25x_connection_error_retries_same_profile_once(self):
+        invalid = transport.FetchResult(
+            url=SEARCH_URL,
+            text="<html>not a listing</html>" + ("x" * 600),
+            status_code=200,
+            method="zenrows",
+        )
+        connection_error = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:ConnectionError",
+        )
+        valid = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[invalid, connection_error, valid],
+        ) as fetch:
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertIs(result, valid)
+        self.assertEqual(
+            fetch.call_args_list,
+            [
+                call(SEARCH_URL, 45, "premium_html", 1, 2),
+                call(SEARCH_URL, 45, "listing_next_data_js_wait", 2, 2),
+                call(SEARCH_URL, 45, "listing_next_data_js_wait", 2, 2),
+            ],
+        )
+
+    def test_25x_timeout_retry_is_capped_at_one_extra_attempt(self):
+        invalid = transport.FetchResult(
+            url=SEARCH_URL,
+            text="<html>not a listing</html>" + ("x" * 600),
+            status_code=200,
+            method="zenrows",
+        )
+        first_timeout = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:Timeout",
+        )
+        second_timeout = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:Timeout",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[invalid, first_timeout, second_timeout],
+        ) as fetch:
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertIs(result, second_timeout)
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_25x_remains_terminal_when_stale_extra_profiles_are_configured(self):
+        invalid = transport.FetchResult(
+            url=SEARCH_URL,
+            text="<html>not a listing</html>" + ("x" * 600),
+            status_code=200,
+            method="zenrows",
+        )
+        first_timeout = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:Timeout",
+        )
+        second_timeout = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:Timeout",
+        )
+        unused = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait,listing_next_data_js"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[invalid, first_timeout, second_timeout, unused],
+        ) as fetch:
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertIs(result, second_timeout)
+        self.assertEqual(
+            [item.args[2] for item in fetch.call_args_list],
+            [
+                "premium_html",
+                "listing_next_data_js_wait",
+                "listing_next_data_js_wait",
+            ],
+        )
+
+    def test_25x_nontransient_failure_does_not_use_stale_extra_profile(self):
+        invalid = transport.FetchResult(
+            url=SEARCH_URL,
+            text="<html>not a listing</html>" + ("x" * 600),
+            status_code=200,
+            method="zenrows",
+        )
+        http_error = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            status_code=502,
+            method="zenrows",
+            error="http_502",
+        )
+        unused = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait,listing_next_data_js"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[invalid, http_error, unused],
+        ) as fetch:
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertIs(result, http_error)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_25x_nontransient_failures_do_not_retry(self):
+        cases = (
+            transport.FetchResult(
+                url=SEARCH_URL,
+                text="<html>invalid</html>" + ("x" * 600),
+                status_code=200,
+                method="zenrows",
+            ),
+            transport.FetchResult(
+                url=SEARCH_URL,
+                text="",
+                status_code=502,
+                method="zenrows",
+                error="http_502",
+            ),
+            transport.FetchResult(
+                url=SEARCH_URL,
+                text="blocked",
+                status_code=403,
+                method="zenrows",
+                error="http_403",
+            ),
+            transport.FetchResult(
+                url=SEARCH_URL,
+                text="",
+                method="zenrows",
+                error="request_error:RuntimeError",
+            ),
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        for failure in cases:
+            with self.subTest(error=failure.error or "semantic"):
+                transport._reset_magalu_listing_recovery_state()
+                invalid = transport.FetchResult(
+                    url=SEARCH_URL,
+                    text="<html>not a listing</html>" + ("x" * 600),
+                    status_code=200,
+                    method="zenrows",
+                )
+                with patch.dict(os.environ, env), patch.object(
+                    transport,
+                    "_fetch_zenrows_once",
+                    side_effect=[invalid, failure],
+                ) as fetch:
+                    result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+                self.assertIs(result, failure)
+                self.assertEqual(fetch.call_count, 2)
+
+    def test_10x_connection_error_does_not_open_semantic_skip_circuit(self):
+        connection_error = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="zenrows",
+            error="request_error:ConnectionError",
+        )
+        first_valid = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        second_valid = transport.FetchResult(
+            url=SEARCH_URL_PAGE_2,
+            text=_listing_html(page=2),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[connection_error, first_valid, second_valid],
+        ) as fetch:
+            transport._fetch_zenrows(SEARCH_URL, 45)
+            transport._fetch_zenrows(SEARCH_URL_PAGE_2, 45)
+
+        self.assertEqual(
+            [item.args[2] for item in fetch.call_args_list],
+            ["premium_html", "listing_next_data_js_wait", "premium_html"],
         )
 
     def test_all_invalid_profiles_return_error_even_with_long_html(self):
@@ -290,6 +664,67 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
         self.assertEqual(second_kwargs["params"]["proxy_country"], "br")
         self.assertNotIn("js_render", first_kwargs["params"])
         self.assertEqual(second_kwargs["params"]["js_render"], "true")
+        self.assertEqual(result.text, _listing_html())
+
+    def test_transient_retry_records_every_real_http_attempt(self):
+        first_response = Mock(
+            ok=True,
+            status_code=200,
+            text="<html>not a listing</html>" + ("x" * 600),
+            headers={},
+        )
+        final_response = Mock(
+            ok=True,
+            status_code=200,
+            text=_listing_html(),
+            headers={},
+        )
+        env = {
+            "SEDA_ALLOW_ZENROWS": "1",
+            "SEDA_ZENROWS_DRY_RUN": "0",
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch(
+            "seda.magalu.zenrows_client.api_key",
+            return_value=sentinel.api_key,
+        ), patch(
+            "seda.magalu.zenrows_client.requests.get",
+            side_effect=[
+                first_response,
+                zenrows_client.requests.exceptions.ConnectionError(
+                    "connection failed"
+                ),
+                final_response,
+            ],
+        ) as request_get, patch(
+            "seda.zenrows_usage.record_http_request_attempt",
+            return_value=True,
+        ) as record_usage, patch(
+            "seda.zenrows_usage.usage_required",
+            return_value=True,
+        ):
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertEqual(
+            record_usage.call_args_list,
+            [
+                call("GET", "premium_html", "10x"),
+                call("GET", "listing_next_data_js_wait", "25x"),
+                call("GET", "listing_next_data_js_wait", "25x"),
+            ],
+        )
+        self.assertEqual(request_get.call_count, 3)
+        for request_call in request_get.call_args_list:
+            self.assertEqual(request_call.kwargs["timeout"], 45)
+            self.assertEqual(
+                request_call.kwargs["params"]["proxy_country"],
+                "br",
+            )
         self.assertEqual(result.text, _listing_html())
 
     def test_non_listing_urls_are_not_subject_to_listing_validator(self):

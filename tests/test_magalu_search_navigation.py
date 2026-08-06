@@ -92,6 +92,12 @@ def _valid_search_html():
 
 
 class MagaluSearchNavigationTests(unittest.TestCase):
+    def setUp(self):
+        browser_session._reset_search_browser_circuit()
+
+    def tearDown(self):
+        browser_session._reset_search_browser_circuit()
+
     def test_login_redirect_detector_is_narrow(self):
         self.assertTrue(browser_session._is_magalu_search_login_redirect(LOGIN_URL))
         self.assertFalse(browser_session._is_magalu_search_login_redirect(SEARCH_URL))
@@ -195,6 +201,41 @@ class MagaluSearchNavigationTests(unittest.TestCase):
             ],
         )
         restart.assert_not_called()
+        self.assertEqual(
+            browser_session._SEARCH_BROWSER_SKIP_REASON,
+            "browser_html_search_login_redirect",
+        )
+
+    def test_persistent_login_redirect_skips_later_listing_browser_fetch(self):
+        page = _fake_page(LOGIN_URL)
+        with patch(
+            "seda.magalu.browser_session._page_for_use",
+            return_value=page,
+        ) as page_for_use, patch(
+            "seda.magalu.browser_session._read_search_next_data_snapshot",
+            return_value=_login_snapshot(),
+        ):
+            first = browser_session._fetch_search_page_html(
+                SEARCH_URL,
+                wait_seconds=0,
+                attempts=3,
+                recycle_attempts=1,
+            )
+            calls_after_first = page_for_use.call_count
+            second = browser_session.fetch_page_html(
+                SEARCH_URL.replace("page=1", "page=2"),
+                wait_seconds=0,
+                attempts=3,
+            )
+
+        self.assertFalse(first["success"])
+        self.assertFalse(second["success"])
+        self.assertEqual(
+            second["error"],
+            "browser_html_search_login_redirect_circuit_open",
+        )
+        self.assertEqual(second["trace"][0]["method"], "browser_skip")
+        self.assertEqual(page_for_use.call_count, calls_after_first)
 
     def test_login_redirect_original_url_retry_can_recover(self):
         page = _fake_page(LOGIN_URL)
@@ -227,6 +268,31 @@ class MagaluSearchNavigationTests(unittest.TestCase):
             ],
         )
         restart.assert_not_called()
+        self.assertEqual(browser_session._SEARCH_BROWSER_SKIP_REASON, "")
+
+    def test_search_circuit_does_not_skip_nonvalidated_fetch(self):
+        browser_session._SEARCH_BROWSER_SKIP_REASON = (
+            "browser_html_search_login_redirect"
+        )
+        page = _fake_page(SEARCH_URL)
+        page.html = "x" * 100001
+        with patch(
+            "seda.magalu.browser_session._page_for_use",
+            return_value=page,
+        ) as page_for_use, patch(
+            "seda.magalu.browser_session._stop_loading"
+        ), patch(
+            "seda.magalu.browser_session.time.sleep"
+        ):
+            result = browser_session.fetch_page_html(
+                SEARCH_URL,
+                wait_seconds=0,
+                attempts=1,
+                validate_search_payload=False,
+            )
+
+        self.assertTrue(result["success"])
+        page_for_use.assert_called_once()
 
     def test_refresh_on_login_navigates_original_search_url(self):
         page = _fake_page(LOGIN_URL)

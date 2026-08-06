@@ -9,6 +9,18 @@ from pathlib import Path
 import requests
 
 
+_MAGALU_LISTING_DISABLED_ZENROWS_PROFILES = set()
+_MAGALU_LISTING_TRANSIENT_REQUEST_ERRORS = {
+    "request_error:ConnectionError",
+    "request_error:Timeout",
+}
+
+
+def _reset_magalu_listing_recovery_state():
+    """Reset process-local listing recovery state (primarily for tests)."""
+    _MAGALU_LISTING_DISABLED_ZENROWS_PROFILES.clear()
+
+
 @dataclass
 class FetchResult:
     url: str
@@ -217,25 +229,83 @@ def _fetch_zenrows(url, timeout):
     else:
         profile_hint = os.getenv("SEDA_ZENROWS_HTML_PROFILE", os.getenv("SEDA_ZENROWS_PROFILE", "auto_html"))
     profiles = _zenrows_attempt_profiles(url, profile_hint)
+    if is_magalu_listing and _MAGALU_LISTING_DISABLED_ZENROWS_PROFILES:
+        active_profiles = [
+            profile
+            for profile in profiles
+            if profile not in _MAGALU_LISTING_DISABLED_ZENROWS_PROFILES
+        ]
+        if active_profiles:
+            skipped_profiles = [
+                profile
+                for profile in profiles
+                if profile in _MAGALU_LISTING_DISABLED_ZENROWS_PROFILES
+            ]
+            profiles = active_profiles
+            print(
+                "[seda] zenrows listing profiles skipped "
+                f"profiles={','.join(skipped_profiles)} reason=semantic_invalid_circuit_open",
+                flush=True,
+            )
     max_attempts = len(profiles)
     last = None
     for attempt, profile in enumerate(profiles, start=1):
         result = _fetch_zenrows_once(url, zenrows_timeout, profile, attempt, max_attempts)
-        blocked_reason = blocked_html_reason(result.text, result.status_code)
-        failure_reason = ""
-        if blocked_reason:
-            failure_reason = f"blocked_html:{blocked_reason}"
-            result.error = result.error or failure_reason
-        elif is_magalu_listing:
-            payload_error = _magalu_listing_payload_error(url, result.text)
-            if payload_error:
-                failure_reason = f"invalid_listing_payload:{payload_error}"
-                result.error = result.error or failure_reason
-            elif result.error:
-                failure_reason = result.error
+        failure_reason, semantic_invalid = _zenrows_failure_reason(url, result)
         if not failure_reason:
             return result
         last = result
+
+        has_later_profile = any(
+            candidate != profile for candidate in profiles[attempt:]
+        )
+        if (
+            is_magalu_listing
+            and profile == "premium_html"
+            and semantic_invalid
+            and has_later_profile
+        ):
+            _MAGALU_LISTING_DISABLED_ZENROWS_PROFILES.add(profile)
+            print(
+                "[seda] zenrows listing profile circuit opened "
+                f"profile={profile} reason={failure_reason}",
+                flush=True,
+            )
+
+        if (
+            is_magalu_listing
+            and profile == "listing_next_data_js_wait"
+        ):
+            if failure_reason in _MAGALU_LISTING_TRANSIENT_REQUEST_ERRORS:
+                sleep_seconds = float(
+                    os.getenv(
+                        "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS",
+                        "2",
+                    )
+                )
+                print(
+                    "[seda] zenrows fetch transient retry "
+                    f"failure_reason={failure_reason} profile={profile} "
+                    f"retry=1/1 sleep={sleep_seconds}",
+                    flush=True,
+                )
+                time.sleep(sleep_seconds)
+                result = _fetch_zenrows_once(
+                    url,
+                    zenrows_timeout,
+                    profile,
+                    attempt,
+                    max_attempts,
+                )
+                failure_reason, _ = _zenrows_failure_reason(url, result)
+                if not failure_reason:
+                    return result
+                last = result
+            # The approved listing ladder ends at this exact 25x profile.
+            # Ignore any stale extra fallback profiles inherited from a parent
+            # process so one page cannot exceed 10x + 25x + one 25x retry.
+            return last
+
         if attempt < max_attempts:
             sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS", "2"))
             print(
@@ -246,6 +316,33 @@ def _fetch_zenrows(url, timeout):
             )
             time.sleep(sleep_seconds)
     return last or FetchResult(url=url, text="", method="zenrows", error="zenrows_not_attempted")
+
+
+def _zenrows_failure_reason(url, result):
+    blocked_reason = blocked_html_reason(result.text, result.status_code)
+    if blocked_reason:
+        failure_reason = f"blocked_html:{blocked_reason}"
+        result.error = result.error or failure_reason
+        return failure_reason, False
+
+    if not _is_magalu_listing_url(url):
+        return "", False
+
+    if result.error:
+        return result.error, False
+
+    if result.status_code and not 200 <= result.status_code < 300:
+        failure_reason = f"http_{result.status_code}"
+        result.error = failure_reason
+        return failure_reason, False
+
+    payload_error = _magalu_listing_payload_error(url, result.text)
+    if payload_error:
+        failure_reason = f"invalid_listing_payload:{payload_error}"
+        result.error = failure_reason
+        return failure_reason, True
+
+    return "", False
 
 
 def _zenrows_attempt_profiles(url, profile_hint):

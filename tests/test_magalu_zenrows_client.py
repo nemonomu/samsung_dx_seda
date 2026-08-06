@@ -32,6 +32,38 @@ class ZenRowsClientTest(unittest.TestCase):
         self.assertEqual(result.error, "request_error:RuntimeError")
         self.assertNotIn("prepared request failed", result.error)
 
+    def test_network_exceptions_are_normalized_for_narrow_retry_policy(self):
+        cases = (
+            (
+                zenrows_client.requests.exceptions.ConnectionError(
+                    "connection failed"
+                ),
+                "request_error:ConnectionError",
+            ),
+            (
+                zenrows_client.requests.exceptions.ReadTimeout(
+                    "request timed out"
+                ),
+                "request_error:Timeout",
+            ),
+        )
+        for exception, expected in cases:
+            with self.subTest(expected=expected), self._enabled_env(), patch(
+                "seda.magalu.zenrows_client.api_key",
+                return_value=sentinel.api_key,
+            ), patch(
+                "seda.magalu.zenrows_client.requests.get",
+                side_effect=exception,
+            ):
+                result = zenrows_client.request_url(
+                    "https://example.com",
+                    profile="basic_html",
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error, expected)
+            self.assertNotIn(str(exception), result.error)
+
     def test_request_json_forces_br_after_environment_and_caller_options(self):
         response = Mock(ok=True, status_code=200, text='{"data":{"item":{"id":"abc"}}}')
         response.headers = {"X-Request-Cost": "0.01"}
