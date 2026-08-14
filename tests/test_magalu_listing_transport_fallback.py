@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, call, patch, sentinel
 
 from seda import transport
-from seda.common.orchestrator import _magalu_listing_env
+from seda.common.orchestrator import _magalu_listing_env, steps_for
 from seda.magalu import browser_session, zenrows_client
 
 
@@ -15,14 +15,27 @@ SEARCH_URL = (
 SEARCH_URL_PAGE_2 = SEARCH_URL.replace("page=1", "page=2")
 
 
-def _listing_html(page=1, sort_type="score", orientation="desc"):
+def _listing_html(
+    page=1,
+    sort_type="score",
+    orientation="desc",
+    term="tv",
+    page_size=60,
+    path="/smart-tv-teste/p/240144500/et/tv4k/",
+):
     payload = {
         "props": {
             "pageProps": {
                 "data": {
                     "search": {
-                        "products": [{"id": "240144500"}],
-                        "pagination": {"page": page, "size": 1},
+                        "products": [
+                            {
+                                "id": "240144500",
+                                "title": "Smart TV Teste 55 4K",
+                                "path": path,
+                            }
+                        ],
+                        "pagination": {"page": page, "size": page_size},
                         "sorts": [
                             {
                                 "selected": True,
@@ -30,6 +43,7 @@ def _listing_html(page=1, sort_type="score", orientation="desc"):
                                 "orientation": orientation,
                             }
                         ],
+                        "term": {"raw": term, "refined": term},
                     }
                 }
             }
@@ -56,7 +70,7 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "SEDA_MAGALU_LISTING_FETCH_MODE": "magalu_browser_zenrows",
+                "SEDA_MAGALU_LISTING_FETCH_MODE": "magalu_listing_graphql_zenrows",
                 "SEDA_MAGALU_LISTING_ALLOW_ZENROWS": "1",
                 "SEDA_MAGALU_LISTING_ZENROWS_DRY_RUN": "0",
                 "SEDA_MAGALU_LISTING_ZENROWS_PROFILE": "premium_html",
@@ -67,7 +81,10 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
         ):
             env = _magalu_listing_env("seda.magalu")
 
-        self.assertEqual(env["SEDA_FETCH_MODE"], "magalu_browser_zenrows")
+        self.assertEqual(
+            env["SEDA_FETCH_MODE"],
+            "magalu_listing_graphql_zenrows",
+        )
         self.assertEqual(env["SEDA_ALLOW_ZENROWS"], "1")
         self.assertEqual(env["SEDA_ZENROWS_LISTING_PROFILE"], "premium_html")
         self.assertEqual(env["SEDA_ZENROWS_TIMEOUT"], "45")
@@ -84,6 +101,130 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
                 transport.fetch_attempts("magalu_browser_zenrows"),
                 ["browser"],
             )
+
+    def test_listing_graphql_mode_is_graphql_then_zenrows(self):
+        with patch.dict(os.environ, {"SEDA_ALLOW_ZENROWS": "1"}):
+            self.assertEqual(
+                transport.fetch_attempts(
+                    "magalu_listing_graphql_zenrows"
+                ),
+                ["graphql", "zenrows"],
+            )
+        with patch.dict(os.environ, {"SEDA_ALLOW_ZENROWS": "0"}):
+            self.assertEqual(
+                transport.fetch_attempts(
+                    "magalu_listing_graphql_zenrows"
+                ),
+                ["graphql"],
+            )
+
+    def test_listing_graphql_success_skips_zenrows(self):
+        graphql_result = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="direct_graphql_search",
+        )
+        with patch.object(
+            transport,
+            "_fetch_graphql",
+            return_value=graphql_result,
+        ) as graphql, patch.object(
+            transport,
+            "_fetch_zenrows",
+        ) as zenrows:
+            result = transport.fetch_url(
+                SEARCH_URL,
+                mode="magalu_listing_graphql_zenrows",
+                timeout=1,
+            )
+
+        self.assertIs(result, graphql_result)
+        graphql.assert_called_once_with(SEARCH_URL, 1)
+        zenrows.assert_not_called()
+
+    def test_listing_graphql_failure_falls_through_to_zenrows(self):
+        graphql_result = transport.FetchResult(
+            url=SEARCH_URL,
+            text="",
+            method="browser_graphql_search",
+            error="browser_graphql_failed",
+            attempts=[{"method": "direct_graphql", "status_code": 403}],
+        )
+        zenrows_result = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows_graphql_search",
+        )
+        with patch.dict(
+            os.environ,
+            {"SEDA_ALLOW_ZENROWS": "1", "SEDA_RETRY_SLEEP_SECONDS": "0"},
+        ), patch.object(
+            transport,
+            "_fetch_graphql",
+            return_value=graphql_result,
+        ) as graphql, patch.object(
+            transport,
+            "_fetch_zenrows",
+            return_value=zenrows_result,
+        ) as zenrows:
+            result = transport.fetch_url(
+                SEARCH_URL,
+                mode="magalu_listing_graphql_zenrows",
+                timeout=1,
+            )
+
+        self.assertIs(result, zenrows_result)
+        graphql.assert_called_once_with(SEARCH_URL, 1)
+        zenrows.assert_called_once_with(SEARCH_URL, 1)
+        self.assertEqual(
+            [item["method"] for item in result.attempts],
+            ["browser_graphql_search", "zenrows_graphql_search"],
+        )
+        self.assertEqual(
+            result.attempts[0]["inner_attempts"][0]["method"],
+            "direct_graphql",
+        )
+
+    def test_listing_graphql_adapter_preserves_search_trace(self):
+        search_trace = [
+            {"method": "direct_graphql", "status_code": 403},
+            {"method": "browser_graphql", "status_code": 0},
+        ]
+        with patch(
+            "seda.magalu.search_api.fetch_search_listing",
+            return_value={
+                "success": False,
+                "text": "",
+                "method": "browser_graphql_search",
+                "error": "browser_graphql_failed",
+                "trace": search_trace,
+            },
+        ):
+            result = transport._fetch_graphql(SEARCH_URL, 1)
+
+        self.assertEqual(result.attempts, search_trace)
+        self.assertIn("browser_graphql_failed", result.error)
+
+    def test_listing_mode_is_scoped_to_main_and_bsr_only(self):
+        with patch.dict(os.environ, {}, clear=True):
+            magalu_steps = steps_for("seda.magalu")
+            casas_steps = steps_for("seda.casas_bahia")
+
+        by_name = {step.name: step for step in magalu_steps}
+        self.assertEqual(
+            by_name["main_list"].env["SEDA_FETCH_MODE"],
+            "magalu_listing_graphql_zenrows",
+        )
+        self.assertEqual(
+            by_name["bsr_list"].env["SEDA_FETCH_MODE"],
+            "magalu_listing_graphql_zenrows",
+        )
+        self.assertIsNone(by_name["detail_enrichment"].env)
+        casas_by_name = {step.name: step for step in casas_steps}
+        self.assertIsNone(casas_by_name["main_list"].env)
+        self.assertIsNone(casas_by_name["bsr_list"].env)
 
     def test_normal_browser_success_does_not_call_zenrows(self):
         browser_result = transport.FetchResult(
@@ -204,12 +345,46 @@ class MagaluListingTransportFallbackTests(unittest.TestCase):
             ),
             "page_mismatch": _listing_html(page=2),
             "sort_mismatch": _listing_html(sort_type="price", orientation="asc"),
+            "term_mismatch": _listing_html(term="geladeira"),
+            "size_mismatch": _listing_html(page_size=20),
+            "path_mismatch": _listing_html(path="/busca/tv/"),
         }
         for name, html in invalid_cases.items():
             with self.subTest(case=name):
                 self.assertTrue(
                     transport._magalu_listing_payload_error(SEARCH_URL, html)
                 )
+
+    def test_wrong_term_10x_response_escalates_to_valid_25x(self):
+        first = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(term="geladeira"),
+            status_code=200,
+            method="zenrows",
+        )
+        second = transport.FetchResult(
+            url=SEARCH_URL,
+            text=_listing_html(),
+            status_code=200,
+            method="zenrows",
+        )
+        env = {
+            "SEDA_ZENROWS_TIMEOUT": "45",
+            "SEDA_ZENROWS_LISTING_PROFILE": "premium_html",
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_PROFILES": (
+                "listing_next_data_js_wait"
+            ),
+            "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            transport,
+            "_fetch_zenrows_once",
+            side_effect=[first, second],
+        ) as fetch:
+            result = transport._fetch_zenrows(SEARCH_URL, 45)
+
+        self.assertIs(result, second)
+        self.assertEqual(fetch.call_count, 2)
 
     def test_valid_10x_response_does_not_escalate_to_25x(self):
         first = transport.FetchResult(

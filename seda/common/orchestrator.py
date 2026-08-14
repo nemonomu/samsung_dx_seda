@@ -82,9 +82,10 @@ def steps_for(package_name):
 def _magalu_listing_env(package_name):
     if not package_name.endswith(".magalu"):
         return None
-    fetch_mode = os.getenv("SEDA_MAGALU_LISTING_FETCH_MODE", "").strip()
-    if not fetch_mode:
-        return None
+    fetch_mode = (
+        os.getenv("SEDA_MAGALU_LISTING_FETCH_MODE", "").strip()
+        or "magalu_listing_graphql_zenrows"
+    )
     return {
         "SEDA_FETCH_MODE": fetch_mode,
         "SEDA_ALLOW_ZENROWS": os.getenv("SEDA_MAGALU_LISTING_ALLOW_ZENROWS", "1"),
@@ -125,6 +126,17 @@ def step_complete(step, *, recover=True):
     }
     if step.name in checks:
         path, label = checks[step.name]
+        if step.name in {"main_list", "bsr_list"}:
+            manifest_root = "bsr" if step.name == "bsr_list" else "main"
+            manifest = _read_json(root / manifest_root / "manifest.json")
+            if manifest.get("retailers") == ["magalu"]:
+                failures = manifest.get("failures")
+                if manifest.get("complete") is False or failures:
+                    return False, f"{label} incomplete listing manifest"
+                if manifest.get("complete") is True:
+                    manifest_rows = int(manifest.get("rows", 0) or 0)
+                    if not path.exists() or csv_count(path) != manifest_rows:
+                        return False, f"{label} row count does not match manifest"
         if step.name == "detail_enrichment":
             try:
                 journal = assert_detail_publish_complete(root, recover=recover)

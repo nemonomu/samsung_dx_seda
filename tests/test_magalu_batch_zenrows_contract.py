@@ -74,11 +74,16 @@ class MagaluBatchZenRowsContractTests(unittest.TestCase):
 
     def test_full_batches_use_isolated_profile_and_bounded_listing_recovery(self):
         required = (
-            "if not defined seda_magalu_listing_fetch_mode set seda_magalu_listing_fetch_mode=magalu_browser_zenrows",
+            "if not defined seda_magalu_listing_fetch_mode set seda_magalu_listing_fetch_mode=magalu_listing_graphql_zenrows",
             "if not defined seda_magalu_listing_allow_zenrows set seda_magalu_listing_allow_zenrows=1",
+            "if not defined seda_magalu_listing_zenrows_graphql_first set seda_magalu_listing_zenrows_graphql_first=1",
             "if not defined seda_magalu_listing_zenrows_profile set seda_magalu_listing_zenrows_profile=premium_html",
             "if not defined seda_magalu_listing_zenrows_fallback_profiles set seda_magalu_listing_zenrows_fallback_profiles=listing_next_data_js_wait",
             "if not defined seda_magalu_listing_zenrows_timeout set seda_magalu_listing_zenrows_timeout=45",
+            "if not defined seda_magalu_listing_deferred_retry_rounds set seda_magalu_listing_deferred_retry_rounds=1",
+            "if not defined seda_magalu_listing_deferred_retry_sleep_seconds set seda_magalu_listing_deferred_retry_sleep_seconds=2",
+            "if not defined seda_magalu_search_browser_attempts set seda_magalu_search_browser_attempts=1",
+            "if not defined seda_magalu_search_retries set seda_magalu_search_retries=0",
             "if not defined seda_magalu_browser_profile set \"seda_magalu_browser_profile=c:/tmp/seda_magalu_profiles/",
             "%seda_run_timestamp%",
         )

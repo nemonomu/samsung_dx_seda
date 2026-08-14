@@ -488,7 +488,22 @@ class MagaluHandoffContractTests(unittest.TestCase):
             "data": {
                 "data": {
                     "search": {
-                        "products": [{"id": "one"}],
+                        "products": [
+                            {
+                                "id": "one",
+                                "title": "Smart TV Teste",
+                                "path": "/smart-tv-teste/p/one/et/tv4k/",
+                            }
+                        ],
+                        "pagination": {"page": 1, "size": 20},
+                        "sorts": [
+                            {
+                                "selected": True,
+                                "type": "score",
+                                "orientation": "desc",
+                            }
+                        ],
+                        "term": {"raw": "tv", "refined": "tv"},
                     }
                 }
             },

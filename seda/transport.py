@@ -92,6 +92,11 @@ def fetch_attempts(mode):
         attempts = ["browser", "graphql", "uc", "requests", "zenrows"]
     elif mode == "magalu_browser_zenrows":
         attempts = ["browser", "zenrows"]
+    elif mode == "magalu_listing_graphql_zenrows":
+        # Listing-only contract: ``graphql`` already performs native direct
+        # GraphQL and then browser-context GraphQL. ZenRows remains the final
+        # structured/HTML recovery ladder for that page.
+        attempts = ["graphql", "zenrows"]
     elif mode in {"auto", "uc_first"} or mode.endswith("_uc_first"):
         attempts = ["uc", "graphql", "requests", "zenrows"]
     elif mode == "magalu_graphql_first":
@@ -188,12 +193,19 @@ def _fetch_graphql(url, timeout):
         except Exception as exc:
             return FetchResult(url=url, text="", method="graphql", error=f"{type(exc).__name__}: {exc}")
         if result.get("text"):
-            return FetchResult(url=url, text=result["text"], status_code=200, method=result.get("method") or "graphql")
+            return FetchResult(
+                url=url,
+                text=result["text"],
+                status_code=200,
+                method=result.get("method") or "graphql",
+                attempts=result.get("trace") or [],
+            )
         return FetchResult(
             url=url,
             text="",
             method=result.get("method") or "graphql",
             error=f"{result.get('error', 'graphql_failed')}:{result.get('trace', [])}",
+            attempts=result.get("trace") or [],
         )
     if "casasbahia.com.br" in url:
         try:
@@ -247,17 +259,74 @@ def _fetch_zenrows(url, timeout):
                 f"profiles={','.join(skipped_profiles)} reason=semantic_invalid_circuit_open",
                 flush=True,
             )
-    max_attempts = len(profiles)
     last = None
-    for attempt, profile in enumerate(profiles, start=1):
+    attempt_trace = []
+    graphql_first = (
+        is_magalu_listing
+        and os.getenv(
+            "SEDA_MAGALU_LISTING_ZENROWS_GRAPHQL_FIRST",
+            "0",
+        ).lower()
+        in {"1", "true", "yes", "y"}
+    )
+    attempt_offset = 0
+    max_attempts = len(profiles) + int(graphql_first)
+    if graphql_first:
+        graphql_profile = _magalu_listing_graphql_profile()
+        result = _fetch_zenrows_graphql_once(
+            url,
+            zenrows_timeout,
+            1,
+            max_attempts,
+        )
+        failure_reason, _ = _zenrows_failure_reason(url, result)
+        _extend_zenrows_attempt_trace(
+            attempt_trace,
+            result,
+            profile=graphql_profile,
+            attempt=1,
+            max_attempts=max_attempts,
+            failure_reason=failure_reason,
+        )
+        if not failure_reason:
+            result.attempts = attempt_trace
+            return result
+        last = result
+        attempt_offset = 1
+        if profiles:
+            sleep_seconds = float(
+                os.getenv(
+                    "SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS",
+                    "2",
+                )
+            )
+            print(
+                "[seda] zenrows graphql fallback "
+                f"failure_reason={failure_reason} "
+                f"next_profile={profiles[0]} sleep={sleep_seconds}",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+
+    for profile_index, profile in enumerate(profiles, start=1):
+        attempt = profile_index + attempt_offset
         result = _fetch_zenrows_once(url, zenrows_timeout, profile, attempt, max_attempts)
         failure_reason, semantic_invalid = _zenrows_failure_reason(url, result)
+        _extend_zenrows_attempt_trace(
+            attempt_trace,
+            result,
+            profile=profile,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            failure_reason=failure_reason,
+        )
         if not failure_reason:
+            result.attempts = attempt_trace
             return result
         last = result
 
         has_later_profile = any(
-            candidate != profile for candidate in profiles[attempt:]
+            candidate != profile for candidate in profiles[profile_index:]
         )
         if (
             is_magalu_listing
@@ -298,24 +367,147 @@ def _fetch_zenrows(url, timeout):
                     max_attempts,
                 )
                 failure_reason, _ = _zenrows_failure_reason(url, result)
+                _extend_zenrows_attempt_trace(
+                    attempt_trace,
+                    result,
+                    profile=profile,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    failure_reason=failure_reason,
+                )
                 if not failure_reason:
+                    result.attempts = attempt_trace
                     return result
                 last = result
-            # The approved listing ladder ends at this exact 25x profile.
-            # Ignore any stale extra fallback profiles inherited from a parent
-            # process so one page cannot exceed 10x + 25x + one 25x retry.
+            # The HTML listing ladder ends at this exact 25x profile. Ignore
+            # stale extra profiles inherited from a parent process.
+            last.attempts = attempt_trace
             return last
 
-        if attempt < max_attempts:
+        if profile_index < len(profiles):
             sleep_seconds = float(os.getenv("SEDA_MAGALU_LISTING_ZENROWS_FALLBACK_SLEEP_SECONDS", "2"))
             print(
                 f"[seda] zenrows fetch fallback failure_reason={failure_reason} "
-                f"attempt={attempt}/{max_attempts} profile={profile} next_profile={profiles[attempt]} "
+                f"attempt={attempt}/{max_attempts} profile={profile} "
+                f"next_profile={profiles[profile_index]} "
                 f"sleep={sleep_seconds}",
                 flush=True,
             )
             time.sleep(sleep_seconds)
-    return last or FetchResult(url=url, text="", method="zenrows", error="zenrows_not_attempted")
+    if last is not None:
+        last.attempts = attempt_trace
+        return last
+    return FetchResult(
+        url=url,
+        text="",
+        method="zenrows",
+        error="zenrows_not_attempted",
+        attempts=attempt_trace,
+    )
+
+
+def _fetch_zenrows_graphql_once(
+    url,
+    zenrows_timeout,
+    attempt=1,
+    max_attempts=1,
+):
+    profile = _magalu_listing_graphql_profile()
+    print(
+        "[seda] zenrows graphql fetch start "
+        f"attempt={attempt}/{max_attempts} profile={profile}",
+        flush=True,
+    )
+    try:
+        from .magalu.search_api import fetch_search_listing_via_zenrows
+
+        result = fetch_search_listing_via_zenrows(
+            url,
+            timeout=zenrows_timeout,
+            profile=profile,
+        )
+    except Exception as exc:
+        return FetchResult(
+            url=url,
+            text="",
+            method="zenrows_graphql_search",
+            error=f"zenrows_graphql_error:{type(exc).__name__}",
+        )
+    metadata = result.get("zenrows") if isinstance(result, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    trace = result.get("trace") if isinstance(result, dict) else []
+    trace = trace if isinstance(trace, list) else []
+    status_code = int(metadata.get("status_code") or 0)
+    text = result.get("text", "") if isinstance(result, dict) else ""
+    error = result.get("error", "") if isinstance(result, dict) else ""
+    success = bool(result.get("success")) if isinstance(result, dict) else False
+    print(
+        "[seda] zenrows graphql fetch done "
+        f"status={status_code} length={len(text or '')} "
+        f"method=zenrows_graphql_search profile={metadata.get('profile', profile)} "
+        f"cost={metadata.get('estimated_multiplier', '') or 'unknown'} "
+        f"error={error or ''}",
+        flush=True,
+    )
+    return FetchResult(
+        url=url,
+        text=text if success else "",
+        status_code=status_code,
+        method="zenrows_graphql_search",
+        error="" if success else (error or "zenrows_graphql_failed"),
+        attempts=trace,
+    )
+
+
+def _magalu_listing_graphql_profile():
+    return (
+        os.getenv("SEDA_MAGALU_LISTING_ZENROWS_GRAPHQL_PROFILE", "").strip()
+        or "premium_html"
+    )
+
+
+def _extend_zenrows_attempt_trace(
+    history,
+    result,
+    *,
+    profile,
+    attempt,
+    max_attempts,
+    failure_reason="",
+):
+    nested = result.attempts if isinstance(result.attempts, list) else []
+    appended = False
+    for raw in nested:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        item.setdefault("method", result.method or "zenrows")
+        item.setdefault("profile", profile)
+        item.setdefault("status_code", result.status_code)
+        item.setdefault("length", len(result.text or ""))
+        item["attempt"] = attempt
+        item["max_attempts"] = max_attempts
+        item["request_number"] = len(history) + 1
+        if failure_reason:
+            item["error"] = failure_reason
+        else:
+            item.setdefault("error", result.error or "")
+        history.append(item)
+        appended = True
+    if appended:
+        return
+    history.append(
+        {
+            "method": result.method or "zenrows",
+            "profile": profile,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "request_number": len(history) + 1,
+            "status_code": result.status_code,
+            "length": len(result.text or ""),
+            "error": failure_reason or result.error or "",
+        }
+    )
 
 
 def _zenrows_failure_reason(url, result):
@@ -414,19 +606,24 @@ def _magalu_listing_payload_error(url, text):
     if not str(text or "").strip():
         return "empty_html"
     try:
-        from .magalu.browser_session import _magalu_search_payload_state
+        from .magalu.search_api import (
+            MAGALU_LISTING_PAGE_SIZE,
+            _strict_search_payload_error,
+        )
+        from .parsers import extract_next_data
 
-        state = _magalu_search_payload_state(
+        data = extract_next_data(text)
+        props = data.get("props") if isinstance(data, dict) else {}
+        page_props = props.get("pageProps") if isinstance(props, dict) else {}
+        page_data = page_props.get("data") if isinstance(page_props, dict) else {}
+        search = page_data.get("search") if isinstance(page_data, dict) else None
+        return _strict_search_payload_error(
             url,
-            url,
-            text,
-            browser_text="",
+            search,
+            MAGALU_LISTING_PAGE_SIZE,
         )
     except Exception as exc:
         return f"validator_error:{type(exc).__name__}"
-    if state.get("valid"):
-        return ""
-    return str(state.get("error") or "invalid_search_payload")
 
 
 def _fetch_uc(url, timeout):

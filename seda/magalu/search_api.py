@@ -1,8 +1,9 @@
 import json
 import os
+import re
 import time
 import html
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import requests
 
@@ -164,6 +165,121 @@ query searchQuery(
 """
 
 
+MAGALU_PRODUCT_PATH_RE = re.compile(r"/p/[^/?#]+(?:/|$)", re.I)
+MAGALU_LISTING_PAGE_SIZE = 60
+
+
+def fetch_search_listing_via_zenrows(url, timeout=None, profile=None):
+    """Fetch one strict Magalu search page through the centralized ZenRows client."""
+    parsed = urlparse(url)
+    if "magazineluiza.com.br" not in parsed.netloc or "/busca/" not in parsed.path:
+        return {
+            "success": False,
+            "error": "not_magalu_search_url",
+            "text": "",
+            "trace": [],
+        }
+
+    from .zenrows_client import request_json
+
+    timeout = int(timeout or os.getenv("SEDA_ZENROWS_TIMEOUT", "45"))
+    # This fallback can be mixed with browser/HTML pages in one run. Keep the
+    # same canonical page boundary so a stale external page-size override
+    # cannot create gaps or duplicates when the transport changes by page.
+    page_size = MAGALU_LISTING_PAGE_SIZE
+    profile = str(
+        profile
+        or os.getenv("SEDA_ZENROWS_LISTING_GRAPHQL_PROFILE")
+        or "premium_html"
+    ).strip() or "premium_html"
+    payload = _payload(url, page_size)
+    result = request_json(
+        f"{GRAPHQL_URL}?operationName=searchQuery",
+        payload,
+        profile=profile,
+        timeout=timeout,
+        extra={
+            "custom_headers": "true",
+            "original_status": "true",
+            "proxy_country": "br",
+        },
+        extra_headers=_headers(url),
+    )
+    metadata = {
+        "profile": result.profile,
+        "estimated_multiplier": result.estimated_multiplier,
+        "request_cost": (result.headers or {}).get("X-Request-Cost", ""),
+        "status_code": result.status_code,
+    }
+    trace_item = {
+        "method": "zenrows_graphql_search",
+        "operation": "searchQuery",
+        "profile": result.profile,
+        "estimated_multiplier": result.estimated_multiplier,
+        "request_cost": metadata["request_cost"],
+        "status_code": result.status_code,
+        "length": len(result.text or ""),
+        "products": 0,
+        "error": result.error,
+    }
+    if result.error or not result.success:
+        return {
+            "success": False,
+            "error": result.error or "empty_response",
+            "text": "",
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+
+    try:
+        parsed_response = json.loads(result.text or "")
+    except ValueError:
+        trace_item["error"] = "invalid_json"
+        return {
+            "success": False,
+            "error": "invalid_json",
+            "text": "",
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+
+    semantic_error = graphql_envelope_error(parsed_response)
+    if semantic_error:
+        trace_item["error"] = semantic_error
+        return {
+            "success": False,
+            "error": semantic_error,
+            "text": "",
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+
+    search = parsed_response["data"].get("search")
+    payload_error = _strict_search_payload_error(url, search, page_size)
+    if payload_error:
+        trace_item["error"] = payload_error
+        return {
+            "success": False,
+            "error": payload_error,
+            "text": "",
+            "trace": [trace_item],
+            "zenrows": metadata,
+        }
+
+    products = search["products"]
+    trace_item["products"] = len(products)
+    return {
+        "success": True,
+        "error": "",
+        "text": _as_next_data_html(search, url),
+        "products": len(products),
+        "page_size": page_size,
+        "trace": [trace_item],
+        "method": "zenrows_graphql_search",
+        "zenrows": metadata,
+    }
+
+
 def fetch_search_listing(url, timeout=None):
     parsed = urlparse(url)
     if "magazineluiza.com.br" not in parsed.netloc or "/busca/" not in parsed.path:
@@ -174,7 +290,10 @@ def fetch_search_listing(url, timeout=None):
     timeout = min(requested_timeout, timeout_cap) if timeout_cap > 0 else requested_timeout
     retries = int(os.getenv("SEDA_MAGALU_SEARCH_RETRIES", "2"))
     sleep_seconds = float(os.getenv("SEDA_MAGALU_SEARCH_RETRY_SLEEP_SECONDS", "3.0"))
-    page_sizes = _page_sizes()
+    # Keep every transport on one canonical page boundary. Mixing 20/60-item
+    # responses across direct, browser and ZenRows creates rank gaps or
+    # duplicates when a later transport recovers only selected pages.
+    page_sizes = [MAGALU_LISTING_PAGE_SIZE]
     trace = []
     best_direct_result = None
 
@@ -239,10 +358,15 @@ def fetch_search_listing(url, timeout=None):
                     "trace": trace,
                     "method": "direct_graphql_search",
                 }
-                if _valid_search_payload(url, search):
+                payload_error = _strict_search_payload_error(
+                    url,
+                    search,
+                    page_size,
+                )
+                if not payload_error:
                     return direct_result
                 best_direct_result = direct_result
-                trace_item["error"] = "invalid_direct_pagination"
+                trace_item["error"] = payload_error
                 break
             trace_item["error"] = "empty_products"
 
@@ -256,7 +380,7 @@ def fetch_search_listing(url, timeout=None):
     if best_direct_result:
         return {
             "success": False,
-            "error": "invalid_direct_pagination",
+            "error": "invalid_direct_payload",
             "text": "",
             "trace": trace,
             "products": best_direct_result.get("products", 0),
@@ -347,14 +471,21 @@ def _fetch_search_listing_browser(url, page_sizes, timeout, trace):
             if appended and operation_error and not appended[-1].get("error"):
                 appended[-1]["error"] = operation_error
             if products:
-                return {
-                    "success": True,
-                    "text": _as_next_data_html(search, url),
-                    "products": len(products),
-                    "page_size": page_size,
-                    "trace": trace,
-                    "method": "browser_graphql_search",
-                }
+                payload_error = _strict_search_payload_error(
+                    url,
+                    search,
+                    page_size,
+                )
+                if not payload_error:
+                    return {
+                        "success": True,
+                        "text": _as_next_data_html(search, url),
+                        "products": len(products),
+                        "page_size": page_size,
+                        "trace": trace,
+                        "method": "browser_graphql_search",
+                    }
+                operation_error = operation_error or payload_error
             last_error = (
                 operation_error
                 or (appended[-1].get("error") if appended else "")
@@ -400,6 +531,94 @@ def _valid_search_payload(url, search):
     return payload_page == requested_page
 
 
+def _strict_search_payload_error(url, search, requested_page_size):
+    if not isinstance(search, dict):
+        return "invalid_search_payload"
+    products = search.get("products")
+    if not isinstance(products, list):
+        return "invalid_search_products"
+    if not products:
+        return "empty_products"
+
+    pagination = search.get("pagination")
+    if not isinstance(pagination, dict):
+        return "missing_pagination"
+    requested_page = _env_int_from_value(
+        _first(parse_qs(urlparse(url).query), "page"),
+        1,
+    )
+    payload_page = _env_int_from_value(pagination.get("page"), 0)
+    if payload_page != requested_page:
+        return f"page_mismatch:{payload_page}!={requested_page}"
+    payload_size = _env_int_from_value(pagination.get("size"), 0)
+    if payload_size != requested_page_size:
+        return f"page_size_mismatch:{payload_size}!={requested_page_size}"
+
+    expected_type, expected_orientation = _expected_search_sort(url)
+    selected_sort = _selected_search_sort(search)
+    if not selected_sort:
+        return "selected_sort_missing"
+    selected_type = selected_sort.get("type", "")
+    selected_orientation = selected_sort.get("orientation", "")
+    if (
+        selected_type != expected_type
+        or selected_orientation != expected_orientation
+    ):
+        return (
+            "sort_mismatch:"
+            f"{selected_type or 'missing'}:{selected_orientation or 'missing'}"
+            f"!={expected_type}:{expected_orientation}"
+        )
+
+    term = search.get("term")
+    if not isinstance(term, dict):
+        return "search_term_missing"
+    expected_term = _normalize_search_term(_term_from_path(urlparse(url).path))
+    payload_term = _normalize_search_term(term.get("raw"))
+    if payload_term != expected_term:
+        return f"search_term_mismatch:{payload_term or 'missing'}!={expected_term}"
+
+    max_products = _env_int("SEDA_MAGALU_SEARCH_BROWSER_MAX_PRODUCTS", 120)
+    if max_products > 0 and len(products) > max_products:
+        return f"too_many_products:{len(products)}"
+    for index, product in enumerate(products):
+        if not isinstance(product, dict):
+            return f"invalid_product:{index}:not_object"
+        if not str(product.get("title") or "").strip():
+            return f"invalid_product:{index}:missing_title"
+        path = str(product.get("path") or "").strip()
+        if not path:
+            return f"invalid_product:{index}:missing_path"
+        if not MAGALU_PRODUCT_PATH_RE.search(urlparse(path).path):
+            return f"invalid_product:{index}:invalid_path"
+    return ""
+
+
+def _expected_search_sort(url):
+    query = parse_qs(urlparse(url).query)
+    return (
+        str(_first(query, "sortType") or "score").strip(),
+        str(_first(query, "sortOrientation") or "desc").strip(),
+    )
+
+
+def _selected_search_sort(search):
+    sorts = search.get("sorts") if isinstance(search, dict) else []
+    if not isinstance(sorts, list):
+        return {}
+    for item in sorts:
+        if isinstance(item, dict) and item.get("selected"):
+            return {
+                "type": str(item.get("type") or "").strip(),
+                "orientation": str(item.get("orientation") or "").strip(),
+            }
+    return {}
+
+
+def _normalize_search_term(value):
+    return " ".join(str(value or "").split()).casefold()
+
+
 def _page_sizes():
     first = int(os.getenv("SEDA_MAGALU_SEARCH_PAGE_SIZE", "60"))
     fallback = os.getenv("SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES", "20")
@@ -414,7 +633,7 @@ def _term_from_path(path):
         index = parts.index("busca")
     except ValueError:
         return ""
-    return unquote(parts[index + 1]) if len(parts) > index + 1 else ""
+    return unquote_plus(parts[index + 1]) if len(parts) > index + 1 else ""
 
 
 def _first(query, key):

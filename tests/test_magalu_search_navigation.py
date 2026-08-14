@@ -302,6 +302,23 @@ class MagaluSearchNavigationTests(unittest.TestCase):
         self.assertEqual((method, error), ("cdp_navigate", ""))
         page.run_cdp.assert_called_once_with("Page.navigate", url=SEARCH_URL)
 
+    def test_listing_graphql_session_rejects_sacola_login_context(self):
+        html = "Ocorreu um erro ao recuperar a sacola."
+        self.assertFalse(
+            browser_session._is_usable_magalu_session(
+                LOGIN_URL,
+                html,
+                "search_browser_graphql",
+            )
+        )
+        self.assertTrue(
+            browser_session._is_usable_magalu_session(
+                LOGIN_URL,
+                html,
+                "detail_graphql",
+            )
+        )
+
     def test_refresh_on_same_search_path_preserves_reload(self):
         page = _fake_page(SEARCH_URL)
         method, error = browser_session._trigger_search_navigation(

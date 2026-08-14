@@ -178,6 +178,17 @@ def _is_magalu_search_login_redirect(url, browser_text=""):
     return redirected or bag_error
 
 
+def _is_usable_magalu_session(url, html, reason=""):
+    if not _is_magalu_url(url) or _is_bad_browser_state(url, html):
+        return False
+    # A sacola login page is still under the Magalu domain and used to be
+    # accepted as a healthy warm-up. It is not a valid browser context for a
+    # listing searchQuery, so reject it only for the listing GraphQL path.
+    if str(reason or "").startswith("search_browser_graphql"):
+        return not _is_magalu_search_login_redirect(url, html)
+    return True
+
+
 def _restart_page(reason=""):
     close_page(force=True)
     sleep_seconds = _env_float("SEDA_MAGALU_BROWSER_RESTART_SLEEP_SECONDS", 3)
@@ -259,7 +270,7 @@ def _warmup_page(page, reason, warmup_url=None):
             _stop_loading(last_page)
             time.sleep(warmup_seconds)
             url, html = _page_state(last_page)
-            if not _is_bad_browser_state(url, html):
+            if _is_usable_magalu_session(url, html, reason):
                 return last_page
             _restart_page(f"{reason}_bad_state")
         except Exception:
@@ -274,12 +285,12 @@ def ensure_magalu_session(reason="ensure_magalu_session"):
     _stop_loading(page)
     url, html = _page_state(page)
     trace = [{"method": "browser_session_check", "url": url, "length": len(html)}]
-    if _is_magalu_url(url) and not _is_bad_browser_state(url, html):
+    if _is_usable_magalu_session(url, html, reason):
         trace[-1]["reused"] = True
         return {"success": True, "trace": trace}
     page = _warmup_page(page, reason)
     url, html = _page_state(page)
-    ok = _is_magalu_url(url) and not _is_bad_browser_state(url, html)
+    ok = _is_usable_magalu_session(url, html, reason)
     trace.append({"method": "browser_session_warmup", "url": url, "length": len(html), "success": ok})
     if not ok:
         _restart_page(f"{reason}_warmup_bad_state")
