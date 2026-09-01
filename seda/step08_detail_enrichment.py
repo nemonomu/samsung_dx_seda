@@ -1352,6 +1352,8 @@ def _merge_authoritative_detail(row, detail, *, identity_verified=False):
     was not valid for the product and must be cleared rather than retained.
     Fields omitted from the payload remain untouched.
     """
+    if "_discount_type_checked" in detail:
+        row["_discount_type_checked"] = detail.get("_discount_type_checked") is True
     if _is_magalu_tv_row(row):
         _merge_non_empty(row, {key: value for key, value in detail.items() if key != "sku"})
         _merge_magalu_tv_reference_sku(
@@ -1519,6 +1521,7 @@ def _merge_magalu_zenrows_detail(row, product_url, trace_rows=None, row_index=""
     meaningful_keys = (
         "retailer_sku_name",
         "final_sku_price",
+        "discount_type",
         "screen_size",
         "model_year",
         "ref_refrigerator_type",
@@ -2408,7 +2411,18 @@ def _merge_magalu_pdp_html(
     )
     needs_similar = not row.get("retailer_sku_name_similar")
     needs_specs = any(not row.get(key) for key in _relevant_audited_fields(row))
-    if not needs_summary and not needs_similar and not needs_reviews and not needs_rating and not needs_specs:
+    needs_discount_check = (
+        not row.get("discount_type")
+        and row.get("_discount_type_checked") is not True
+    )
+    if (
+        not needs_summary
+        and not needs_similar
+        and not needs_reviews
+        and not needs_rating
+        and not needs_specs
+        and not needs_discount_check
+    ):
         _record_subcall(trace_rows, row, row_index, product_url, "pdp_html", success=True, error="", detail="not_needed")
         return
     if os.getenv("SEDA_MAGALU_PDP_HTML_FETCH", "1").lower() in {"0", "false", "no", "n"}:
@@ -2448,6 +2462,8 @@ def _merge_magalu_pdp_html(
         _record_subcall(trace_rows, row, row_index, product_url, "pdp_html_identity", success=False, error=reason)
         _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=trace_rows, row_index=row_index)
         return
+    if "_discount_type_checked" in detail:
+        row["_discount_type_checked"] = detail.get("_discount_type_checked") is True
     if _is_magalu_tv_row(row):
         _merge_magalu_tv_reference_sku(
             row,
@@ -2458,6 +2474,7 @@ def _merge_magalu_pdp_html(
         if identity_mode == "verified" or not row.get("sku"):
             row["sku"] = detail["sku"]
     _merge_missing_detail_fields(row, detail, (
+        "discount_type",
         "summarized_review_content",
         "retailer_sku_name_similar",
         *MAGALU_PDP_SEMANTIC_FIELDS,
@@ -2878,6 +2895,8 @@ def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=
             error=reason,
         )
         return False
+    if "_discount_type_checked" in detail:
+        row["_discount_type_checked"] = detail.get("_discount_type_checked") is True
     sku_merged = False
     if _is_magalu_tv_row(row):
         sku_merged = _merge_magalu_tv_reference_sku(
@@ -2894,7 +2913,12 @@ def _merge_magalu_zenrows_pdp_html(row, product_url, trace_rows=None, row_index=
     merged = _merge_missing_detail_fields(
         row,
         detail,
-        ("summarized_review_content", "retailer_sku_name_similar", *MAGALU_PDP_SEMANTIC_FIELDS),
+        (
+            "discount_type",
+            "summarized_review_content",
+            "retailer_sku_name_similar",
+            *MAGALU_PDP_SEMANTIC_FIELDS,
+        ),
     )
     merged = merged or sku_merged
     if _merge_magalu_exact_html_specs(row, result.text or "", detail):

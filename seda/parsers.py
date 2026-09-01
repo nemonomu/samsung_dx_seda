@@ -1279,7 +1279,10 @@ def magalu_coupon_text(tags):
         return ""
     values = []
     for tag in tags:
-        if not isinstance(tag, dict) or tag.get("type") != "coupon":
+        if (
+            not isinstance(tag, dict)
+            or clean_text(tag.get("type")).casefold() != "coupon"
+        ):
             continue
         value = tag.get("discountValue")
         if value not in (None, ""):
@@ -1294,6 +1297,35 @@ def magalu_coupon_text(tags):
         if message:
             values.append(message)
     return "; ".join(dict.fromkeys(values))
+
+
+def magalu_offer_coupon_result(offer, seller_id=None):
+    """판매자 offer에서 ``(쿠폰 문구, 확인 완료 여부)``를 반환한다.
+
+    ``tags``가 실제 list로 응답되면 빈 list여도 쿠폰 없음이 확인된 것이다.
+    offer·seller 불일치, ``tags`` 누락·null·비정상 타입은 쿠폰 없음이 아니라
+    확인 실패로 남겨 PDP HTML fallback이 판단할 수 있게 한다.
+    """
+    if not isinstance(offer, dict):
+        return "", False
+    seller = offer.get("seller") if isinstance(offer.get("seller"), dict) else {}
+    wanted = clean_text(seller_id).casefold()
+    actual = clean_text(seller.get("id")).casefold()
+    if wanted and actual != wanted:
+        return "", False
+    tags = seller.get("tags")
+    if not isinstance(tags, list):
+        return "", False
+    return magalu_coupon_text(tags), True
+
+
+def magalu_offer_coupon_text(offer, seller_id=None):
+    """판매자가 확인된 offer의 활성 쿠폰 문구만 반환한다."""
+    coupon_text, _checked = magalu_offer_coupon_result(
+        offer,
+        seller_id=seller_id,
+    )
+    return coupon_text
 
 def _looks_like_product_url(url, retailer):
     if retailer == "Magalu":
@@ -1946,6 +1978,23 @@ def _summary_review_content(html_text):
         return ""
     return clean_text(node.get_text(" "))
 
+
+def _magalu_pdp_coupon_text(html_text):
+    """렌더링된 PDP의 쿠폰 전용 영역에서 금액 쿠폰 문구만 추출한다."""
+    if not BeautifulSoup:
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    values = []
+    for node in soup.select('[data-testid="coupon-code-container"]'):
+        text = clean_text(node.get_text(" "))
+        for match in re.finditer(
+            r"R\$\s*([\d.]+(?:,\d{1,2})?)\s*OFF",
+            text,
+            re.I,
+        ):
+            values.append(f"Cupom R$ {match.group(1)} OFF")
+    return "; ".join(dict.fromkeys(values))
+
 def _parse_magalu_next_detail(html_text, base_url, product_url):
     data = extract_next_data(html_text)
     page_data = _magalu_next_page_data(data)
@@ -1959,6 +2008,14 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
     user_reviews = product_rating.get("userReviews") if isinstance(product_rating.get("userReviews"), dict) else {}
     review_page = user_reviews.get("page") if isinstance(user_reviews.get("page"), dict) else {}
     offer = _magalu_first_offer(item)
+    seller_id = _seller_id_from_url(product_url)
+    coupon_offer = _magalu_offer_for_seller(item, seller_id=seller_id)
+    discount_type, discount_type_checked = magalu_offer_coupon_result(
+        coupon_offer,
+        seller_id=seller_id,
+    )
+    html_coupon = _magalu_pdp_coupon_text(html_text)
+    discount_type = discount_type or html_coupon
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
 
     html_summary = _summary_review_content(html_text)
@@ -1991,6 +2048,8 @@ def _parse_magalu_next_detail(html_text, base_url, product_url):
         "_detail_identity_conflict": identity_conflict,
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
+        "discount_type": discount_type,
+        "_discount_type_checked": discount_type_checked or bool(html_coupon),
         "screen_size": semantic_fields["screen_size"],
         "estimated_annual_electricity_use": semantic_fields["estimated_annual_electricity_use"],
         "model_year": _magalu_factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
@@ -2116,6 +2175,21 @@ def _magalu_sku_for_product_line(line, reference, model, item, product_url):
 def _magalu_first_offer(item):
     offers = item.get("offers") if isinstance(item.get("offers"), list) else []
     return offers[0] if offers and isinstance(offers[0], dict) else {}
+
+
+def _magalu_offer_for_seller(item, seller_id=None):
+    """요청 seller의 offer만 반환하고 불일치 시 빈 객체로 닫는다."""
+    offers = item.get("offers") if isinstance(item.get("offers"), list) else []
+    wanted = clean_text(seller_id).casefold()
+    if not wanted:
+        return _magalu_first_offer(item)
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        seller = offer.get("seller") if isinstance(offer.get("seller"), dict) else {}
+        if clean_text(seller.get("id")).casefold() == wanted:
+            return offer
+    return {}
 
 def _magalu_attribute_value(item, labels):
     wanted = {_normalize_key(label) for label in labels}

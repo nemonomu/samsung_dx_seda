@@ -2687,6 +2687,7 @@ class FieldPipelineContractTests(unittest.TestCase):
             "retailer": "Magalu",
             "product_line": "REF",
             "product_url": "https://example/p/ref",
+            "_discount_type_checked": True,
             "screen_size": "",
             "estimated_annual_electricity_use": "130W",
             "ref_capacity": "305L",
