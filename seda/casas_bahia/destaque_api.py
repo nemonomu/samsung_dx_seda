@@ -1,3 +1,5 @@
+"""Casas Bahia seller별 merchandising badge에서 할인 유형을 읽는다."""
+
 import os
 import re
 import time
@@ -7,9 +9,25 @@ import requests
 
 DESTAQUE_URL = "https://api-destaque-descoberta.casasbahia.com.br/Destaque/Sku/{sku_id}/Lojista/{seller_id}"
 DISCOUNT_RE = re.compile(r"(\d+(?:[,.]\d+)?)\s*%\s*de\s+desconto\b", re.I)
+PERCENT_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*%")
+COUPON_RE = re.compile(r"\bcupom\b", re.I)
 
 
 def fetch_discount_type(sku_id, seller_id, timeout=None):
+    """정확한 SKU·seller 쌍의 destaque endpoint에서 할인 문구를 조회한다.
+
+    Args:
+        sku_id: 선택된 판매 제안의 SKU 식별자.
+        seller_id: 같은 제안의 판매자 식별자.
+        timeout: HTTP 요청 제한 시간(초).
+
+    Returns:
+        중복 제거된 할인 문구, 개수, 재시도 trace를 담은 dict. 두 identity 중
+        하나라도 없거나 요청이 모두 실패하면 ``success=False``다.
+
+    다른 seller의 badge는 가격 조건이 다를 수 있으므로 임의 seller fallback을
+    하지 않는다.
+    """
     sku_id = str(sku_id or "").strip()
     seller_id = str(seller_id or "").strip()
     if not sku_id or not seller_id:
@@ -48,14 +66,34 @@ def fetch_discount_type(sku_id, seller_id, timeout=None):
 
 
 def discount_types_from_payload(data):
+    """destaque payload에서 할인 유형을 destaque별로 분리해 추출한다."""
     value = data.get("value") if isinstance(data, dict) else {}
     destaques = value.get("destaques") if isinstance(value, dict) else []
     results = []
     for destaque in destaques or []:
         if not isinstance(destaque, dict):
             continue
-        for key in ("dscFlag", "titulo", "descricao"):
-            text = str(destaque.get(key) or "").strip()
+        texts = [
+            str(destaque.get(key) or "").strip()
+            for key in ("dscFlag", "titulo", "descricao")
+        ]
+        texts = [text for text in texts if text]
+        is_coupon = any(COUPON_RE.search(text) for text in texts)
+        if is_coupon:
+            percents = []
+            for text in texts:
+                for match in PERCENT_RE.finditer(text):
+                    percent = _normalize_percent_value(match.group(1))
+                    if percent and percent not in percents:
+                        percents.append(percent)
+            for percent in percents:
+                normalized = f"USE O CUPOM DESCONTO {percent}%"
+                if normalized not in results:
+                    results.append(normalized)
+            # A coupon without an explicit percentage is not assigned a guessed
+            # number, and percentages from another destaque are never borrowed.
+            continue
+        for text in texts:
             for match in DISCOUNT_RE.finditer(text):
                 value = _normalize_percent(match.group(1))
                 if value and value not in results:
@@ -64,12 +102,17 @@ def discount_types_from_payload(data):
 
 
 def _normalize_percent(value):
+    text = _normalize_percent_value(value)
+    return f"{text}% de desconto" if text else ""
+
+
+def _normalize_percent_value(value):
     text = str(value or "").strip().replace(",", ".")
     if not text:
         return ""
     if "." in text:
         text = text.rstrip("0").rstrip(".")
-    return f"{text}% de desconto"
+    return text
 
 
 def _headers():
