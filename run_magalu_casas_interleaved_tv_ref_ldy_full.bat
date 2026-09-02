@@ -4,7 +4,15 @@ setlocal
 cd /d "%~dp0"
 
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
+if not defined SEDA_MAGALU_PROFILE_ROOT set "SEDA_MAGALU_PROFILE_ROOT=C:/tmp/seda_magalu_profiles"
 if not defined SEDA_MAGALU_BROWSER_PROFILE set "SEDA_MAGALU_BROWSER_PROFILE=C:/tmp/seda_magalu_profiles/run_magalu_casas_interleaved_tv_ref_ldy_%SEDA_RUN_TIMESTAMP%"
+if not defined SEDA_MAGALU_PROFILE_CLEANUP set "SEDA_MAGALU_PROFILE_CLEANUP=1"
+if not defined SEDA_MAGALU_PROFILE_RETENTION_HOURS set "SEDA_MAGALU_PROFILE_RETENTION_HOURS=48"
+if not defined SEDA_STORAGE_MIN_FREE_GB set "SEDA_STORAGE_MIN_FREE_GB=2"
+
+rem Keep completed TV/REF/LDY run data for three days after S3/DB/status checks.
+set "SEDA_LOCAL_CLEANUP=1"
+set "SEDA_LOCAL_RETENTION_DAYS=3"
 
 rem Shared defaults for stable RDP full runs.
 if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
@@ -90,31 +98,64 @@ if not defined SEDA_CASAS_BAHIA_LAST_KNOWN_DB_TIMEOUT_MS set SEDA_CASAS_BAHIA_LA
 if not defined SEDA_CDP_CLOSE_EXISTING_TABS set SEDA_CDP_CLOSE_EXISTING_TABS=1
 if not defined SEDA_CDP_USER_DATA_DIR set SEDA_CDP_USER_DATA_DIR=C:\tmp\seda_casas_bahia_cdp_profile
 
+set "SEDA_BATCH_EXIT_CODE=0"
+call :prepare_storage
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
+
 call :run_magalu TV
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
 call :sleep_between
 
 call :run_casas TV
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
 call :sleep_between
 
 call :run_magalu REF
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
 call :sleep_between
 
 call :run_casas REF
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
 call :sleep_between
 
 call :run_magalu LDY
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "SEDA_BATCH_EXIT_CODE=1"
+    goto :finish
+)
 call :sleep_between
 
 call :run_casas LDY
-if errorlevel 1 exit /b 1
+if errorlevel 1 set "SEDA_BATCH_EXIT_CODE=1"
 
-echo [SEDA] Magalu/Casas Bahia interleaved TV/REF/LDY full run completed
-exit /b 0
+:finish
+call python -m seda.magalu.profile_cleanup finalize
+if errorlevel 1 (
+    echo [SEDA] Magalu browser profile cleanup failed
+    if "%SEDA_BATCH_EXIT_CODE%"=="0" set "SEDA_BATCH_EXIT_CODE=1"
+)
+
+if "%SEDA_BATCH_EXIT_CODE%"=="0" (
+    echo [SEDA] Magalu/Casas Bahia interleaved TV/REF/LDY full run completed
+) else (
+    echo [SEDA] Magalu/Casas Bahia interleaved TV/REF/LDY full run failed
+)
+exit /b %SEDA_BATCH_EXIT_CODE%
 
 :run_magalu
 set "SEDA_RETAILERS=magalu"
@@ -145,6 +186,25 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [SEDA] %RETAILER_LABEL% %PRODUCT_LABEL% full run completed
+exit /b 0
+
+:prepare_storage
+set "SEDA_PRODUCT_LINE=TV"
+set "SEDA_RETAILERS=magalu"
+set "SEDA_ACTIVE_RETAILER=magalu"
+set "SEDA_RUN_ROOT="
+echo [SEDA] pruning expired run data before collection
+call python -m seda.magalu.step12_local_cleanup
+if errorlevel 1 (
+    echo [SEDA] expired run data cleanup failed
+    exit /b 1
+)
+echo [SEDA] pruning stale browser profiles and checking free disk space
+call python -m seda.magalu.profile_cleanup prepare
+if errorlevel 1 (
+    echo [SEDA] storage preflight failed; collection was not started
+    exit /b 1
+)
 exit /b 0
 
 :sleep_between
