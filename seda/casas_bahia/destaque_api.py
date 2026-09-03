@@ -66,7 +66,7 @@ def fetch_discount_type(sku_id, seller_id, timeout=None):
 
 
 def discount_types_from_payload(data):
-    """destaque payload에서 할인 유형을 destaque별로 분리해 추출한다."""
+    """destaque payload에서 화면 우선순위에 맞는 할인 유형을 추출한다."""
     value = data.get("value") if isinstance(data, dict) else {}
     destaques = value.get("destaques") if isinstance(value, dict) else []
     results = []
@@ -80,16 +80,18 @@ def discount_types_from_payload(data):
         texts = [text for text in texts if text]
         is_coupon = any(COUPON_RE.search(text) for text in texts)
         if is_coupon:
-            percents = []
             for text in texts:
-                for match in PERCENT_RE.finditer(text):
-                    percent = _normalize_percent_value(match.group(1))
-                    if percent and percent not in percents:
-                        percents.append(percent)
-            for percent in percents:
-                normalized = f"USE O CUPOM DESCONTO {percent}%"
-                if normalized not in results:
-                    results.append(normalized)
+                match = PERCENT_RE.search(text)
+                if not match:
+                    continue
+                percent = _normalize_percent_value(match.group(1))
+                if percent:
+                    # The storefront renders one coupon badge. In the verified
+                    # storefront samples, API order matched that display priority,
+                    # so keep the first coupon
+                    # with an explicit percentage instead of joining all
+                    # promotion candidates into one database value.
+                    return [f"USE O CUPOM DESCONTO {percent}%"]
             # A coupon without an explicit percentage is not assigned a guessed
             # number, and percentages from another destaque are never borrowed.
             continue

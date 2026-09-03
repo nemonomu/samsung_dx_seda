@@ -121,7 +121,7 @@ def _needs_discount_type_backfill(value):
     text = str(value or "").strip()
     if not text:
         return True
-    if any(CANONICAL_COUPON_RE.fullmatch(part.strip()) for part in text.split(";")):
+    if CANONICAL_COUPON_RE.fullmatch(text):
         return False
     return bool(AMBIGUOUS_DISCOUNT_RE.search(text))
 

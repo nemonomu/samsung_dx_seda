@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from seda.casas_bahia.destaque_api import discount_types_from_payload
+from seda.casas_bahia.destaque_api import discount_types_from_payload, fetch_discount_type
 from seda.casas_bahia.listing_discount_backfill import (
     _needs_discount_type_backfill,
     run,
@@ -41,6 +41,52 @@ class CasasBahiaDiscountTypeTests(unittest.TestCase):
 
         self.assertEqual(discount_types_from_payload(data), [])
 
+    def test_multiple_coupon_destaques_keep_only_first_storefront_coupon(self):
+        for first, second in (("5", "7"), ("3", "5")):
+            with self.subTest(first=first, second=second):
+                data = payload(
+                    {
+                        "dscFlag": f"AC Cupom Desconto 3P - {first}%",
+                        "titulo": f"Cupom de desconto - {first}%",
+                    },
+                    {
+                        "dscFlag": f"AC Cupom Desconto 3P - {second}%",
+                        "titulo": f"Cupom de desconto - {second}%",
+                    },
+                )
+
+                self.assertEqual(
+                    discount_types_from_payload(data),
+                    [f"USE O CUPOM DESCONTO {first}%"],
+                )
+
+    def test_coupon_without_percent_skips_to_next_explicit_coupon(self):
+        data = payload(
+            {"titulo": "Cupom de desconto"},
+            {"dscFlag": "AC Cupom Desconto 3P - 7%", "titulo": "Cupom de desconto - 7%"},
+        )
+
+        self.assertEqual(
+            discount_types_from_payload(data),
+            ["USE O CUPOM DESCONTO 7%"],
+        )
+
+    def test_fetch_discount_type_returns_one_value_with_one_request(self):
+        data = payload(
+            {"titulo": "Cupom de desconto - 5%"},
+            {"titulo": "Cupom de desconto - 7%"},
+        )
+        response = SimpleNamespace(status_code=200, text="payload", json=lambda: data)
+
+        with patch("seda.casas_bahia.destaque_api.requests.Session") as session_factory:
+            session_factory.return_value.get.return_value = response
+            result = fetch_discount_type("1580546835", "seller", timeout=1)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["discount_type"], "USE O CUPOM DESCONTO 5%")
+        self.assertEqual(result["count"], 1)
+        session_factory.return_value.get.assert_called_once()
+
     def test_percent_from_another_destaque_is_not_borrowed_by_coupon(self):
         data = payload(
             {"titulo": "Cupom de desconto"},
@@ -59,6 +105,11 @@ class CasasBahiaDiscountTypeTests(unittest.TestCase):
         self.assertTrue(_needs_discount_type_backfill(""))
         self.assertTrue(_needs_discount_type_backfill("10% de desconto"))
         self.assertTrue(_needs_discount_type_backfill("10% discount off"))
+        self.assertTrue(
+            _needs_discount_type_backfill(
+                "USE O CUPOM DESCONTO 5%; USE O CUPOM DESCONTO 7%"
+            )
+        )
         self.assertFalse(_needs_discount_type_backfill("USE O CUPOM DESCONTO 10%"))
         self.assertFalse(_needs_discount_type_backfill("No Pix"))
 
