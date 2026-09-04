@@ -205,6 +205,25 @@ the crawler batch.
 `SEDA_LOCAL_CLEANUP` continues to control whole dated-run deletion separately
 and remains disabled by default.
 
+The integrated TV/REF/LDY runner enables a stricter local storage policy:
+
+```text
+SEDA_LOCAL_CLEANUP=1
+SEDA_LOCAL_RETENTION_DAYS=3
+SEDA_MAGALU_PROFILE_CLEANUP=1
+SEDA_MAGALU_PROFILE_RETENTION_HOURS=48
+SEDA_STORAGE_MIN_FREE_GB=2
+```
+
+Before collection, expired dated runs and stale Magalu browser profiles are
+removed and the profile drive must have at least 2 GiB free. The current
+timestamped base/worker profiles are removed after the integrated runner ends.
+Hard-killed runs are recovered by the 48-hour stale-profile cleanup on the next
+start. Only the same integrated-runner profile series, with managed timestamped
+names directly below `C:\tmp\seda_magalu_profiles`, is eligible. Other profile
+series, custom paths, and reparse points are rejected, and a locked active
+profile cannot pass the atomic rename step.
+
 `erd.xlsx` is also ignored by git. For a clean RDP setup, place it at:
 
 ```text

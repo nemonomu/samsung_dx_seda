@@ -10,6 +10,16 @@ from seda.step00_config import OUTPUT_COLUMNS, read_csv, run_root, write_csv
 from .destaque_api import fetch_discount_type
 
 
+CANONICAL_COUPON_RE = re.compile(
+    r"^USE\s+O\s+CUPOM\s+DESCONTO\s+\d+(?:[.,]\d+)?\s*%$",
+    re.I,
+)
+AMBIGUOUS_DISCOUNT_RE = re.compile(
+    r"\bcupom\b|\bcoupon\b|\d+(?:[.,]\d+)?\s*%\s*(?:de\s+desconto|discount(?:\s+off)?|off)\b",
+    re.I,
+)
+
+
 def default_input():
     delivery_backfilled = run_root() / "output" / "final_output_delivery_backfilled.csv"
     if delivery_backfilled.exists():
@@ -33,7 +43,7 @@ def run(args):
         if limit and processed >= limit:
             stats.update(skipped_limit=1)
             continue
-        if not args.force and str(row.get("discount_type") or "").strip():
+        if not args.force and not _needs_discount_type_backfill(row.get("discount_type")):
             stats.update(skipped_existing=1)
             continue
         sku_id = _sku_id(row)
@@ -105,6 +115,15 @@ def _append_token(value, token):
     if token not in tokens:
         tokens.append(token)
     return "+".join(tokens)
+
+
+def _needs_discount_type_backfill(value):
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if CANONICAL_COUPON_RE.fullmatch(text):
+        return False
+    return bool(AMBIGUOUS_DISCOUNT_RE.search(text))
 
 
 def main():

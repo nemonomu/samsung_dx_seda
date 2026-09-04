@@ -103,6 +103,16 @@ def _translate_sku_status(text):
 
 def _translate_discount_type(text):
     normalized = _normalize(text)
+    canonical_coupon = re.fullmatch(
+        r"use\s+o\s+cupom\s+desconto\s+(\d+(?:[.,]\d+)?)\s*%",
+        normalized,
+        re.I,
+    )
+    if canonical_coupon:
+        percent = canonical_coupon.group(1).replace(",", ".")
+        if "." in percent:
+            percent = percent.rstrip("0").rstrip(".")
+        return f"USE O CUPOM DESCONTO {percent}%"
     coupon_value = re.search(r"cupom\s+r\$\s*([\d.,]+)\s*off", normalized, re.I)
     if coupon_value:
         return f"Coupon R$ {coupon_value.group(1)} off"

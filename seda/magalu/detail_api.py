@@ -12,6 +12,7 @@ from ..parsers import (
     format_brl,
     ldy_color_from_text,
     magalu_exact_factsheet_reference,
+    magalu_offer_coupon_result,
     preferred_magalu_sku,
 )
 from ..step00_config import product_line
@@ -696,6 +697,10 @@ def _browser_context_label(label):
 
 def _detail_from_item(item, seller_id=None):
     offer = _select_offer(item, seller_id=seller_id)
+    discount_type, discount_type_checked = magalu_offer_coupon_result(
+        offer,
+        seller_id=seller_id,
+    )
     best_price = offer.get("bestPrice") if isinstance(offer.get("bestPrice"), dict) else {}
     rating = item.get("rating") if isinstance(item.get("rating"), dict) else {}
     line = product_line()
@@ -713,6 +718,8 @@ def _detail_from_item(item, seller_id=None):
         "retailer_sku_name": clean_text(item.get("title")),
         "original_sku_price": format_brl(offer.get("listPrice")),
         "final_sku_price": format_brl(best_price.get("totalAmount") or offer.get("price")),
+        "discount_type": discount_type,
+        "_discount_type_checked": discount_type_checked,
         "screen_size": semantic_fields["screen_size"],
         "estimated_annual_electricity_use": semantic_fields["estimated_annual_electricity_use"],
         "model_year": _factsheet_value(item, ["ano de lancamento", "ano de lançamento", "ano do modelo"])
