@@ -1,4 +1,4 @@
-"""One existing direct price call for a missing, explicitly identified offer.
+"""One existing direct price call for a missing, product/SKU-verified quote.
 
 No environment loading, browser, generic transport, retries, seller guessing,
 paid fallback, or mutation of an existing quote is performed here.
@@ -63,9 +63,11 @@ def _identity(row):
     product_id = _positive_id(row.get("retailer_product_id"))
     sku_id = _positive_id(sku_from_url(row.get("product_url") or ""))
     seller_id = _positive_id(row.get("seller_id"))
-    for value, error in ((product_id, "missing_product_id"), (sku_id, "missing_sku_id"), (seller_id, "missing_seller_id")):
+    for value, error in ((product_id, "missing_product_id"), (sku_id, "missing_sku_id")):
         if not value:
             return None, error
+    if not is_blank(row.get("seller_id")) and not seller_id:
+        return None, "invalid_seller_id"
     return (product_id, sku_id, seller_id), ""
 
 
@@ -94,10 +96,16 @@ def recover_missing_price(row, *, cache=None, fetcher=None):
     if error:
         return _result(error)
     product_id, sku_id, seller_id = identity
-    cache_hit = cache is not None and identity in cache
+    # The existing endpoint supports product-only requests. Its complete offer
+    # list may serve several URL SKUs, each validated independently below.
+    # Keep seller-specific responses in a separate cache namespace.
+    request_key = identity if seller_id else ("product", product_id)
+    request_items = ([{"id": product_id, "sku": sku_id, "lojista": seller_id}]
+                     if seller_id else [{"id": product_id}])
+    cache_hit = cache is not None and request_key in cache
     attempted = not cache_hit
     if cache_hit:
-        response = _safe_response(cache[identity])
+        response = _safe_response(cache[request_key])
     else:
         if fetcher is None:
             from .price_api import fetch_listing_prices
@@ -105,30 +113,35 @@ def recover_missing_price(row, *, cache=None, fetcher=None):
             fetcher = fetch_listing_prices
         try:
             response = _safe_response(fetcher(
-                [{"id": product_id, "sku": sku_id, "lojista": seller_id}],
+                request_items,
                 include_offers=True,
             ))
         except Exception:
             # No exception text, URL, response body, or headers enter a trace.
             response = {"success": False, "offers": [], "status_code": 0}
         if cache is not None:
-            cache[identity] = response
+            cache[request_key] = response
     meta = {"attempted": attempted, "cache_hit": cache_hit, "status_code": response["status_code"]}
     if not response["success"] or response["status_code"] != 200:
         code = response["status_code"]
         return _result(f"price_http_{code}" if code and code != 200 else "price_response_unavailable", **meta)
 
     matches = [offer for offer in response["offers"] if isinstance(offer, dict)
-               and tuple(_positive_id(offer.get(key)) for key in ("productId", "skuId", "sellerId")) == identity]
+               and _positive_id(offer.get("productId")) == product_id
+               and _positive_id(offer.get("skuId")) == sku_id
+               and (not seller_id or _positive_id(offer.get("sellerId")) == seller_id)]
     if not matches:
         return _result("no_matching_price_offer", **meta)
     # Do not choose the last, cheapest, default seller, or an arbitrary quote.
     if len(matches) != 1:
         return _result("ambiguous_price_offers", **meta)
     offer = matches[0]
+    resolved_seller_id = _positive_id(offer.get("sellerId"))
+    if not resolved_seller_id:
+        return _result("missing_offer_seller_id", **meta)
     availability = offer.get("availability")
     if isinstance(availability, dict):
-        for key, expected in (("IdSku", sku_id), ("IdLojista", seller_id)):
+        for key, expected in (("IdProduto", product_id), ("IdSku", sku_id), ("IdLojista", resolved_seller_id)):
             if not is_blank(availability.get(key)) and _positive_id(availability[key]) != expected:
                 return _result("price_availability_identity_conflict", **meta)
     current = _number(offer.get("currentPrice"))
@@ -150,6 +163,7 @@ def recover_missing_price(row, *, cache=None, fetcher=None):
         savings = _casas_bahia_savings_text(offer, offer.get("discountRate", ""))
         candidates = {
             "final_sku_price": format_brl(current),
+            "seller_id": resolved_seller_id,
             "original_sku_price": format_brl(old) if old is not None else "",
             "savings": savings,
             # Preserve the existing listing discount-text extraction contract;
@@ -162,5 +176,7 @@ def recover_missing_price(row, *, cache=None, fetcher=None):
         return _result("price_quote_parse_failed", **meta)
     if not is_blank(row.get("savings")) and str(row["savings"]).strip() != str(savings or "").strip():
         return _result("existing_savings_quote_conflict", **meta)
+    if is_blank(candidates["final_sku_price"]):
+        return _result("price_quote_parse_failed", **meta)
     detail = {key: value for key, value in candidates.items() if is_blank(row.get(key)) and not is_blank(value)}
     return _result("", detail=detail, **meta)

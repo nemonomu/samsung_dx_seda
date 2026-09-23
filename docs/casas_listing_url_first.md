@@ -20,7 +20,9 @@
 ## Detail 보완
 
 - 기존 Detail 및 기존 보강 처리를 먼저 수행한다. 전체 PDP HTML 수집을 새로 켜지 않는다.
-- 최종 가격이 여전히 비어 있고 URL SKU·상품 ID·판매자 ID가 명확한 행에만 기존 직접 가격 REST 요청을 1회 수행한다. 동일한 식별 조합은 그 보완 단계 내에서 결과를 재사용한다.
+- 최종 가격이 여전히 비어 있고 URL SKU·상품 ID가 명확한 행에 기존 직접 가격 REST 요청을 1회 수행한다. 판매자 ID가 있으면 기존 요청을 유지한다. 판매자 ID가 공란이면 기존 API의 `produtos: [{idProduto: ...}]` 경로로 조회한다. 잘못된 nonblank 판매자 ID는 추측하거나 공란으로 간주하지 않는다.
+- 상품 ID·URL SKU가 모두 일치하는 응답이 정확히 하나이고 반환 판매자 ID·가격·재고 응답의 식별값이 유효할 때만 내부 `seller_id`와 누락 가격을 함께 저장한다. 여러 판매 조건 중 최저가/첫 항목/기본 판매자를 임의로 선택하지 않는다.
+- 같은 상품 ID만 조회한 결과는 동일 상품의 다른 SKU에서도 재사용하되 매 행의 URL SKU를 다시 검증한다. 판매자 지정 조회의 캐시는 별도로 유지한다. 보충 실패 시 사유를 trace에 기록하고 NULL을 보존한다. 이 변경은 상세 페이지 자동 탐색이나 유료 fallback을 새로 추가하지 않는다.
 - 상품·SKU·판매자가 일치하는 가격만 사용하며 이미 채워진 가격/할인 값은 덮어쓰지 않는다. 연결 실패는 상태만 남기고 상품 행을 보존한다.
 - 새로운 ZenRows 유료 경로·판매자 수집 항목·DB 컬럼은 추가하지 않는다. 기존 배송/픽업의 기본 판매자 처리도 이번 범위에서는 변경하지 않는다.
 - 기존 체크포인트·트랜잭션 최종 저장·중단 후 재개를 유지한다. 가격 보완 실패만으로 정상 처리된 상품 행을 제거하지 않는다.
@@ -30,3 +32,13 @@
 - Listing 성공 로그의 `price_pending`과 진단 ZIP의 `price_pending_products`, `seller_pending_products`는 원천 상품 기준 숫자다. 기존 관련성 필터 적용 후 출력 행 수와 다를 수 있다.
 - 원래 가격 API의 실패 상태와 Listing 성공 상태를 함께 기록한다. 응답 본문·키·쿠키는 진단에 포함하지 않는다.
 - 검증은 외부 통신/브라우저/DB/업로드를 차단한 오프라인 테스트다. 실제 GCP 수집 성공이나 모든 가격의 채워짐을 검증한 것은 아니다.
+
+## 2026-09-23 TV 실행의 Detail 이후 재개
+
+- 대상은 기존 GCP 실행 폴더 `seda/data/casas_bahia/tv/20260923`의 308행이다. references에 복사한 파일이 아니라 원래 실행 폴더의 대상 CSV, enriched CSV, 정규 trace를 사용한다.
+- `SEDA_RUN_DATE=20260923`, `SEDA_PRODUCT_LINE=TV`, 명시적 `SEDA_RUN_ROOT`로 날짜/카테고리를 고정한다. 날짜가 바뀌었다고 20260924 폴더에서 재시작하지 않는다.
+- `SEDA_DETAIL_SKIP=308`은 기존 308행을 검증해 복원하고 상품별 Detail 루프를 건너뛴다. `SEDA_DETAIL_LIMIT=0`, worker ID 공란, shipping-only 모드 0을 사용한다. 대상/출력 CSV override는 원래 실행 폴더로 지정한다.
+- 이번 재개에서는 `SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK=0`으로 이미 실패한 유료 필드 보충을 반복하지 않는다. Mode 4의 `SEDA_CASAS_BAHIA_API_ENRICH=1` 가격 보충은 유지한다.
+- orchestrator의 정확한 시작 옵션은 `--product-line TV --from-step detail_enrichment --skip-local-cleanup`이다. 가격 보충 뒤 기존 배송비·리뷰·할인·최종 출력·DB 단계로 이어진다. Main/BSR과 기존 308개 Detail 호출은 재수행하지 않으며 REF/LDY를 시작하지 않는다.
+- 재개 환경변수는 자식 CMD 범위에 한정한다. `SEDA_DETAIL_SKIP=308`이 이후 REF/LDY 실행에 남아서는 안 된다. 기존 배치에서 사용한 배송 우편번호 등 업무 설정은 유지한다.
+- 원래 파일의 행 수·순서·헤더·trace 검증 실패는 우회하지 않는다. 실행 전 해당 파일들이 존재하는지 확인한다. 기존 체크포인트/트랜잭션 저장을 재사용한다.

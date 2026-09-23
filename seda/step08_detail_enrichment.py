@@ -885,8 +885,10 @@ def _backfill_casas_listing_prices(
                       "status_code": 0, "error": "price_recovery_error", "detail": {}}
         requests_made += int(result.get("attempted") is True)
         filled = []
-        if result.get("success"):
-            for field in PRICE_FIELDS:
+        if result.get("success") and not is_blank((result.get("detail") or {}).get("final_sku_price")):
+            # A newly discovered seller belongs to this exact validated quote.
+            # Persist both together so subsequent freight work can reuse it.
+            for field in (*PRICE_FIELDS, "seller_id"):
                 value = (result.get("detail") or {}).get(field)
                 if is_blank(row.get(field)) and not is_blank(value):
                     row[field] = value
