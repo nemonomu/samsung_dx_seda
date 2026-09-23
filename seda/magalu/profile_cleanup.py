@@ -1,4 +1,4 @@
-"""통합 수집에서 생성한 Magalu Chromium 프로필의 수명주기를 관리한다.
+"""수집에서 생성한 Magalu Chromium 프로필의 수명주기를 관리한다.
 
 프로필 삭제는 전용 루트 바로 아래의 실행 시각 기반 이름만 허용한다. 삭제 전
 디렉터리를 tombstone으로 원자 이동해 실행 중이거나 잠긴 프로필을 부분 삭제하지
@@ -28,14 +28,14 @@ _TRUE_VALUES = {"1", "true", "yes", "y"}
 
 
 def main(argv=None):
-    """prepare 또는 finalize 정리를 실행하고 안전한 요약을 출력한다."""
+    """prepare, finalize 또는 읽기 전용 capacity 검사를 실행한다."""
     parser = argparse.ArgumentParser(
         description="Clean isolated Magalu browser profiles safely."
     )
-    parser.add_argument("mode", choices=("prepare", "finalize"))
+    parser.add_argument("mode", choices=("prepare", "finalize", "capacity"))
     args = parser.parse_args(argv)
 
-    if not _env_enabled("SEDA_MAGALU_PROFILE_CLEANUP", "1"):
+    if args.mode != "capacity" and not _env_enabled("SEDA_MAGALU_PROFILE_CLEANUP", "1"):
         print(
             "[seda][storage] magalu profile cleanup disabled",
             flush=True,
@@ -43,7 +43,10 @@ def main(argv=None):
         return 0
 
     try:
-        result = prepare() if args.mode == "prepare" else finalize()
+        if args.mode == "capacity":
+            result = capacity()
+        else:
+            result = prepare() if args.mode == "prepare" else finalize()
     except Exception as exc:
         print(
             "[seda][storage] "
@@ -177,6 +180,23 @@ def disk_capacity(path, *, disk_usage_func=None):
         "required_free_gb": minimum_gb,
         "sufficient": int(usage.free) >= required_bytes,
     }
+
+
+def capacity(*, disk_usage_func=None):
+    """Check the profile drive without deleting or requiring a managed name."""
+    raw_profile = os.getenv("SEDA_MAGALU_BROWSER_PROFILE", "").strip()
+    if not raw_profile:
+        raise RuntimeError("missing_SEDA_MAGALU_BROWSER_PROFILE")
+    path = Path(os.path.abspath(raw_profile))
+    # A new run's profile need not exist yet. Inspect its nearest existing
+    # ancestor so profile cleanup errors cannot prevent the capacity check.
+    while not path.exists():
+        parent = path.parent
+        if parent == path:
+            raise RuntimeError("profile_drive_unavailable")
+        path = parent
+    result = disk_capacity(path, disk_usage_func=disk_usage_func)
+    return {"mode": "capacity", "success": result["sufficient"], **result}
 
 
 def _profile_paths():

@@ -223,6 +223,10 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
     parser.add_argument("--resume", action="store_true", help="Run incomplete steps and always refresh operational steps.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     parser.add_argument(
+        "--skip-local-cleanup", action="store_true",
+        help="Skip post-collection cleanup when the caller already cleaned before collection.",
+    )
+    parser.add_argument(
         "--product-line",
         default=product_line(),
         help="Product line key, e.g. TV, REF, LDY.",
@@ -232,6 +236,8 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
     if force_dated_run_root or not explicit_run_root:
         os.environ["SEDA_RUN_ROOT"] = str(dated_run_root(retailer=retailer_key))
     chosen = selected_steps(args, steps)
+    if args.skip_local_cleanup:
+        chosen = [step for step in chosen if step.name != "local_cleanup"]
     if not chosen:
         print(f"{retailer_key} pipeline steps:")
         for step in steps:

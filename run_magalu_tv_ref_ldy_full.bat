@@ -5,7 +5,11 @@ cd /d "%~dp0"
 
 if not exist "%~dp0seda\magalu\log" mkdir "%~dp0seda\magalu\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
+if not defined SEDA_MAGALU_PROFILE_ROOT set "SEDA_MAGALU_PROFILE_ROOT=C:/tmp/seda_magalu_profiles"
 if not defined SEDA_MAGALU_BROWSER_PROFILE set "SEDA_MAGALU_BROWSER_PROFILE=C:/tmp/seda_magalu_profiles/run_magalu_tv_ref_ldy_%SEDA_RUN_TIMESTAMP%"
+if not defined SEDA_MAGALU_PROFILE_CLEANUP set "SEDA_MAGALU_PROFILE_CLEANUP=1"
+if not defined SEDA_MAGALU_PROFILE_RETENTION_HOURS set "SEDA_MAGALU_PROFILE_RETENTION_HOURS=48"
+if not defined SEDA_STORAGE_MIN_FREE_GB set "SEDA_STORAGE_MIN_FREE_GB=2"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\magalu\log\magalu_tv_ref_ldy_full_%SEDA_RUN_TIMESTAMP%.log"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
@@ -76,16 +80,19 @@ if not defined SEDA_MAGALU_BROWSER_CLOSE_ON_EXIT set SEDA_MAGALU_BROWSER_CLOSE_O
 set SEDA_MAGALU_SEARCH_FALLBACK_PAGE_SIZES=
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
+call :prepare_storage
+if errorlevel 1 exit /b 1
+
 call :log "[SEDA] Magalu TV full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line TV --all
+call python -m seda.magalu.magalu_orchestrator --product-line TV --all --skip-local-cleanup
 if errorlevel 1 goto :failed_tv
 
 call :log "[SEDA] Magalu REF full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line REF --all
+call python -m seda.magalu.magalu_orchestrator --product-line REF --all --skip-local-cleanup
 if errorlevel 1 goto :failed_ref
 
 call :log "[SEDA] Magalu LDY full run started"
-call python -m seda.magalu.magalu_orchestrator --product-line LDY --all
+call python -m seda.magalu.magalu_orchestrator --product-line LDY --all --skip-local-cleanup
 if errorlevel 1 goto :failed_ldy
 
 call :log "[SEDA] Magalu TV/REF/LDY full run completed"
@@ -107,3 +114,28 @@ exit /b 1
 :failed_ldy
 call :log "[SEDA] Magalu LDY full run failed"
 exit /b 1
+
+:prepare_storage
+setlocal
+set "SEDA_PRODUCT_LINE=TV"
+set "SEDA_RETAILERS=magalu"
+set "SEDA_ACTIVE_RETAILER=magalu"
+set "SEDA_RUN_ROOT="
+set "SEDA_LOCAL_CLEANUP=1"
+set "SEDA_LOCAL_RETENTION_DAYS=3"
+set "SEDA_LOCAL_CLEANUP_RETAILER=magalu"
+call :log "[SEDA] pruning expired Magalu run data (retention: 3 days)"
+call python -m seda.magalu.step12_local_cleanup >> "%SEDA_RUN_LOG_FILE%" 2>&1
+if errorlevel 1 call :log "[SEDA] WARNING: run data cleanup incomplete; continuing to profile cleanup"
+call :log "[SEDA] pruning stale Magalu profiles"
+call python -m seda.magalu.profile_cleanup prepare >> "%SEDA_RUN_LOG_FILE%" 2>&1
+if errorlevel 1 call :log "[SEDA] WARNING: profile preparation incomplete; checking capacity separately"
+call :log "[SEDA] checking free disk space before collection"
+call python -m seda.magalu.profile_cleanup capacity >> "%SEDA_RUN_LOG_FILE%" 2>&1
+if errorlevel 1 (
+    call :log "[SEDA] disk space insufficient or unavailable; collection was not started"
+    endlocal
+    exit /b 1
+)
+endlocal
+exit /b 0

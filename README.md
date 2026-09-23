@@ -224,6 +224,26 @@ names directly below `C:\tmp\seda_magalu_profiles`, is eligible. Other profile
 series, custom paths, and reparse points are rejected, and a locked active
 profile cannot pass the atomic rename step.
 
+The standalone `run_magalu_tv_ref_ldy_full.bat` performs storage cleanup
+once, before TV collection. It sets 3-day dated-run retention and
+`SEDA_LOCAL_CLEANUP_RETAILER=magalu` only inside the preparation subroutine,
+limiting dated-run, trace, and detached-run cleanup to `seda/data/magalu`.
+Casas Bahia and legacy unscoped data are preserved. The integrated runner's
+existing behavior is unchanged.
+
+The standalone runner attempts to prune profiles older than 48 hours only in
+its own `run_magalu_tv_ref_ldy_YYYYMMDD_HHMMSS` series, including workers.
+Data or profile deletion failures are logged as warnings and do not block
+collection. A separate read-only capacity check still requires at least 2 GiB
+free on the profile drive; insufficient or unreadable capacity stops collection.
+Existing profile cleanup/retention and minimum-space overrides remain supported.
+
+All three product commands use `--skip-local-cleanup`; no dated-run or trace
+cleanup runs between products or after collection. This BAT never calls profile
+finalization. Profiles from completed or interrupted runs remain until a later
+BAT start finds them older than the retention period. Cleanup output stays in
+the existing run log, and collection failures retain their original exit codes.
+
 `erd.xlsx` is also ignored by git. For a clean RDP setup, place it at:
 
 ```text

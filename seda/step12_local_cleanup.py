@@ -85,6 +85,15 @@ def main():
 
         now = datetime.now()
         base = Path(os.path.abspath(DEFAULT_RUNS_BASE))
+        # Standalone runners may limit deletion (including detached runs) to
+        # their retailer subtree. Unset keeps the integrated runner contract.
+        retailer = os.getenv("SEDA_LOCAL_CLEANUP_RETAILER", "").strip().lower()
+        if retailer:
+            if retailer not in _RETAILER_DIRECTORIES:
+                raise ValueError("SEDA_LOCAL_CLEANUP_RETAILER is not supported")
+            scoped_base = base / retailer
+            _assert_non_reparse_ancestry(scoped_base, base)
+            base = scoped_base
         try:
             if _is_reparse_point(base):
                 raise RuntimeError(f"cleanup_reparse_point:{base}")
