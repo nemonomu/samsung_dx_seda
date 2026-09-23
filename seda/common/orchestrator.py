@@ -202,7 +202,7 @@ def selected_steps(args, steps):
 
 
 def _execution_groups(retailer_key, package_name, chosen):
-    """Group only contiguous, selected Casas mode-3 listing stages.
+    """Group only contiguous, selected Casas mode-3/mode-4 listing stages.
 
     Preserve caller order, including explicit subsets; never pull in an omitted
     stage or keep a browser open across detail/DB/other subprocess work.
@@ -210,7 +210,7 @@ def _execution_groups(retailer_key, package_name, chosen):
     enabled = (
         retailer_key == "casas_bahia"
         and package_name == "seda.casas_bahia"
-        and os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "3").strip() == "3"
+        and os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "4").strip() in {"3", "4"}
     )
     allowed = {
         "main_list": "seda.casas_bahia.step01_main_list",

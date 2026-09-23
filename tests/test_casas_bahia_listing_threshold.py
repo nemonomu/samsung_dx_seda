@@ -173,8 +173,8 @@ class CasasListingThresholdTests(unittest.TestCase):
         listing._main_with_retries()
         self.assertEqual(self.manifest()["filtered_unique_count"], 300)
 
-    def test_all_three_modes_keep_their_fetch_route_and_same_acceptance(self):
-        for mode in ("1", "2", "3"):
+    def test_all_four_modes_keep_their_fetch_route_and_same_acceptance(self):
+        for mode in ("1", "2", "3", "4"):
             with self.subTest(mode=mode):
                 self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = mode
                 self.calls.clear()
@@ -182,7 +182,7 @@ class CasasListingThresholdTests(unittest.TestCase):
                 self.assertTrue(self.manifest()["accepted_with_failures"])
                 self.assertEqual(self.manifest()["casas_listing_mode"], mode)
                 self.assertEqual({call[2] for call in self.calls}, {listing_modes.fetch_mode(mode)})
-        self.assertEqual(listing_modes.DEFAULT_MODE, "3")
+        self.assertEqual(listing_modes.DEFAULT_MODE, "4")
 
     def test_no_failure_below_minimum_keeps_existing_success_behavior(self):
         self.rows[("Casas Bahia", 1)] = [product(1)]

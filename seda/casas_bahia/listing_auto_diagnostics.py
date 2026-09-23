@@ -171,12 +171,16 @@ class AutomaticListingDiagnostics:
             "mode": int(self.mode), "python_version": ".".join(map(str, sys.version_info[:3])),
             "configured_rest_page_size": rest_params.get("resultsperpage"),
         }
-        if self.mode == "3":
-            from . import browser_api
+        if self.mode in {"3", "4"}:
+            if self.mode == "4":
+                from . import browser_api_url_first as browser_api
+            else:
+                from . import browser_api
 
             payload.update(_session_evidence(browser_api._SESSION))
             self.observer = _Observer(browser_api, parsers, self.writer)
-            payload.update({"effective_mode3_page_size": 20,
+            page_size_field = "effective_mode4_page_size" if self.mode == "4" else "effective_mode3_page_size"
+            payload.update({page_size_field: 20,
                             "api_timeout_seconds": browser_api.API_TIMEOUT_SECONDS,
                             "min_search_interval_seconds": browser_api.MIN_SEARCH_INTERVAL_SECONDS,
                             "attempt_limit": browser_api._attempt_limit()})
@@ -208,12 +212,15 @@ class AutomaticListingDiagnostics:
         fallback_used = any(isinstance(entry, dict) and
                             (entry.get("fallback_used") is True or entry.get("stage") == "ssr_fallback")
                             for entry in trace)
-        allowed_methods = {"uc_api", "browser_ssr", "api_partner", "rest_ssr_hybrid", "uc_api+browser_ssr"}
+        allowed_methods = {"uc_api", "browser_ssr", "api_partner", "rest_ssr_hybrid", "uc_api+browser_ssr",
+                           "uc_api_url_first", "uc_api_url_first+browser_ssr"}
         actual_method = next((entry["method"] for entry in reversed(trace)
                               if isinstance(entry, dict) and isinstance(entry.get("method"), str)
                               and entry["method"] in allowed_methods), "other")
         if fallback_used and self.mode == "3":
             actual_method = "uc_api+browser_ssr"
+        elif fallback_used and self.mode == "4":
+            actual_method = "uc_api_url_first+browser_ssr"
         ssr_navigations = sum(1 for entry in trace if isinstance(entry, dict)
                               and entry.get("method") == "browser_ssr"
                               and type(entry.get("navigation_attempt")) is int

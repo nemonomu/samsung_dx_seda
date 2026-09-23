@@ -1,4 +1,4 @@
-"""One mode-3 process for selected Casas listing stages and their owned Chrome.
+"""One mode-3/mode-4 process for selected listing stages and their owned Chrome.
 
 No detail or DB modules are accepted. Each listing still finishes its normal
 manifest/CSV/diagnostic ZIP before the next selected stage starts.
@@ -39,8 +39,8 @@ def run_steps(module_names):
     from seda.common.retailer_runner import configure_retailer
     from seda.casas_bahia.listing_modes import close_browsers, selected_mode
 
-    if selected_mode() != "3":
-        raise ValueError("casas_listing_worker_requires_mode_3")
+    if selected_mode() not in {"3", "4"}:
+        raise ValueError("casas_listing_worker_requires_mode_3_or_4")
     try:
         configure_retailer("casas_bahia")
         for module_name in modules:
@@ -61,7 +61,7 @@ def run_steps(module_names):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Share mode-3 Chrome across selected Casas listing stages.")
+    parser = argparse.ArgumentParser(description="Share mode-3/mode-4 Chrome across selected Casas listing stages.")
     parser.add_argument("modules", nargs="+", choices=tuple(ALLOWED_MODULES))
     args = parser.parse_args(argv)
     return run_steps(args.modules)

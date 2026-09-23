@@ -50,7 +50,10 @@ ERRORS = {
     "isolated_driver_path_invalid", "existing_browser_attachment_rejected", "ssr_fallback_failed",
     "empty_products", "missing_product_identity", "duplicate_product_identity", "price_identity_mismatch",
     "missing_price", "no_relevant_parsed_products", "parsed_identity_or_price_mismatch", "invalid_listing_payload",
+    "missing_product_url_identity", "optional_price_diagnostics_failed", "price_attach_disabled",
+    "price_attach_failed", "price_request_failed", "invalid_price_offers", "invalid_price_json",
 }
+ERRORS |= {f"price_http_{status}" for status in range(100, 600)}
 EXCEPTIONS = {
     "TimeoutException", "WebDriverException", "SessionNotCreatedException",
     "InvalidSessionIdException", "NoSuchWindowException", "JavascriptException",
@@ -318,6 +321,7 @@ DIAGNOSTIC_NUMBERS = {
     "price_response_count", "bootstrap_navigation_count", "source_sku_aliases_added", "reported_page",
     "chrome_major", "document_navigations", "parser_sku_aliases_added",
     "navigation_attempt", "trigger_status_code",
+    "price_pending_products", "seller_pending_products",
 }
 DIAGNOSTIC_FLAGS = {
     "navigation_raised", "navigation_timeout", "new_loader_observed", "selected_document_response_seen",
@@ -337,7 +341,8 @@ def _trace_projection(value, depth=0):
         item = _mapping(item)
         safe = _numbers(item, DIAGNOSTIC_NUMBERS)
         safe.update(_flags(item, DIAGNOSTIC_FLAGS))
-        for key, values in (("method", {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid"}),
+        for key, values in (("method", {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid",
+                                         "uc_api_url_first", "uc_api_url_first+browser_ssr"}),
                             ("stage", {"bootstrap", "search", "price", "validation", "complete", "ssr_fallback"}),
                             ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
                             ("document_network_error", NETWORK_ERRORS | {"none", "other"}),
@@ -345,14 +350,17 @@ def _trace_projection(value, depth=0):
                             ("sort_evidence_source", {"response_and_observed_request", "observed_request_only", "not_requested"})):
             if key in item:
                 safe[key] = _enum(item[key], values)
-        if "error" in item:
-            safe["error"] = safe_error(item["error"])
+        for key in ("error", "price_error"):
+            if key in item:
+                safe[key] = safe_error(item[key])
         for key in ("search", "price"):
             if key in item:
                 safe[key] = api_summary(item[key])
         for key in ("browser_diagnostics", "diagnostics"):
             if depth < 2 and isinstance(item.get(key), dict):
                 safe[key] = _trace_projection([item[key]], depth + 1)[0]
+        if depth < 2 and isinstance(item.get("inner_attempts"), list):
+            safe["inner_attempts"] = _trace_projection(item["inner_attempts"], depth + 1)
         result.append(safe)
     return result
 
@@ -368,11 +376,12 @@ def project_event(event, payload):
     if event == "run_start":
         safe["product_line"] = _enum(payload.get("product_line"), {"TV", "REF", "LDY"})
         safe["run_id"] = _enum(payload.get("run_id"), {"main", "bsr"})
-        mode = _integer(payload.get("mode"), 3, 1)
+        mode = _integer(payload.get("mode"), 4, 1)
         if mode is not None:
             safe["mode"] = mode
         safe.update(_flags(payload, {"browser_session_reused", "bootstrap_previously_completed"}))
-        for key in ("pages", "configured_rest_page_size", "effective_mode3_page_size", "api_timeout_seconds", "min_search_interval_seconds", "attempt_limit"):
+        for key in ("pages", "configured_rest_page_size", "effective_mode3_page_size", "effective_mode4_page_size",
+                    "api_timeout_seconds", "min_search_interval_seconds", "attempt_limit"):
             number = _integer(payload.get(key), 1000 if key == "pages" else 10000)
             if number is not None:
                 safe[key] = number
@@ -405,7 +414,8 @@ def project_event(event, payload):
         safe.update(_numbers(payload, {"products", "rows", "status_code", "chrome_major", "new_api_calls_in_page", "filtered_unique_count", "ssr_navigation_attempts"}))
         safe.update(_flags(payload, {"success", "bootstrap_failure_reused", "fallback_used", "browser_reused", "recovery_pending"}))
         if "actual_method" in payload:
-            safe["actual_method"] = _enum(payload["actual_method"], {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid"})
+            safe["actual_method"] = _enum(payload["actual_method"], {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid",
+                                                                    "uc_api_url_first", "uc_api_url_first+browser_ssr"})
         safe["error"] = safe_error(payload.get("error"))
         safe["trace"] = _trace_projection(payload.get("trace"))
     elif event == "run_end":
@@ -517,6 +527,8 @@ def build_report(output_dir, *, archive_dir=None):
               "outcome": endings[-1] if endings else {"outcome": "interrupted"},
               "page_outcomes": pages, "api_timeline": calls, "first_api_403": first_403,
               "event_count": len(records), "ignored_lines": ignored, "partial_tail": partial}
+    effective_mode = 4 if report["run"].get("mode") == 4 else 3
+    effective_page_size = report["run"].get(f"effective_mode{effective_mode}_page_size", "not recorded")
     lines = ["# Casas Bahia automatic listing diagnostic report", "",
              "Evidence from the normal listing run; this report does not cover detail collection.",
              "No separate diagnostic requests are issued. Missing API detail does not establish that no traffic occurred.",
@@ -528,8 +540,8 @@ def build_report(output_dir, *, archive_dir=None):
              f"Existing browser reused at run start: {report['run'].get('browser_session_reused', 'not recorded')}",
              f"Bootstrap already validated at run start: {report['run'].get('bootstrap_previously_completed', 'not recorded')}",
              f"Configured REST page size: {report['run'].get('configured_rest_page_size', 'not recorded')}",
-             f"Effective mode 3 page size: {report['run'].get('effective_mode3_page_size', 'not recorded')}",
-             "The configured REST value and the effective mode 3 value may differ; this tool does not change either.",
+             f"Effective mode {effective_mode} page size: {effective_page_size}",
+             f"The configured REST value and the effective mode {effective_mode} value may differ; this tool does not change either.",
              f"Filtered unique products: {report['outcome'].get('filtered_unique_count', 'not recorded')}",
              f"Required unique products: {report['outcome'].get('required_unique', 'not recorded')}",
              f"Coverage complete: {report['outcome'].get('coverage_complete', 'not recorded')}",

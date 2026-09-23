@@ -4,18 +4,19 @@ import os
 from urllib.parse import parse_qs, urlsplit
 
 
-DEFAULT_MODE = "3"
+DEFAULT_MODE = "4"
 MODES = {
     "1": {"label": "rest_api", "fetch_mode": "casas_listing_rest"},
     "2": {"label": "hybrid", "fetch_mode": "casas_listing_hybrid"},
     "3": {"label": "uc_api", "fetch_mode": "casas_listing_uc_api"},
+    "4": {"label": "uc_api_url_first", "fetch_mode": "casas_listing_uc_api_url_first"},
 }
 
 
 def selected_mode(value=None):
     selected = str(value if value is not None else os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", DEFAULT_MODE)).strip()
     if selected not in MODES:
-        raise ValueError("invalid_casas_listing_mode_expected_1_2_3")
+        raise ValueError("invalid_casas_listing_mode_expected_1_2_3_4")
     return selected
 
 
@@ -33,6 +34,10 @@ def fetch_listing(url, timeout=None, mode=None):
         from .browser_api import fetch_listing as fetch_browser_api
 
         return fetch_browser_api(url, timeout=timeout)
+    if selected == "4":
+        from .browser_api_url_first import fetch_listing as fetch_url_first
+
+        return fetch_url_first(url, timeout=timeout)
     return _fetch_rest(url, timeout)
 
 
@@ -63,9 +68,9 @@ def _fetch_rest(url, timeout):
 
 
 def close_browsers():
-    from . import browser_api, browser_listing
+    from . import browser_api, browser_listing, browser_api_url_first, browser_listing_url_first
 
-    for client in (browser_api, browser_listing):
+    for client in (browser_api, browser_listing, browser_api_url_first, browser_listing_url_first):
         try:
             client.close_browser()
         except Exception as exc:

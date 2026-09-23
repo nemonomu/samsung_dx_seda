@@ -80,6 +80,15 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([event[1] for event in self.events], ["main", "bsr"])
         self.close.assert_called_once()
 
+    def test_mode_four_uses_same_owned_worker_lifecycle(self):
+        self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = "4"
+        self.assertEqual(worker.run_steps([MAIN, TARGETS, BSR]), 0)
+        self.assertEqual(self.events, [("listing", "main", {"retain_browser": True}),
+                                      ("targets", "main", {}),
+                                      ("listing", "bsr", {"retain_browser": True})])
+        self.assertEqual(self.environment["SEDA_RUN_ID"], "original")
+        self.close.assert_called_once()
+
     def test_bsr_only_still_owns_and_closes_its_browser(self):
         worker.run_steps([BSR])
         self.assertEqual(self.events, [("listing", "bsr", {"retain_browser": True})])
@@ -141,7 +150,7 @@ class WorkerTests(unittest.TestCase):
     def test_worker_rejects_mode_one_two_without_configuring_or_launching(self):
         for mode in ("1", "2"):
             self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = mode
-            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "requires_mode_3"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "requires_mode_3_or_4"):
                 worker.run_steps([MAIN])
         self.configure.assert_not_called()
         self.import_module.assert_not_called()
@@ -422,6 +431,13 @@ class ExecutionGroupingTests(unittest.TestCase):
         steps = listing_steps()
         self.assertEqual(self.groups(steps), [(tuple(steps), True)])
 
+    def test_mode_four_and_unset_default_keep_main_bsr_together(self):
+        steps = listing_steps()
+        self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = "4"
+        self.assertEqual(self.groups(steps), [(tuple(steps), True)])
+        self.environment.pop("SEDA_CASAS_BAHIA_LISTING_MODE")
+        self.assertEqual(self.groups(steps), [(tuple(steps), True)])
+
     def test_explicit_subset_is_not_expanded(self):
         main, targets, bsr = listing_steps()
         self.assertEqual(self.groups([main, bsr]), [((main, bsr), True)])
@@ -498,6 +514,13 @@ class OrchestratorDispatchTests(unittest.TestCase):
             self.dispatch()
         self.assertEqual(caught.exception.code, 7)
         self.run.assert_called_once()
+
+    def test_mode_four_dispatches_shared_listing_worker_before_rank(self):
+        self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = "4"
+        self.dispatch()
+        self.assertEqual([call.args[0] for call in self.run.call_args_list],
+                         [WORKER, "seda.casas_bahia.step04_bsr_rank"])
+        self.assertEqual(self.run.call_args_list[0].kwargs["args"], [MAIN, TARGETS, BSR])
 
     def test_dry_run_prints_worker_command_without_starting_usage_or_completion_actions(self):
         self.dispatch(dry=True)

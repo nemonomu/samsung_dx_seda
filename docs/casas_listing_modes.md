@@ -1,6 +1,6 @@
 # Casas Bahia listing modes
 
-최종 선택 기본값: **3 (UC + API)**. Main 및 BSR listing에만 적용하며 Detail의 `SEDA_FETCH_MODE=graphql`과 기존 상세·보강·저장·업로드·DB 경로는 바꾸지 않는다.
+최종 선택 기본값: **4 (UC + API, URL-first)**. 기존 mode 1/2/3의 수집 동작은 유지한다. Mode 4만 가격·판매자 연결 실패가 상품 URL 수집을 막지 않으며, 기존 Detail 후 남은 가격을 제한적으로 보완한다. 상세 라우팅·CSV·DB 형식은 유지한다. [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 | 번호 | 이름 | 실행 경로 | 실패 시 |
 | --- | --- | --- | --- |
@@ -8,25 +8,38 @@
 | 2 | hybrid | 기존 REST 최대 3회 → Chrome 실제 페이지 + SSR/가격 응답 | 기존 hybrid의 제한 재접속·실패 처리 유지 |
 | 3 | UC + API | 최초 Chrome 실제 페이지 검증 → 같은 Document에서 JS 검색 GET + 가격 POST | 기존 최대 3회 후 최종 HTTP 403이면 같은 Chrome으로 모드 2의 SSR 수집 부분 실행 |
 
+| 4 | UC + API URL-first | 전용 새 Chrome → 브라우저 검색 API, 검색 403 시 같은 Chrome SSR | URL 확보 시 가격·판매자 누락으로 실패시키지 않음. Detail의 남은 누락 가격만 기존 REST로 보완 |
+
 ## 실행과 최종 선택
 
 ```bat
-rem 최종 기본값 3으로 TV -> REF -> LDY 전체 실행
+rem 최종 기본값 4로 TV -> REF -> LDY 전체 실행
 run_casas_bahia_tv_ref_ldy_full.bat
 
 rem 이번 실행만 모드 지정
 run_casas_bahia_tv_ref_ldy_full.bat 1
 run_casas_bahia_tv_ref_ldy_full.bat 2
 run_casas_bahia_tv_ref_ldy_full.bat 3
+run_casas_bahia_tv_ref_ldy_full.bat 4
 ```
 
-배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=3"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 1/2/3 이외의 값은 수집 전에 거부한다.
+배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=4"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 1/2/3/4 이외의 값은 수집 전에 거부한다.
 
-Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 3이다. 이 모드 변수는 listing 전용이다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
+Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 4이다. 이 모드 변수는 listing 전용이다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
 
-각 Casas listing 코드 수정 시 세 모드를 유지하고, 최종 선택 숫자를 명시적으로 확인·기록해야 한다. 현재 선택은 3이며 변경 요청 없이 다른 모드로 바꾸지 않는다.
+각 Casas listing 코드 수정 시 네 모드를 유지하고, 최종 선택 숫자를 명시적으로 확인·기록해야 한다. 현재 선택은 4이며 변경 요청 없이 다른 모드로 바꾸지 않는다.
 
-## 모드 3의 정확한 범위
+## 모드 4의 추가 동작
+
+- 모드 3의 연결·Chrome 준비 조건을 기반으로 별도 모듈을 사용한다. 모드 3의 기존 구현은 변경하지 않는다.
+- Listing 성공은 상품 URL·기존 필터·페이지/정렬/순서 검증으로 판단한다. 가격·판매자 누락은 가격 보류 상태로 기록한다.
+- 검색 최대 3회 후 최종 403이면 같은 Chrome SSR로 전환한다. 가격만 실패하면 검색이나 SSR을 반복하지 않는다.
+- SSR Document가 완료되면 확보된 상품을 사용한다. 가격 응답 부재만으로 추가 대기/탐색하지 않는다.
+- Main→BSR Chrome 공유와 main 300/BSR 100 기준은 모드 3과 같다.
+- 모드 4에서만 기존 Detail 후에도 최종 가격이 빈 행에 제한된 기존 가격 REST 보완을 수행한다. 이미 있는 값은 덮어쓰지 않는다.
+- 진단·raw metadata·manifest는 모드 4를 별도로 기록한다. 모드 1/2/3과 raw를 섞어 재사용하지 않는다.
+
+## 모드 3의 정확한 범위 (기존 동작 유지)
 
 - 실행 조건은 성공한 로컬 TV 1→2→3→2 실험에 맞춘다. 시작 로그의 `execution_profile=successful_local_probe`로 확인한다. 세 번째 모드의 조건 정렬이지 새로운 네 번째 모드는 아니다.
 - 매 listing 프로세스에 전용 새 Chrome 프로필을 사용한다. 기존 Chrome 계정 로그인·쿠키·사용자 프로필에 의존하지 않는다. 성공한 로컬 실험도 새 프로필이었다.

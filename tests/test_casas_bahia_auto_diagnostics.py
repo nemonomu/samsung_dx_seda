@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 import zipfile
 
 from seda import step01_main_list as listing
-from seda.casas_bahia import browser_api, listing_auto_diagnostics as auto, listing_modes, search_api
+from seda.casas_bahia import (browser_api, browser_api_url_first,
+                              listing_auto_diagnostics as auto, listing_modes, search_api)
 
 
 CANARY = "SYNTHETIC_PRIVATE_TEXT_DO_NOT_EXPORT"
@@ -86,6 +87,7 @@ class AutomaticIntegrationTests(unittest.TestCase):
 
         self.stack.enter_context(patch.object(auto.AutomaticListingDiagnostics, "__init__", constructor))
         self.stack.enter_context(patch.object(browser_api, "_SESSION", None))
+        self.stack.enter_context(patch.object(browser_api_url_first, "_SESSION", None))
         self.fetch = browser_api._browser_fetch
         self.network = browser_api._network_evidence
         self.stack.enter_context(patch.object(search_api, "_params", return_value={"resultsperpage": "20", "sessionid": CANARY}))
@@ -134,6 +136,83 @@ class AutomaticIntegrationTests(unittest.TestCase):
         page = self.report()["page_outcomes"][0]
         self.assertTrue(page["bootstrap_failure_reused"])
         self.assertEqual(page["new_api_calls_in_page"], 0)
+
+    def test_mode_four_hooks_only_new_api_and_zip_keeps_get403_and_ssr_success(self):
+        api = browser_api_url_first
+        driver = Mock()
+        response = ({"status_code": 403, "error": "api_http_not_200", "body": CANARY}, None)
+        network_result = {"request_response_verified": False}
+        url = "https://example.invalid/search?page=1"
+        network_messages = [
+            {"method": "Network.requestWillBeSent", "params": {
+                "requestId": CANARY, "request": {"url": url, "method": "GET", "headers": {"private": CANARY}}}},
+            {"method": "Network.responseReceived", "params": {
+                "requestId": CANARY, "response": {"status": 403, "mimeType": "text/html"}}},
+        ]
+
+        def fetch(*args):
+            self.assertIs(api._network_evidence(network_messages, {}, url, "GET", None), network_result)
+            return response
+
+        with patch.object(api, "_browser_fetch", side_effect=fetch) as original_fetch, \
+                patch.object(api, "_network_evidence", return_value=network_result) as original_network:
+            diagnostic = auto.start_diagnostics("4", "main", [1], "TV")
+            self.assertIs(diagnostic.observer.api, api)
+            self.assertIs(browser_api._browser_fetch, self.fetch)
+            self.assertIs(browser_api._network_evidence, self.network)
+            auto.record_event("page_start", 1)
+            args = (driver, url, {"page": 1, "resultsperpage": 20, "sessionid": CANARY},
+                    "GET", {"private": CANARY}, None, 25, {"private": CANARY})
+            self.assertIs(api._browser_fetch(*args), response)
+            auto.record_event("page_end", 1, True, 1, 1, "", [
+                {"method": "uc_api_url_first", "stage": "search", "status_code": 403, "error": "api_http_not_200"},
+                {"method": "browser_ssr", "stage": "ssr_fallback", "navigation_attempt": 1, "status_code": 200},
+                {"method": "browser_ssr", "stage": "ssr_fallback", "fallback_used": True,
+                 "browser_reused": True, "trigger_status_code": 403, "status_code": 200},
+            ])
+            auto.record_event("manifest_ready", {"complete": True, "downstream_allowed": True})
+            auto.finish_diagnostics(diagnostic)
+            self.assertIs(api._browser_fetch, original_fetch)
+            self.assertIs(api._network_evidence, original_network)
+            original_fetch.assert_called_once_with(*args)
+            original_network.assert_called_once()
+        self.assertEqual(driver.mock_calls, [])
+        report = self.report()
+        self.assertEqual(report["run"]["mode"], 4)
+        self.assertEqual(report["run"]["effective_mode4_page_size"], 20)
+        self.assertNotIn("effective_mode3_page_size", report["run"])
+        self.assertEqual(report["first_api_403"]["method"], "GET")
+        self.assertEqual(report["first_api_403"]["call_number"], 1)
+        page = report["page_outcomes"][0]
+        self.assertTrue(page["success"])
+        self.assertEqual(page["actual_method"], "uc_api_url_first+browser_ssr")
+        self.assertEqual(page["new_api_calls_in_page"], 1)
+        self.assertEqual(page["ssr_navigation_attempts"], 1)
+        self.assertFalse(page["bootstrap_failure_reused"])
+        self.assertIs(browser_api._browser_fetch, self.fetch)
+        with zipfile.ZipFile(self.archives()[-1]) as archive:
+            events = [json.loads(line) for line in archive.read("events.jsonl").decode("utf-8").splitlines()]
+        self.assertEqual(sum(item["event"] == "network" for item in events), 1)
+
+    def test_mode_three_observer_does_not_touch_new_api_or_claim_mode_four_metadata(self):
+        original_fetch = browser_api_url_first._browser_fetch
+        diagnostic = auto.start_diagnostics("3", "main", [1], "TV")
+        self.assertIs(diagnostic.observer.api, browser_api)
+        self.assertIs(browser_api_url_first._browser_fetch, original_fetch)
+        auto.finish_diagnostics(diagnostic)
+        run = self.report()["run"]
+        self.assertEqual(run["effective_mode3_page_size"], 20)
+        self.assertNotIn("effective_mode4_page_size", run)
+
+    def test_mode_four_archive_failure_restores_only_new_hooks(self):
+        original_fetch, original_network = browser_api_url_first._browser_fetch, browser_api_url_first._network_evidence
+        diagnostic = auto.start_diagnostics("4", "bsr", [1], "LDY")
+        with patch.object(diagnostic.writer, "finish", side_effect=OSError(CANARY)):
+            auto.finish_diagnostics(diagnostic)
+        self.assertIs(browser_api_url_first._browser_fetch, original_fetch)
+        self.assertIs(browser_api_url_first._network_evidence, original_network)
+        self.assertIs(browser_api._browser_fetch, self.fetch)
+        self.assertIsNone(auto._ACTIVE)
 
     def test_mode_one_and_two_have_no_api_hooks_or_fake_zero_traffic_claim(self):
         for mode in ("1", "2"):

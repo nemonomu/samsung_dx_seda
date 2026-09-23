@@ -849,6 +849,73 @@ def _merge_magalu_reviews(row, product_url, trace_rows=None, row_index=""):
     return result
 
 
+def _backfill_casas_listing_prices(
+    rows,
+    *,
+    checkpoint_every=25,
+    trace_rows=None,
+    row_index_offset=0,
+    checkpoint_writer=None,
+    fetcher=None,
+):
+    """After normal detail work, fill only still-missing Casas price quotes."""
+    if os.getenv("SEDA_CASAS_BAHIA_API_ENRICH", "1").lower() in {"0", "false", "no", "n"}:
+        return rows
+    from .casas_bahia.detail_price_recovery import PRICE_FIELDS, is_blank, recover_missing_price
+
+    candidates = [(index, row) for index, row in enumerate(rows, start=row_index_offset + 1)
+                  if row.get("retailer") == "Casas Bahia" and is_blank(row.get("final_sku_price"))]
+    if not candidates:
+        return rows
+    from .casas_bahia.listing_modes import selected_mode
+
+    if selected_mode() != "4":
+        return rows
+    print(f"[seda] casas detail price recovery candidates={len(candidates)} "
+          "source=existing_rest max_calls_per_identity=1", flush=True)
+    cache = {}
+    recovered = requests_made = 0
+    for position, (index, row) in enumerate(candidates, 1):
+        try:
+            result = recover_missing_price(row, cache=cache, fetcher=fetcher)
+        except Exception:
+            # Keep the row and its blanks. Never expose an exception message,
+            # API response body, request parameters, or request headers.
+            result = {"success": False, "attempted": False, "cache_hit": False,
+                      "status_code": 0, "error": "price_recovery_error", "detail": {}}
+        requests_made += int(result.get("attempted") is True)
+        filled = []
+        if result.get("success"):
+            for field in PRICE_FIELDS:
+                value = (result.get("detail") or {}).get(field)
+                if is_blank(row.get(field)) and not is_blank(value):
+                    row[field] = value
+                    filled.append(field)
+        success = "final_sku_price" in filled
+        if success:
+            recovered += 1
+            token = "casas_detail_price_recovered"
+            row["fetch_method"] = _append_token(row.get("fetch_method", ""),
+                "casas_bahia_detail_price_cache" if result.get("cache_hit") else "casas_bahia_detail_price_api")
+        else:
+            state = "skipped" if not result.get("attempted") and not result.get("cache_hit") else "failed"
+            token = f"casas_detail_price_{state}:{result.get('error') or 'price_not_recovered'}"
+        row["parse_status"] = _append_token(row.get("parse_status", ""), token)
+        _record_subcall(trace_rows, row, index, row.get("product_url", ""), "casas_missing_price_recovery",
+                        method="casas_bahia_detail_price_cache" if result.get("cache_hit") else "casas_bahia_detail_price_api",
+                        success=success, status_code=result.get("status_code", 0),
+                        attempt=1 if result.get("attempted") else 0,
+                        error="" if success else result.get("error", "price_not_recovered"),
+                        detail=f"cache_hit:{int(result.get('cache_hit') is True)};filled:{','.join(filled)}")
+        if checkpoint_writer is not None and checkpoint_every and position % checkpoint_every == 0:
+            checkpoint_writer(rows)
+    if checkpoint_writer is not None and (not checkpoint_every or len(candidates) % checkpoint_every):
+        checkpoint_writer(rows)
+    print(f"[seda] casas detail price recovery recovered={recovered}/{len(candidates)} "
+          f"requests={requests_made} remaining={len(candidates) - recovered}", flush=True)
+    return rows
+
+
 def _merge_casas_bahia_apis(row):
     if row.get("retailer") != "Casas Bahia":
         return
@@ -3701,6 +3768,13 @@ def _run_detail_main(root, *, is_worker):
         enriched,
         output,
         checkpoint_every=checkpoint_every,
+        checkpoint_writer=checkpoint_writer,
+    )
+    enriched = _backfill_casas_listing_prices(
+        enriched,
+        checkpoint_every=checkpoint_every,
+        trace_rows=subcall_trace_rows,
+        row_index_offset=skip if is_worker else 0,
         checkpoint_writer=checkpoint_writer,
     )
     _checkpoint_detail_state(

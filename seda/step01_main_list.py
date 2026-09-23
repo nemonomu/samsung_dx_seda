@@ -576,7 +576,10 @@ def _main_once():
                     run_id,
                 )
                 if config.name == "Casas Bahia":
-                    from .casas_bahia.listing_hybrid import _validation_error
+                    if casas_mode == "4":
+                        from .casas_bahia.listing_url_first import _validation_error
+                    else:
+                        from .casas_bahia.listing_hybrid import _validation_error
 
                     raw_error = _casas_raw_mode_error(raw_path, casas_mode, url) or _validation_error(raw_text, url)
                 if raw_error:

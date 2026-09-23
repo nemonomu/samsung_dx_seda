@@ -7,9 +7,11 @@ import requests
 PRICE_URL = "https://api.casasbahia.com.br/merchandising/oferta/v1/Preco/Oferta/PrecoVenda/"
 
 
-def fetch_listing_prices(products, timeout=None):
+def fetch_listing_prices(products, timeout=None, *, include_offers=False):
     product_items, sku_items = _price_items(products)
     if not product_items and not sku_items:
+        if include_offers:
+            return {"success": False, "prices": {}, "offers": [], "status_code": 0, "error": "empty_price_items"}
         return {"success": False, "prices": {}, "error": "empty_price_items"}
 
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
@@ -17,9 +19,14 @@ def fetch_listing_prices(products, timeout=None):
     try:
         response = requests.post(PRICE_URL, params=_params(), headers=_headers(), json=body, timeout=timeout)
     except Exception as exc:
+        if include_offers:
+            return {"success": False, "prices": {}, "offers": [], "status_code": 0, "error": "price_request_failed"}
         return {"success": False, "prices": {}, "error": f"{type(exc).__name__}: {exc}"}
 
     if response.status_code != 200:
+        if include_offers:
+            return {"success": False, "prices": {}, "offers": [], "status_code": response.status_code,
+                    "error": f"price_http_{response.status_code}"}
         return {
             "success": False,
             "prices": {},
@@ -28,10 +35,19 @@ def fetch_listing_prices(products, timeout=None):
     try:
         data = response.json()
     except ValueError:
+        if include_offers:
+            return {"success": False, "prices": {}, "offers": [], "status_code": response.status_code,
+                    "error": "invalid_price_json"}
         return {"success": False, "prices": {}, "error": "invalid_price_json"}
 
+    if include_offers and (not isinstance(data, dict) or not isinstance(data.get("Ofertas"), list)):
+        return {"success": False, "prices": {}, "offers": [], "status_code": response.status_code,
+                "error": "invalid_price_offers"}
     prices = {}
+    normalized_offers = []
     for offer in data.get("Ofertas") or []:
+        if include_offers and not isinstance(offer, dict):
+            continue
         price = offer.get("PrecoVenda") if isinstance(offer.get("PrecoVenda"), dict) else {}
         discount = (
             offer.get("DescontoFormaPagamento")
@@ -52,9 +68,14 @@ def fetch_listing_prices(products, timeout=None):
             "skuId": price.get("IdSku") or availability.get("IdSku"),
             "productId": price.get("IdProduto"),
         }
+        if include_offers:
+            normalized_offers.append(normalized)
         for key in (price.get("IdProduto"), price.get("IdSku")):
             if key not in (None, ""):
                 prices[str(key)] = normalized
+    if include_offers:
+        return {"success": True, "prices": prices, "offers": normalized_offers,
+                "status_code": response.status_code, "count": len(prices)}
     return {"success": True, "prices": prices, "count": len(prices)}
 
 

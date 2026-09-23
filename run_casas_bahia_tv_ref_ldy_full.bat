@@ -3,19 +3,21 @@ setlocal
 
 cd /d "%~dp0"
 
-rem Choose listing mode: 1=REST API, 2=REST + Chrome SSR hybrid, 3=UC + browser API.
-rem Final selected default. Optional first argument 1/2/3 overrides this run only.
-set "SEDA_CASAS_BAHIA_LISTING_MODE=3"
+rem Listing: 1=REST API, 2=hybrid, 3=UC + API, 4=URL-first UC + API.
+rem Final selected default. Optional first argument 1/2/3/4 overrides this run only.
+set "SEDA_CASAS_BAHIA_LISTING_MODE=4"
 if not "%~1"=="" set "SEDA_CASAS_BAHIA_LISTING_MODE=%~1"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" goto :listing_mode_valid
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="4" goto :listing_mode_valid
 goto :invalid_listing_mode
 
 :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=hybrid"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=uc_api"
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="4" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=uc_api_url_first"
 
 if not exist "%~dp0seda\casas_bahia\log" mkdir "%~dp0seda\casas_bahia\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
@@ -76,5 +78,5 @@ call :log "[SEDA] Casas Bahia LDY full run failed"
 exit /b 1
 
 :invalid_listing_mode
-echo [SEDA] Invalid listing mode. Use 1=REST API, 2=hybrid, or 3=UC+API.
+echo [SEDA] Invalid listing mode. Use 1=REST API, 2=hybrid, 3=UC+API, or 4=URL-first UC+API.
 exit /b 2

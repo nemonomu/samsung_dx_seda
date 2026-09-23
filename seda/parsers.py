@@ -791,12 +791,23 @@ def _parse_casas_bahia_ssr_listing(html_text, base_url, source_url, run_id):
         row = _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, len(rows) + 1)
         snapshot = snapshots.get(normalized_product_url(row.get("product_url", ""))) or {}
         for key, value in snapshot.items():
+            if (product.get("_casas_listing_url_first") is True
+                    and key == "seller_id" and product.get("_casas_listing_seller_pending") is True):
+                continue
+            if product.get("_casas_listing_url_first") is True and key in {"original_sku_price", "final_sku_price", "savings", "seller_id"} and (
+                product.get("_casas_listing_price_pending") is True or not row.get("final_sku_price")
+            ):
+                # A card price without a verified source offer must not turn a
+                # URL-first/pending product into an apparently priced listing.
+                continue
             if value and not row.get(key):
                 row[key] = value
         rows.append(row)
     return rows
 
 def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
+    product = _casas_bahia_guard_listing_quote(product, base_url)
+    url_first = product.get("_casas_listing_url_first") is True
     now = datetime.now().isoformat(timespec="seconds")
     product_url = absolute_url(base_url, product.get("href") or product.get("url") or "")
     price = product.get("price") if isinstance(product.get("price"), dict) else {}
@@ -812,8 +823,12 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
     seals = product.get("seals") if isinstance(product.get("seals"), list) else []
     sku_status = _casas_bahia_sku_status(product)
     title = product.get("title") or product.get("name")
+    price_pending = url_first and product.get("_casas_listing_price_pending") is True
     old_price = _first_value(price, ["oldPrice", "priceFrom"]) or product.get("oldPrice")
     current_price = _first_value(price, ["currentPrice", "price", "bestPrice"]) or product.get("price")
+    if url_first:
+        old_price = _casas_bahia_scalar_listing_price(old_price)
+        current_price = _casas_bahia_scalar_listing_price(current_price)
     discount_rate = product.get("discountRate") or _first_value(price, ["discountRate", "discount"])
     discount_description = clean_text(price.get("discountDescription") or product.get("priceDescription"))
 
@@ -826,13 +841,13 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
         "bsr_rank": rank if run_id == "bsr" else "",
         "product_url": product_url,
         "retailer_sku_name": clean_text(title),
-        "original_sku_price": format_brl(old_price),
-        "final_sku_price": format_brl(current_price),
-        "savings": _casas_bahia_savings_text(price, discount_rate),
+        "original_sku_price": "" if price_pending else format_brl(old_price),
+        "final_sku_price": "" if price_pending else format_brl(current_price),
+        "savings": "" if price_pending else _casas_bahia_savings_text(price, discount_rate),
         "sku_status": sku_status,
-        "discount_type": _casas_bahia_ssr_discount_text(price, flags, seals),
+        "discount_type": _casas_bahia_ssr_discount_text({} if price_pending else price, flags, seals),
         "delivery_availability": "",
-        "pick_up_availability": _casas_bahia_availability_pickup_text(price) or _casas_bahia_pickup_text(flags),
+        "pick_up_availability": _casas_bahia_availability_pickup_text({} if price_pending else price) or _casas_bahia_pickup_text(flags),
         "sku": _casas_bahia_listing_sku(title or "")
         or ("" if product_line() in {"REF", "LDY"} else clean_text(product.get("idSku") or product.get("sku")) or sku_from_url(product_url)),
         "screen_size": screen_size_from_text(title or ""),
@@ -843,10 +858,93 @@ def _casas_bahia_ssr_product_row(product, base_url, source_url, run_id, rank):
         "source_url": source_url,
         "crawl_datetime": now,
         "fetch_method": "casas_bahia_ssr_next_data",
-        "parse_status": "listing_casas_bahia_partner_api" if product.get("name") else "listing_casas_bahia_ssr",
+        "parse_status": _casas_bahia_listing_parse_status(
+            product, "listing_casas_bahia_partner_api" if product.get("name") else "listing_casas_bahia_ssr"),
         "retailer_product_id": clean_text(product.get("id")),
-        "seller_id": clean_text(product.get("lojista") or product.get("sellerId")),
+        "seller_id": "" if url_first and product.get("_casas_listing_seller_pending") is True else clean_text(product.get("lojista") or product.get("sellerId")),
     }
+
+
+def _casas_bahia_scalar_listing_price(value):
+    # Never stringify a missing quote's price object into a monetary CSV cell.
+    return "" if isinstance(value, (dict, list, tuple, set, bool)) else value
+
+
+def _casas_bahia_guard_listing_quote(product, base_url):
+    """Quarantine explicit cached-offer contradictions without rejecting a URL.
+
+    Older embedded quotes did not always carry identity fields. Missing quote
+    fields remain optional; only supplied malformed/conflicting IDs invalidate
+    those values. Work on a copy so raw source evidence stays unchanged.
+    """
+    if product.get("_casas_listing_url_first") is not True:
+        return product
+    guarded = dict(product)
+
+    def positive_id(value):
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return ""
+        text = str(value).strip()
+        return text.lstrip("0") if re.fullmatch(r"[0-9]+", text) else ""
+
+    product_url = absolute_url(base_url, product.get("href") or product.get("url") or "")
+    url_sku = positive_id(sku_from_url(product_url))
+    price_pending = product.get("_casas_listing_price_pending") is True
+    seller_pending = product.get("_casas_listing_seller_pending") is True
+    source_id = positive_id(product.get("id"))
+    if product.get("id") not in (None, "") and not source_id:
+        guarded.pop("id", None)
+        price_pending = True
+    for key in ("idSku", "sku"):
+        value = product.get(key)
+        if value not in (None, "") and (not positive_id(value) or (url_sku and positive_id(value) != url_sku)):
+            guarded.pop(key, None)
+            guarded.pop("id", None)
+            source_id = ""
+            price_pending = True
+    sellers = set()
+    seller_invalid = False
+    for key in ("lojista", "sellerId"):
+        value = product.get(key)
+        if value not in (None, ""):
+            identity = positive_id(value)
+            if identity:
+                sellers.add(identity)
+            else:
+                seller_invalid = True
+    if len(sellers) > 1:
+        seller_invalid = True
+    source_seller = next(iter(sellers)) if len(sellers) == 1 and not seller_invalid else ""
+    quote = product.get("price") if isinstance(product.get("price"), dict) else {}
+    for key, expected in (("productId", source_id), ("skuId", url_sku), ("sellerId", source_seller)):
+        value = quote.get(key)
+        if value in (None, ""):
+            continue
+        actual = positive_id(value)
+        if not actual or (expected and actual != expected):
+            price_pending = True
+    if seller_invalid:
+        seller_pending = True
+        price_pending = True
+    if seller_pending:
+        guarded.pop("lojista", None)
+        guarded.pop("sellerId", None)
+        guarded["_casas_listing_seller_pending"] = True
+    if price_pending:
+        guarded["_casas_listing_price_pending"] = True
+    return guarded
+
+
+def _casas_bahia_listing_parse_status(product, base):
+    if product.get("_casas_listing_url_first") is not True:
+        return base
+    tokens = [base]
+    if product.get("_casas_listing_price_pending") is True:
+        tokens.append("casas_listing_price_pending")
+    if product.get("_casas_listing_seller_pending") is True:
+        tokens.append("casas_listing_seller_pending")
+    return "+".join(tokens)
+
 
 def _casas_bahia_availability_pickup_text(price):
     availability = price.get("availability") if isinstance(price.get("availability"), dict) else {}
@@ -865,6 +963,8 @@ def _casas_bahia_sku_status(product):
     return "Sponsored" if re.search(r"patrocinado|sponsored", tag, re.I) else ""
 
 def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
+    product = _casas_bahia_guard_listing_quote(product, base_url)
+    url_first = product.get("_casas_listing_url_first") is True
     now = datetime.now().isoformat(timespec="seconds")
     product_url = absolute_url(base_url, product.get("url") or "")
     rating = clean_text(product.get("reviews"))
@@ -872,6 +972,7 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
     discount_rate = product.get("discountRate")
     flags = product.get("flags") if isinstance(product.get("flags"), list) else []
     stamp = product.get("stamp") if isinstance(product.get("stamp"), dict) else {}
+    price_pending = url_first and product.get("_casas_listing_price_pending") is True
 
     return {
         "retailer": "Casas Bahia",
@@ -882,9 +983,9 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
         "bsr_rank": rank if run_id == "bsr" else "",
         "product_url": product_url,
         "retailer_sku_name": clean_text(product.get("title")),
-        "original_sku_price": format_brl(product.get("oldPrice")),
-        "final_sku_price": format_brl(product.get("price")),
-        "savings": _baixou_text(discount_rate),
+        "original_sku_price": "" if price_pending else format_brl(_casas_bahia_scalar_listing_price(product.get("oldPrice")) if url_first else product.get("oldPrice")),
+        "final_sku_price": "" if price_pending else format_brl(_casas_bahia_scalar_listing_price(product.get("price")) if url_first else product.get("price")),
+        "savings": "" if price_pending else _baixou_text(discount_rate),
         "sku_status": _casas_bahia_sku_status(product),
         "discount_type": _casas_bahia_discount_text(product, flags, stamp),
         "delivery_availability": "",
@@ -899,9 +1000,9 @@ def _casas_bahia_product_row(product, base_url, source_url, run_id, rank):
         "source_url": source_url,
         "crawl_datetime": now,
         "fetch_method": "casas_bahia_showcase",
-        "parse_status": "listing_casas_bahia_showcase",
+        "parse_status": _casas_bahia_listing_parse_status(product, "listing_casas_bahia_showcase"),
         "retailer_product_id": clean_text(product.get("id")),
-        "seller_id": clean_text(product.get("sellerId")),
+        "seller_id": "" if url_first and product.get("_casas_listing_seller_pending") is True else clean_text(product.get("sellerId")),
     }
 
 def _casas_bahia_tv_listing(source_url, search):

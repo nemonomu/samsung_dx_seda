@@ -166,7 +166,7 @@ class ProjectionTests(unittest.TestCase):
     def test_actual_modes_and_partial_coverage_policy(self):
         for mode in (1, 2, 3):
             self.assertEqual(evidence.project_event("run_start", {"mode": mode})["mode"], mode)
-        self.assertNotIn("mode", evidence.project_event("run_start", {"mode": 4}))
+        self.assertNotIn("mode", evidence.project_event("run_start", {"mode": 5}))
         ending = evidence.project_event("run_end", {"outcome": "accepted_with_failures", "filtered_unique_count": 343,
             "required_unique": 300, "downstream_allowed": True, "coverage_complete": False,
             "accepted_with_failures": True, "failed_page_numbers": [20, 18, 19, 18, 0, 1001, CANARY]})
