@@ -448,6 +448,56 @@ def _write_magalu_raw_result(raw_path, root, retailer_key, page, url, result):
     failed_path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _leaf_fetch_attempts(attempts):
+    leaves = []
+    for attempt in attempts or []:
+        if not isinstance(attempt, dict):
+            continue
+        inner_attempts = attempt.get("inner_attempts") or []
+        if inner_attempts:
+            leaves.extend(_leaf_fetch_attempts(inner_attempts))
+        else:
+            leaves.append(attempt)
+    return leaves
+
+
+def _log_listing_page_failure(run_id, retailer, page, method, error, attempts):
+    leaves = _leaf_fetch_attempts(attempts)
+    status_counts = {}
+    last_status = 0
+    for attempt in leaves:
+        try:
+            status_code = int(attempt.get("status_code") or 0)
+        except (AttributeError, TypeError, ValueError):
+            status_code = 0
+        last_status = status_code or last_status
+        status_counts[status_code] = status_counts.get(status_code, 0) + 1
+    statuses = ",".join(f"{status}x{count}" for status, count in status_counts.items()) or "none"
+    error_label = str(error or "empty_response").split(":", 1)[0]
+    print(
+        f"[seda] {run_id} {retailer} page={page} listing fetch FAILED "
+        f"method={method or 'unknown'} status={last_status} attempts={len(leaves)} "
+        f"statuses={statuses} error={error_label}",
+        flush=True,
+    )
+
+
+def _casas_raw_mode_path(raw_path):
+    return raw_path.with_suffix(".mode.json")
+
+
+def _casas_raw_mode_error(raw_path, mode, url):
+    try:
+        metadata = json.loads(_casas_raw_mode_path(raw_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "raw_listing_mode_unverified"
+    if not isinstance(metadata, dict) or metadata.get("listing_mode") != mode:
+        return "raw_listing_mode_mismatch"
+    if metadata.get("source_url") != url:
+        return "raw_listing_source_mismatch"
+    return ""
+
+
 def _main_once():
     run_id = os.getenv("SEDA_RUN_ID", "main").strip().lower()
     root = run_root() / run_id
@@ -460,6 +510,13 @@ def _main_once():
     no_growth_limit = int(os.getenv("SEDA_UNIQUE_NO_GROWTH_LIMIT", "5"))
     for retailer_key in selected_retailers():
         config = RETAILERS[retailer_key]
+        casas_mode = None
+        casas_fetch_mode = None
+        if retailer_key == "casas_bahia":
+            from .casas_bahia.listing_modes import fetch_mode, selected_mode
+
+            casas_mode = selected_mode()
+            casas_fetch_mode = fetch_mode(casas_mode)
         rank_offsets.setdefault(retailer_key, 0)
         unique_seen = set()
         no_growth_pages = 0
@@ -478,6 +535,10 @@ def _main_once():
                     url,
                     run_id,
                 )
+                if config.name == "Casas Bahia":
+                    from .casas_bahia.listing_hybrid import _validation_error
+
+                    raw_error = _casas_raw_mode_error(raw_path, casas_mode, url) or _validation_error(raw_text, url)
                 if raw_error:
                     print(
                         f"[seda] {run_id} {config.name} page={page} "
@@ -491,12 +552,20 @@ def _main_once():
                 attempts = []
                 error = ""
             else:
-                result = fetch_url(url)
+                result = fetch_url(url, mode=casas_fetch_mode) if config.name == "Casas Bahia" else fetch_url(url)
                 if config.name == "Magalu":
                     _write_magalu_raw_result(raw_path, root, retailer_key, page, url, result)
                 else:
                     raw_path.parent.mkdir(parents=True, exist_ok=True)
+                    if retailer_key == "casas_bahia":
+                        # A failed/interrupted raw rewrite must not retain an
+                        # old mode sidecar claiming provenance for the new raw.
+                        _casas_raw_mode_path(raw_path).unlink(missing_ok=True)
                     raw_path.write_text(result.text or result.error, encoding="utf-8", errors="ignore")
+                    if retailer_key == "casas_bahia":
+                        _casas_raw_mode_path(raw_path).write_text(json.dumps({
+                            "listing_mode": casas_mode, "fetch_mode": casas_fetch_mode, "source_url": url,
+                        }, ensure_ascii=False), encoding="utf-8")
                 text = result.text
                 method = result.method
                 attempts = result.attempts
@@ -510,6 +579,15 @@ def _main_once():
                     "attempts": attempts,
                 }
                 failures.append(failure)
+                if retailer_key == "casas_bahia":
+                    _log_listing_page_failure(
+                        run_id,
+                        config.name,
+                        page,
+                        method,
+                        error,
+                        attempts,
+                    )
                 if _magalu_listing_fail_fast_enabled(config.name):
                     raise SystemExit(
                         f"[seda] {run_id} {config.name} page={page} listing fetch failed: {error}"
@@ -627,7 +705,7 @@ def _main_once():
                 f"unique={unique_count} method={method}",
                 flush=True,
             )
-            if magalu_stats:
+            if magalu_stats or config.name == "Casas Bahia":
                 listing_stats.append(
                     {
                         "retailer": config.name,
@@ -635,6 +713,8 @@ def _main_once():
                         "url": url,
                         "method": method,
                         "unique": unique_count,
+                        "rows": len(parsed),
+                        **({"attempts": attempts} if config.name == "Casas Bahia" else {}),
                         **magalu_stats,
                         **magalu_trace_stats,
                     }
@@ -657,20 +737,26 @@ def _main_once():
         "y",
     }
     complete = not failures and (bool(rows) or allow_empty)
+    casas_fail_closed = "casas_bahia" in selected_retailers()
     magalu_fail_closed = selected_retailers() == ["magalu"]
+    listing_fail_closed = magalu_fail_closed or casas_fail_closed
     final_output = parsed_dir / "main_occurrences.csv"
     partial_output = parsed_dir / "main_occurrences.partial.csv"
     output_path = (
         final_output
-        if complete or not magalu_fail_closed
+        if complete or not listing_fail_closed
         else partial_output
     )
     write_csv(output_path, rows, columns=OUTPUT_COLUMNS)
-    if magalu_fail_closed:
+    if listing_fail_closed:
         if complete:
             partial_output.unlink(missing_ok=True)
         else:
-            final_output.unlink(missing_ok=True)
+            if casas_fail_closed and final_output.exists():
+                # Preserve old data, but never publish it as this incomplete run.
+                final_output.replace(final_output.with_name(f"main_occurrences.previous.{time.time_ns()}.csv"))
+            else:
+                final_output.unlink(missing_ok=True)
     manifest = {
         "run_id": run_id,
         "rows": len(rows),
@@ -680,9 +766,15 @@ def _main_once():
         "retailers": selected_retailers(),
         "pages": attempted_pages,
         "unique_target": target,
-        "fetch_mode": os.getenv("SEDA_FETCH_MODE", "uc_first"),
+        "fetch_mode": casas_fetch_mode if selected_retailers() == ["casas_bahia"] else os.getenv("SEDA_FETCH_MODE", "uc_first"),
+        "global_fetch_mode": os.getenv("SEDA_FETCH_MODE", "uc_first"),
         "listing_stats": listing_stats,
     }
+    if "casas_bahia" in selected_retailers():
+        from .casas_bahia.listing_modes import MODES, selected_mode
+
+        manifest["casas_listing_mode"] = selected_mode()
+        manifest["casas_listing_mode_label"] = MODES[selected_mode()]["label"]
     (root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -696,6 +788,24 @@ def _main_once():
 
 
 def main():
+    try:
+        if "casas_bahia" in selected_retailers():
+            from .casas_bahia.listing_modes import MODES, selected_mode
+
+            try:
+                mode = selected_mode()
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from None
+            print(f"[seda] Casas Bahia listing mode={mode} ({MODES[mode]['label']})", flush=True)
+        return _main_with_retries()
+    finally:
+        if "casas_bahia" in selected_retailers():
+            from .casas_bahia.listing_modes import close_browsers
+
+            close_browsers()
+
+
+def _main_with_retries():
     configured_rounds = _magalu_listing_deferred_retry_rounds()
     if configured_rounds <= 0:
         _main_once()
@@ -707,13 +817,14 @@ def main():
                 for failure in manifest.get("failures", [])
                 if isinstance(failure, dict)
                 and str(failure.get("retailer") or "").strip().casefold()
-                == "magalu"
+                in {"magalu", "casas bahia"}
                 and _safe_int(failure.get("page"), 0) > 0
             }
         )
         if unresolved_pages:
+            label = "Casas Bahia" if "casas_bahia" in selected_retailers() else "Magalu"
             raise SystemExit(
-                f"[seda] {run_id} Magalu listing incomplete; "
+                f"[seda] {run_id} {label} listing incomplete; "
                 f"unresolved pages={','.join(map(str, unresolved_pages))}"
             )
         return None

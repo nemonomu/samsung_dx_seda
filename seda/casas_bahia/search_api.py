@@ -14,13 +14,18 @@ from seda.step00_config import casas_bahia_listing_slugs, casas_bahia_search_ter
 SEARCH_URL = "https://api-partner-prd.casasbahia.com.br/api/v3/web/busca"
 
 
-def fetch_search_listing(url, timeout=None):
+def fetch_search_listing(url, timeout=None, max_attempts=None, validator=None):
     parsed = urlparse(url)
     if "casasbahia.com.br" not in parsed.netloc or not _supported_listing_path(parsed.path):
         return {"success": False, "error": "not_casas_bahia_listing_url", "text": "", "trace": []}
 
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
-    retries = int(os.getenv("SEDA_CASAS_BAHIA_SEARCH_RETRIES", "2"))
+    # Hard ceiling: three search GETs, even if an older environment says five.
+    try:
+        total_attempts = int(max_attempts) if max_attempts is not None else int(os.getenv("SEDA_CASAS_BAHIA_SEARCH_RETRIES", "2")) + 1
+    except (TypeError, ValueError):
+        total_attempts = 3
+    retries = min(3, max(1, total_attempts)) - 1
     sleep_seconds = float(os.getenv("SEDA_CASAS_BAHIA_SEARCH_RETRY_SLEEP_SECONDS", "3.0"))
     trace = []
     session = requests.Session()
@@ -36,7 +41,7 @@ def fetch_search_listing(url, timeout=None):
                 {
                     "attempt": attempt + 1,
                     "status_code": 0,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": type(exc).__name__,
                 }
             )
             continue
@@ -55,15 +60,27 @@ def fetch_search_listing(url, timeout=None):
         except ValueError:
             trace_item["error"] = "invalid_json"
             continue
+        if not isinstance(parsed_response, dict):
+            trace_item["error"] = "invalid_product_payload"
+            continue
         products = parsed_response.get("products") or []
+        if not isinstance(products, list) or any(not isinstance(item, dict) for item in products):
+            trace_item["error"] = "invalid_products"
+            continue
         if products:
             price_result = _attach_prices(products, timeout=timeout)
             trace_item["price_count"] = price_result.get("count", 0)
             if price_result.get("error"):
-                trace_item["price_error"] = price_result.get("error")
+                trace_item["price_error"] = str(price_result.get("error")).split(":", 1)[0]
+            text = _as_next_data_html(parsed_response, url)
+            if validator is not None:
+                validation_error = validator(text, url)
+                if validation_error:
+                    trace_item["error"] = validation_error
+                    continue
             return {
                 "success": True,
-                "text": _as_next_data_html(parsed_response, url),
+                "text": text,
                 "products": len(products),
                 "trace": trace,
             }

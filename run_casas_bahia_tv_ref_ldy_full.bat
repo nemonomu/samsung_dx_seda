@@ -3,11 +3,27 @@ setlocal
 
 cd /d "%~dp0"
 
+rem Choose listing mode: 1=REST API, 2=REST + Chrome SSR hybrid, 3=UC + browser API.
+rem Final selected default. Optional first argument 1/2/3 overrides this run only.
+set "SEDA_CASAS_BAHIA_LISTING_MODE=3"
+if not "%~1"=="" set "SEDA_CASAS_BAHIA_LISTING_MODE=%~1"
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" goto :listing_mode_valid
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" goto :listing_mode_valid
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" goto :listing_mode_valid
+goto :invalid_listing_mode
+
+:listing_mode_valid
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api"
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=hybrid"
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=uc_api"
+
 if not exist "%~dp0seda\casas_bahia\log" mkdir "%~dp0seda\casas_bahia\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\casas_bahia\log\casas_bahia_tv_ref_ldy_full_%SEDA_RUN_TIMESTAMP%.log"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
+rem Search API ceiling in listing modes: 1 initial call + 2 retries.
+set SEDA_CASAS_BAHIA_SEARCH_RETRIES=2
 if not defined SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS set SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS=1
 if not defined SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN set SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN=0
 if not defined SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_RETRIES set SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_RETRIES=0
@@ -26,6 +42,7 @@ set SEDA_FETCH_MODE=graphql
 set SEDA_RETRY_SLEEP_SECONDS=0
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
+call :log "[SEDA] Casas Bahia listing mode=%SEDA_CASAS_BAHIA_LISTING_MODE% (%SEDA_CASAS_BAHIA_LISTING_MODE_LABEL%)"
 call :log "[SEDA] Casas Bahia TV full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line TV --all
 if errorlevel 1 goto :failed_tv
@@ -57,3 +74,7 @@ exit /b 1
 :failed_ldy
 call :log "[SEDA] Casas Bahia LDY full run failed"
 exit /b 1
+
+:invalid_listing_mode
+echo [SEDA] Invalid listing mode. Use 1=REST API, 2=hybrid, or 3=UC+API.
+exit /b 2

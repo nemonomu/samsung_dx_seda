@@ -49,7 +49,11 @@ def fetch_url(url, mode=None, timeout=None):
     trace = []
     last = FetchResult(url=url, text="", method=mode, error="not attempted")
     for attempt in attempts:
-        if attempt == "browser":
+        if attempt == "casas_listing_hybrid":
+            result = _fetch_casas_listing_hybrid(url, timeout)
+        elif attempt in {"casas_listing_rest", "casas_listing_uc_api"}:
+            result = _fetch_casas_listing_mode(url, timeout, "1" if attempt == "casas_listing_rest" else "3")
+        elif attempt == "browser":
             result = _fetch_browser(url, timeout)
         elif attempt == "uc":
             result = _fetch_uc(url, timeout)
@@ -73,7 +77,7 @@ def fetch_url(url, mode=None, timeout=None):
             trace_item["inner_attempts"] = result.attempts
         trace.append(trace_item)
         result.attempts = trace[:]
-        listing_error = bool(result.error) and _is_magalu_listing_url(url)
+        listing_error = bool(result.error) and (_is_magalu_listing_url(url) or attempt in {"casas_listing_rest", "casas_listing_hybrid", "casas_listing_uc_api"})
         if (
             result.text
             and len(result.text) > 500
@@ -184,6 +188,40 @@ def _fetch_requests(url, timeout):
         return FetchResult(url=url, text="", method="requests", error=f"{type(exc).__name__}: {exc}")
 
 
+def _fetch_casas_listing_mode(url, timeout, mode):
+    from .casas_bahia.listing_modes import fetch_listing
+
+    method = "api_partner" if mode == "1" else "uc_api"
+    try:
+        result = fetch_listing(url, timeout=timeout, mode=mode)
+    except Exception as exc:
+        return FetchResult(url=url, text="", method=method, error=type(exc).__name__)
+    success = bool(result.get("success")) and not result.get("error")
+    return FetchResult(
+        url=url, text=result.get("text", "") if success else "", status_code=result.get("status_code", 0),
+        method=result.get("method", method), error="" if success else result.get("error", "casas_listing_failed"),
+        attempts=result.get("trace") or [],
+    )
+
+
+def _fetch_casas_listing_hybrid(url, timeout):
+    from .casas_bahia.listing_hybrid import fetch_listing
+
+    try:
+        result = fetch_listing(url, timeout=timeout)
+    except Exception as exc:
+        return FetchResult(url=url, text="", method="rest_ssr_hybrid", error=type(exc).__name__)
+    success = bool(result.get("success"))
+    return FetchResult(
+        url=url,
+        text=result.get("text", "") if success else "",
+        status_code=result.get("status_code", 0),
+        method=result.get("method", "rest_ssr_hybrid"),
+        error="" if success else result.get("error", "hybrid_listing_failed"),
+        attempts=result.get("trace") or [],
+    )
+
+
 def _fetch_graphql(url, timeout):
     if "magazineluiza.com.br" in url and "/busca/" in url:
         try:
@@ -214,13 +252,30 @@ def _fetch_graphql(url, timeout):
             result = fetch_search_listing(url, timeout=timeout)
         except Exception as exc:
             return FetchResult(url=url, text="", method="api_partner", error=f"{type(exc).__name__}: {exc}")
+        trace = result.get("trace") or []
         if result.get("text"):
-            return FetchResult(url=url, text=result["text"], status_code=200, method="api_partner")
+            return FetchResult(
+                url=url,
+                text=result["text"],
+                status_code=200,
+                method="api_partner",
+                attempts=trace,
+            )
+        status_code = 0
+        for trace_item in reversed(trace):
+            try:
+                status_code = int(trace_item.get("status_code") or 0)
+            except (AttributeError, TypeError, ValueError):
+                status_code = 0
+            if status_code:
+                break
         return FetchResult(
             url=url,
             text="",
+            status_code=status_code,
             method="api_partner",
-            error=f"{result.get('error', 'api_partner_failed')}:{result.get('trace', [])}",
+            error=f"{result.get('error', 'api_partner_failed')}:{trace}",
+            attempts=trace,
         )
     return FetchResult(
         url=url,
