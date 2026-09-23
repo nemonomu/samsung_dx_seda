@@ -25,8 +25,10 @@ def run_common_step(retailer_key, module_name):
     module.main()
 
 
-def run_module(module_name, env=None, dry_run=False):
+def run_module(module_name, env=None, dry_run=False, *, args=None):
     command = [PYTHON, "-m", module_name]
+    if args:
+        command.extend(str(value) for value in args)
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)

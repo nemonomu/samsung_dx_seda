@@ -201,6 +201,36 @@ def selected_steps(args, steps):
     return []
 
 
+def _execution_groups(retailer_key, package_name, chosen):
+    """Group only contiguous, selected Casas mode-3 listing stages.
+
+    Preserve caller order, including explicit subsets; never pull in an omitted
+    stage or keep a browser open across detail/DB/other subprocess work.
+    """
+    enabled = (
+        retailer_key == "casas_bahia"
+        and package_name == "seda.casas_bahia"
+        and os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "3").strip() == "3"
+    )
+    allowed = {
+        "main_list": "seda.casas_bahia.step01_main_list",
+        "main_targets": "seda.casas_bahia.step02_main_targets",
+        "bsr_list": "seda.casas_bahia.step03_bsr_list",
+    }
+    pending = []
+    for step in chosen:
+        eligible = enabled and allowed.get(step.name) == step.module
+        if pending and (not eligible or pending[0].env != step.env):
+            yield tuple(pending), any(item.name in {"main_list", "bsr_list"} for item in pending)
+            pending = []
+        if eligible:
+            pending.append(step)
+        else:
+            yield (step,), False
+    if pending:
+        yield tuple(pending), any(item.name in {"main_list", "bsr_list"} for item in pending)
+
+
 def run_retailer_orchestrator(retailer_key, package_name, description):
     _configure_combined_db_mode()
     force_dated_run_root = os.environ.get("SEDA_FORCE_DATED_RUN_ROOT", "0").lower() in {
@@ -245,12 +275,23 @@ def run_retailer_orchestrator(retailer_key, package_name, description):
         return
     if not args.dry_run:
         start_zenrows_usage_execution()
-    for step in chosen:
-        if _requires_detail_completion(step) and not args.dry_run:
-            assert_detail_publish_complete(run_root())
-        code = run_module(step.module, env=step_env(retailer_key, step.env), dry_run=args.dry_run)
-        if code:
-            raise SystemExit(code)
+    for group, shared_listing in _execution_groups(retailer_key, package_name, chosen):
+        if shared_listing:
+            code = run_module(
+                "seda.casas_bahia.listing_worker",
+                env=step_env(retailer_key, group[0].env),
+                dry_run=args.dry_run,
+                args=[step.module for step in group],
+            )
+            if code:
+                raise SystemExit(code)
+            continue
+        for step in group:
+            if _requires_detail_completion(step) and not args.dry_run:
+                assert_detail_publish_complete(run_root())
+            code = run_module(step.module, env=step_env(retailer_key, step.env), dry_run=args.dry_run)
+            if code:
+                raise SystemExit(code)
 
 
 def _configure_combined_db_mode():

@@ -1,8 +1,9 @@
-"""Mode 3: one Chrome listing navigation, then browser-only search/price APIs.
+"""Mode 3: browser APIs with same-Chrome SSR recovery after HTTP 403.
 
 UC controls the owned Chrome; JavaScript fetch performs every API request in
-that browser. No Python HTTP, ZenRows, automatic refresh, or alternate-mode
-fallback is used. REST pages do not necessarily equal the SSR product order.
+that browser. Exhausted 403 failures use mode 2's validated Document/price
+navigation path, without more Python REST calls or a new Chrome. REST pages
+do not necessarily equal the SSR product order.
 An absent response page/sort is recorded as request evidence, not server echo.
 """
 
@@ -262,9 +263,76 @@ class _APISession:
         self.bootstrap_status = 0
         self.bootstrap_trace = []
         self.page_ids = {}
+        self.ssr_recovery_required = False
 
     def close(self):
         self.browser.close()
+
+    def _ssr_fallback(self, url, timeout, trace, *, recovery_pending=False):
+        """Use hybrid's bounded navigation policy on this same owned browser."""
+        from seda.parsers import extract_next_data, parse_listing, sku_from_url
+        from .listing_hybrid import _validation_error
+
+        requested = browser_listing._request_identity(url)
+        started = time.monotonic()
+        item = {"method": "browser_ssr", "stage": "ssr_fallback", "page": int(requested[1]),
+                "trigger_status_code": 403, "fallback_used": True, "browser_reused": True,
+                "recovery_pending": recovery_pending, "status_code": 0}
+        # A failed navigation must never leave the previous document trusted.
+        self.ssr_recovery_required = True
+        self.document_frame = None
+        # Bootstrap SSR is not published output. Compare only with pages that
+        # were accepted, including earlier API pages and earlier SSR fallbacks.
+        self.browser.page_ids = deepcopy(self.page_ids)
+        navigation_trace = []
+        print(f"[seda] casas_bahia mode=3 page={requested[1]} fallback=browser_ssr "
+              f"trigger_status=403 browser_reused=true recovery_pending={str(recovery_pending).lower()}", flush=True)
+        try:
+            result = browser_listing._fetch_with_recovery(
+                self.browser, url, timeout=timeout, trace=navigation_trace)
+            item["status_code"] = int(_bounded_number(result.get("status_code"), 0, 0, 599))
+            if not result.get("success"):
+                reason = result.get("error")
+                if not isinstance(reason, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,100}", reason):
+                    reason = "ssr_fallback_failed"
+                raise browser_listing.EvidenceError(reason)
+            html = result.get("text", "")
+            error = _validation_error(html, url)
+            if error:
+                raise browser_listing.EvidenceError(error)
+            payload = extract_next_data(html)
+            products = payload["props"]["pageProps"]["initialState"]["search"]["results"]["products"]
+            ids = {sku_from_url(product.get("href") or product.get("url") or "") for product in products}
+            previous = self.page_ids.get((requested[0], requested[2]), {})
+            if any(page != requested[1] and old_ids == ids for page, old_ids in previous.items()):
+                raise browser_listing.EvidenceError("earlier_page_repeated_for_other_page")
+            frame = _frame(self.browser.driver)
+            if not frame.get("id") or not frame.get("loaderId"):
+                raise browser_listing.EvidenceError("bootstrap_frame_missing")
+            row_count = len(parse_listing(html, "Casas Bahia", "https://www.casasbahia.com.br", url))
+            self.page_ids.setdefault((requested[0], requested[2]), {})[requested[1]] = ids
+            self.browser.page_ids = deepcopy(self.page_ids)
+            self.document_frame = frame
+            self.bootstrap_attempted = True
+            self.bootstrap_error = ""
+            self.bootstrap_status = 200
+            self.bootstrap_trace = []
+            self.last_search_finished = time.monotonic()
+            self.ssr_recovery_required = False
+            item.update({"products": len(ids), "parsed_rows": row_count, "identity_checked": True})
+        except Exception as exc:
+            self.browser.page_ids = deepcopy(self.page_ids)
+            item["error"] = _safe_error(exc)
+            html = ""
+        item["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        combined = list(trace) + navigation_trace + [item]
+        success = not item.get("error")
+        print(f"[seda] casas_bahia mode=3 page={requested[1]} fallback=browser_ssr "
+              f"{'OK' if success else 'FAILED'} status={item['status_code']} "
+              f"rows={item.get('parsed_rows', 0)} error={item.get('error', 'none')}", flush=True)
+        return {"success": success, "text": html, "status_code": item["status_code"],
+                "method": "uc_api+browser_ssr", "error": item.get("error", ""),
+                "products": item.get("products", 0), "trace": combined}
 
     def _bootstrap(self, url, timeout):
         if self.bootstrap_attempted:
@@ -324,7 +392,14 @@ class _APISession:
         seconds = API_TIMEOUT_SECONDS
         trace = []
         started = time.monotonic()
-        initial = self._bootstrap(url, 45)
+        if self.ssr_recovery_required:
+            return self._ssr_fallback(url, timeout, trace, recovery_pending=True)
+        try:
+            initial = self._bootstrap(url, 45)
+        except _BootstrapError as exc:
+            if exc.status_code == 403:
+                return self._ssr_fallback(url, timeout, exc.trace)
+            raise
         if initial:
             trace.append(initial)
         params = dict(search_api._params(url))
@@ -400,6 +475,8 @@ class _APISession:
                 item["error"] = _safe_error(exc)
                 print(f"[seda] casas_bahia mode=3 uc_api page={requested[1]} attempt={attempt}/{limit} "
                       f"stage={item['stage']} status={item['status_code']} error={item['error']}", flush=True)
+        if trace[-1]["status_code"] == 403:
+            return self._ssr_fallback(url, timeout, trace)
         return {"success": False, "text": "", "status_code": trace[-1]["status_code"],
                 "method": "uc_api", "error": trace[-1]["error"], "trace": trace}
 

@@ -417,17 +417,17 @@ class SessionTests(unittest.TestCase):
             for forbidden in ("origin", "referer", "user-agent", "sec-ch-ua", "cookie"):
                 self.assertNotIn(forbidden, call.args[4])
 
-    def test_three_failures_no_fallback_and_preserves_session(self):
-        with patch.object(api, "_browser_fetch", return_value=response(None, 403)) as fetch:
+    def test_three_non403_failures_no_fallback_and_preserves_session(self):
+        with patch.object(api, "_browser_fetch", return_value=response(None, 500)) as fetch:
             result = self.session.fetch(URL)
         self.assertFalse(result["success"])
-        self.assertEqual(403, result["status_code"])
+        self.assertEqual(500, result["status_code"])
         self.assertEqual(3, fetch.call_count)
         self.browser.close.assert_not_called()
         self.assertEqual(1, self.browser.fetch.call_count)
 
-    def test_next_page_can_succeed_after_403_without_new_navigation(self):
-        with patch.object(api, "_browser_fetch", side_effect=[response(None, 403)] * 3 + self.good(200, 20)):
+    def test_next_page_can_succeed_after_non403_without_new_navigation(self):
+        with patch.object(api, "_browser_fetch", side_effect=[response(None, 500)] * 3 + self.good(200, 20)):
             self.assertFalse(self.session.fetch(URL)["success"])
             self.assertTrue(self.session.fetch(URL.replace("page=1", "page=2"))["success"])
         self.assertEqual(1, self.browser.fetch.call_count)
@@ -476,8 +476,8 @@ class SessionTests(unittest.TestCase):
         self.assertEqual("maisvendidos", fetch.call_args_list[0].args[2]["sortby"])
         self.assertTrue(result["trace"][-1]["parser_sort_context_injected"])
 
-    def test_bootstrap_failure_not_retried_or_replaced_by_ssr(self):
-        self.browser.fetch.return_value = {"success": False, "status_code": 403}
+    def test_non403_bootstrap_failure_not_retried_or_replaced_by_ssr(self):
+        self.browser.fetch.return_value = {"success": False, "status_code": 500}
         for _ in range(2):
             with self.assertRaisesRegex(browser_listing.EvidenceError, "initial_page_not_verified"):
                 self.session.fetch(URL)

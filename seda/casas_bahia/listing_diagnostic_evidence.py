@@ -47,7 +47,9 @@ ERRORS = {
     "parsed_listing_identity_invalid", "parsed_price_or_seller_mismatch",
     "chrome_version_unavailable", "chrome_executable_missing", "browser_driver_version_mismatch",
     "isolated_driver_version_unavailable", "isolated_driver_major_mismatch",
-    "isolated_driver_path_invalid", "existing_browser_attachment_rejected",
+    "isolated_driver_path_invalid", "existing_browser_attachment_rejected", "ssr_fallback_failed",
+    "empty_products", "missing_product_identity", "duplicate_product_identity", "price_identity_mismatch",
+    "missing_price", "no_relevant_parsed_products", "parsed_identity_or_price_mismatch", "invalid_listing_payload",
 }
 EXCEPTIONS = {
     "TimeoutException", "WebDriverException", "SessionNotCreatedException",
@@ -315,6 +317,7 @@ DIAGNOSTIC_NUMBERS = {
     "attempt", "status_code", "elapsed_seconds", "interval_wait_seconds", "products", "rows", "parsed_rows",
     "price_response_count", "bootstrap_navigation_count", "source_sku_aliases_added", "reported_page",
     "chrome_major", "document_navigations", "parser_sku_aliases_added",
+    "navigation_attempt", "trigger_status_code",
 }
 DIAGNOSTIC_FLAGS = {
     "navigation_raised", "navigation_timeout", "new_loader_observed", "selected_document_response_seen",
@@ -323,6 +326,7 @@ DIAGNOSTIC_FLAGS = {
     "new_navigation", "new_api_request", "identity_checked", "document_completed",
     "response_queries_is_mapping", "response_page_present", "parser_page_context_injected", "response_sort_present",
     "parser_sort_context_injected",
+    "fallback_used", "browser_reused", "recovery_pending",
 }
 
 
@@ -333,8 +337,8 @@ def _trace_projection(value, depth=0):
         item = _mapping(item)
         safe = _numbers(item, DIAGNOSTIC_NUMBERS)
         safe.update(_flags(item, DIAGNOSTIC_FLAGS))
-        for key, values in (("method", {"uc_api", "browser_ssr"}),
-                            ("stage", {"bootstrap", "search", "price", "validation", "complete"}),
+        for key, values in (("method", {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid"}),
+                            ("stage", {"bootstrap", "search", "price", "validation", "complete", "ssr_fallback"}),
                             ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
                             ("document_network_error", NETWORK_ERRORS | {"none", "other"}),
                             ("page_evidence_source", {"response_and_observed_request", "observed_request_only"}),
@@ -367,6 +371,7 @@ def project_event(event, payload):
         mode = _integer(payload.get("mode"), 3, 1)
         if mode is not None:
             safe["mode"] = mode
+        safe.update(_flags(payload, {"browser_session_reused", "bootstrap_previously_completed"}))
         for key in ("pages", "configured_rest_page_size", "effective_mode3_page_size", "api_timeout_seconds", "min_search_interval_seconds", "attempt_limit"):
             number = _integer(payload.get(key), 1000 if key == "pages" else 10000)
             if number is not None:
@@ -397,8 +402,10 @@ def project_event(event, payload):
         if "products" in payload:
             safe["products"] = _products_projection(payload["products"])
     elif event == "page_end":
-        safe.update(_numbers(payload, {"products", "rows", "status_code", "chrome_major", "new_api_calls_in_page", "filtered_unique_count"}))
-        safe.update(_flags(payload, {"success", "bootstrap_failure_reused"}))
+        safe.update(_numbers(payload, {"products", "rows", "status_code", "chrome_major", "new_api_calls_in_page", "filtered_unique_count", "ssr_navigation_attempts"}))
+        safe.update(_flags(payload, {"success", "bootstrap_failure_reused", "fallback_used", "browser_reused", "recovery_pending"}))
+        if "actual_method" in payload:
+            safe["actual_method"] = _enum(payload["actual_method"], {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid"})
         safe["error"] = safe_error(payload.get("error"))
         safe["trace"] = _trace_projection(payload.get("trace"))
     elif event == "run_end":
@@ -518,6 +525,8 @@ def build_report(output_dir, *, archive_dir=None):
              "Sponsorship counts do not prove API pagination or offset semantics.", "",
              f"Outcome: {report['outcome'].get('outcome', 'interrupted')}",
              f"Listing mode: {report['run'].get('mode', 'not recorded')}",
+             f"Existing browser reused at run start: {report['run'].get('browser_session_reused', 'not recorded')}",
+             f"Bootstrap already validated at run start: {report['run'].get('bootstrap_previously_completed', 'not recorded')}",
              f"Configured REST page size: {report['run'].get('configured_rest_page_size', 'not recorded')}",
              f"Effective mode 3 page size: {report['run'].get('effective_mode3_page_size', 'not recorded')}",
              "The configured REST value and the effective mode 3 value may differ; this tool does not change either.",
@@ -529,9 +538,9 @@ def build_report(output_dir, *, archive_dir=None):
              f"Failed page numbers: {report['outcome'].get('failed_page_numbers', [])}",
              "A passed minimum-count policy is not proof that every requested page succeeded.",
              f"Re-sanitized events: {len(records)}; ignored lines: {ignored}; partial final line: {partial}", "",
-             "## Page outcomes", "", "| Page | Success | Status | Rows | Filtered unique | New API calls | Bootstrap failure reused | Error |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "## Page outcomes", "", "| Page | Success | Status | Method | SSR fallback | SSR navigations | Rows | Filtered unique | New API calls | Bootstrap failure reused | Error |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for page in pages:
-        lines.append(f"| {page.get('page', 0)} | {page.get('success', False)} | {page.get('status_code', 0)} | {page.get('rows', 0)} | {page.get('filtered_unique_count', 'not recorded')} | {page.get('new_api_calls_in_page', 'not recorded')} | {page.get('bootstrap_failure_reused', False)} | {page.get('error', 'none')} |")
+        lines.append(f"| {page.get('page', 0)} | {page.get('success', False)} | {page.get('status_code', 0)} | {page.get('actual_method', 'not recorded')} | {page.get('fallback_used', False)} | {page.get('ssr_navigation_attempts', 'not recorded')} | {page.get('rows', 0)} | {page.get('filtered_unique_count', 'not recorded')} | {page.get('new_api_calls_in_page', 'not recorded')} | {page.get('bootstrap_failure_reused', False)} | {page.get('error', 'none')} |")
     lines.extend(["", "## API timeline", "", "| Call | Page | Method | Status | Seconds | Returned | Sponsored | Filtered |", "| --- | --- | --- | --- | --- | --- | --- | --- |"])
     for call in calls:
         products = call.get("products", {})

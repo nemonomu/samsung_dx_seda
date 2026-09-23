@@ -463,6 +463,9 @@ def _leaf_fetch_attempts(attempts):
     for attempt in attempts or []:
         if not isinstance(attempt, dict):
             continue
+        if attempt.get("stage") == "ssr_fallback" and attempt.get("fallback_used") is True:
+            # Summary of the navigation records, not another network attempt.
+            continue
         inner_attempts = attempt.get("inner_attempts") or []
         if inner_attempts:
             leaves.extend(_leaf_fetch_attempts(inner_attempts))
@@ -854,7 +857,7 @@ def _main_once():
         )
 
 
-def main():
+def main(*, retain_browser=False):
     diagnostic_module = None
     diagnostic = None
     exception_type = None
@@ -882,7 +885,7 @@ def main():
     finally:
         close_failed = False
         try:
-            if "casas_bahia" in selected_retailers():
+            if not retain_browser and "casas_bahia" in selected_retailers():
                 from .casas_bahia.listing_modes import close_browsers
 
                 close_browsers()

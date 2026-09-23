@@ -122,6 +122,20 @@ def _trace(attempts):
     return result[:40]
 
 
+def _session_evidence(session):
+    """Fixed booleans only; never expose process, profile or session identifiers."""
+    browser = getattr(session, "browser", None)
+    browser_exists = getattr(browser, "driver", None) is not None
+    return {
+        "browser_session_reused": browser_exists,
+        "bootstrap_previously_completed": bool(
+            browser_exists and getattr(session, "bootstrap_attempted", False)
+            and not getattr(session, "bootstrap_error", "")
+            and not getattr(session, "ssr_recovery_required", False)
+        ),
+    }
+
+
 class AutomaticListingDiagnostics:
     def __init__(self, *, mode, run_id, pages, product_line, log_dir=None):
         self.mode, self.run_id, self.product_line = mode, run_id, product_line
@@ -160,6 +174,7 @@ class AutomaticListingDiagnostics:
         if self.mode == "3":
             from . import browser_api
 
+            payload.update(_session_evidence(browser_api._SESSION))
             self.observer = _Observer(browser_api, parsers, self.writer)
             payload.update({"effective_mode3_page_size": 20,
                             "api_timeout_seconds": browser_api.API_TIMEOUT_SECONDS,
@@ -177,7 +192,10 @@ class AutomaticListingDiagnostics:
         if self.observer:
             self.observer.page = page
             session = self.observer.api._SESSION
-            self.bootstrap_reused = bool(session and session.bootstrap_attempted and session.bootstrap_error)
+            self.bootstrap_reused = bool(
+                session and session.bootstrap_attempted and session.bootstrap_error
+                and not getattr(session, "ssr_recovery_required", False)
+            )
         self.writer.emit("page_start", {"page": page})
 
     def page_end(self, page, success, rows, unique, error, attempts):
@@ -187,17 +205,38 @@ class AutomaticListingDiagnostics:
         else:
             self.failed_pages.append(page)
         trace = _trace(attempts)
+        fallback_used = any(isinstance(entry, dict) and
+                            (entry.get("fallback_used") is True or entry.get("stage") == "ssr_fallback")
+                            for entry in trace)
+        allowed_methods = {"uc_api", "browser_ssr", "api_partner", "rest_ssr_hybrid", "uc_api+browser_ssr"}
+        actual_method = next((entry["method"] for entry in reversed(trace)
+                              if isinstance(entry, dict) and isinstance(entry.get("method"), str)
+                              and entry["method"] in allowed_methods), "other")
+        if fallback_used and self.mode == "3":
+            actual_method = "uc_api+browser_ssr"
+        ssr_navigations = sum(1 for entry in trace if isinstance(entry, dict)
+                              and entry.get("method") == "browser_ssr"
+                              and type(entry.get("navigation_attempt")) is int
+                              and 1 <= entry["navigation_attempt"] <= 2)
         status = next((entry.get("status_code") for entry in reversed(trace)
                        if isinstance(entry, dict) and entry.get("status_code")), None)
         payload = {
             "page": page, "success": success, "rows": rows, "filtered_unique_count": self.unique,
-            "error": error, "trace": trace,
+            "error": error, "trace": trace, "actual_method": actual_method,
+            "fallback_used": fallback_used, "ssr_navigation_attempts": ssr_navigations,
         }
+        if fallback_used:
+            summary = next((entry for entry in reversed(trace) if isinstance(entry, dict)
+                            and entry.get("stage") == "ssr_fallback"), {})
+            for key in ("browser_reused", "recovery_pending"):
+                if type(summary.get(key)) is bool:
+                    payload[key] = summary[key]
         if status is not None:
             payload["status_code"] = status
         if self.observer:
             payload["new_api_calls_in_page"] = self.observer.call_number - self.calls_before
-            payload["bootstrap_failure_reused"] = self.bootstrap_reused
+            # An active SSR recovery is not a no-request replay of a cached error.
+            payload["bootstrap_failure_reused"] = self.bootstrap_reused and not fallback_used
         self.writer.emit("page_end", payload)
 
     def manifest_ready(self, manifest):

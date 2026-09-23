@@ -564,24 +564,32 @@ class _BrowserSession:
             time.sleep(0.5)
 
 
+def _fetch_with_recovery(session, url, timeout=None, *, trace=None):
+    """Existing hybrid navigation policy, using the caller-owned Chrome."""
+    requested = _request_identity(url)
+    if trace is None:
+        trace = []
+    for attempt in (1, 2):
+        result = session.fetch(url, timeout=timeout)
+        trace.extend(dict(item, navigation_attempt=attempt) for item in result.get("trace", []))
+        result = dict(result, trace=list(trace))
+        if result.get("success") or attempt == 2 or result.get("error") not in _RECOVERABLE_ERRORS:
+            return result
+        print(f"[seda] casas_bahia browser_ssr page={requested[1]} navigation_attempt=1 "
+              f"error={result['error']} retry_navigation=2 wait_seconds=3", flush=True)
+        time.sleep(3)
+
+
 def fetch_page(url, timeout=None):
     """Fetch a fallback page with at most one fresh-navigation recovery attempt."""
     global _SESSION
     with _LOCK:
         trace = []
         try:
-            requested = _request_identity(url)
+            _request_identity(url)
             if _SESSION is None:
                 _SESSION = _BrowserSession()
-            for attempt in (1, 2):
-                result = _SESSION.fetch(url, timeout=timeout)
-                trace.extend(dict(item, navigation_attempt=attempt) for item in result.get("trace", []))
-                result = dict(result, trace=list(trace))
-                if result.get("success") or attempt == 2 or result.get("error") not in _RECOVERABLE_ERRORS:
-                    return result
-                print(f"[seda] casas_bahia browser_ssr page={requested[1]} navigation_attempt=1 "
-                      f"error={result['error']} retry_navigation=2 wait_seconds=3", flush=True)
-                time.sleep(3)
+            return _fetch_with_recovery(_SESSION, url, timeout=timeout, trace=trace)
         except Exception as exc:
             error = str(exc) if isinstance(exc, EvidenceError) else "browser_" + type(exc).__name__
             close_browser()
