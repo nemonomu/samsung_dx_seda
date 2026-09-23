@@ -10,6 +10,7 @@ import atexit
 import base64
 from copy import deepcopy
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -308,6 +309,128 @@ def _network_evidence(messages, frame, requested):
     return documents, prices, completed
 
 
+_DIAGNOSTIC_NUMBERS = {
+    "browser_prepare_seconds", "navigation_seconds", "evidence_wait_seconds",
+    "page_load_timeout_seconds", "evidence_wait_limit_seconds",
+    "fetch_seconds_before_diagnostic", "ready_state_probe_seconds",
+    "selected_document_response_count", "current_price_response_count", "performance_event_count",
+}
+_DIAGNOSTIC_FLAGS = {
+    "navigation_raised", "navigation_timeout", "new_loader_observed",
+    "selected_document_response_seen", "selected_document_loading_finished",
+    "selected_document_loading_failed", "selected_document_canceled",
+    "selected_document_cached", "selected_document_service_worker",
+}
+_NETWORK_ERROR_CODES = {
+    "net::ERR_ABORTED", "net::ERR_TIMED_OUT", "net::ERR_CONNECTION_RESET",
+    "net::ERR_CONNECTION_CLOSED", "net::ERR_CONNECTION_TIMED_OUT",
+    "net::ERR_NETWORK_CHANGED", "net::ERR_INTERNET_DISCONNECTED",
+    "net::ERR_HTTP2_PROTOCOL_ERROR", "net::ERR_CONTENT_LENGTH_MISMATCH",
+    "net::ERR_INCOMPLETE_CHUNKED_ENCODING", "net::ERR_BLOCKED_BY_CLIENT",
+    "net::ERR_BLOCKED_BY_RESPONSE", "net::ERR_FAILED",
+}
+
+
+def _public_browser_diagnostics(value):
+    """Copy only fixed diagnostic fields, never raw events or exception text."""
+    if not isinstance(value, dict):
+        return {}
+    public = {}
+    for key in _DIAGNOSTIC_NUMBERS:
+        number = value.get(key)
+        try:
+            if type(number) in (int, float) and math.isfinite(number) and number >= 0:
+                public[key] = number
+        except (ValueError, OverflowError):
+            pass
+    for key in _DIAGNOSTIC_FLAGS:
+        if type(value.get(key)) is bool:
+            public[key] = value[key]
+    for key, allowed in (
+        ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
+        ("document_network_error", _NETWORK_ERROR_CODES | {"none", "other"}),
+    ):
+        item = value.get(key)
+        if isinstance(item, str) and item in allowed:
+            public[key] = item
+    return public
+
+
+def _log_browser_diagnostics(stage, page, values):
+    try:
+        public = _public_browser_diagnostics(values)
+        print(f"[seda] casas_bahia browser_diagnostic page={page} stage={stage} "
+              + json.dumps(public, sort_keys=True), flush=True)
+    except Exception:
+        # Diagnostics must not replace the original collection outcome.
+        pass
+
+
+def _document_diagnostics(messages, documents, price_ids, completed):
+    """Describe only the selected current Document; do not drain browser logs."""
+    document_id, response = documents[-1] if documents else (None, {})
+    failures = [message.get("params", {}) for message in messages
+                if isinstance(message, dict) and message.get("method") == "Network.loadingFailed"
+                and document_id is not None and isinstance(message.get("params"), dict)
+                and message["params"].get("requestId") == document_id]
+    raw_code = failures[-1].get("errorText") if failures else None
+    code = raw_code if isinstance(raw_code, str) and raw_code in _NETWORK_ERROR_CODES else "other"
+    return {
+        "selected_document_response_count": len(documents),
+        "selected_document_response_seen": bool(documents),
+        "selected_document_loading_finished": document_id is not None and document_id in completed,
+        "selected_document_loading_failed": bool(failures),
+        "selected_document_canceled": any(item.get("canceled") is True for item in failures),
+        "document_network_error": code if failures else "none",
+        "selected_document_cached": response.get("fromDiskCache") is True,
+        "selected_document_service_worker": response.get("fromServiceWorker") is True,
+        "current_price_response_count": len(price_ids),
+        "performance_event_count": len(messages),
+    }
+
+
+def _diagnostic_ready_state(driver):
+    """One read-only probe after failure; no body, URL, cookies or navigation."""
+    try:
+        result = driver.execute_cdp_cmd("Runtime.evaluate", {
+            "expression": "document.readyState", "returnByValue": True, "silent": True,
+            "throwOnSideEffect": True, "timeout": 1000,
+        })
+        state = result.get("result", {}).get("value")
+        return state if isinstance(state, str) and state in {"loading", "interactive", "complete"} else "unavailable"
+    except Exception:
+        return "unavailable"
+
+
+def _finish_browser_diagnostics(driver, trace, messages, documents, price_ids, completed,
+                                frame, prior_frame, started, wait_started, success):
+    """Append diagnostics after the unchanged success/timeout decision."""
+    try:
+        ended = time.perf_counter()
+        values = _public_browser_diagnostics(trace.get("diagnostics", {}))
+        values.update(_document_diagnostics(messages, documents, price_ids, completed))
+        values.update({
+            "new_loader_observed": bool(frame.get("loaderId") and frame.get("loaderId") != prior_frame.get("loaderId")),
+            "evidence_wait_seconds": round(ended - wait_started, 3),
+            "fetch_seconds_before_diagnostic": round(ended - started, 3),
+            "ready_state": "not_probed",
+        })
+        if not success:
+            # Preserve the already-decided result in the log even if the browser
+            # control channel stalls during the subsequent read-only probe.
+            trace["diagnostics"] = _public_browser_diagnostics(values)
+            _log_browser_diagnostics("failure_decided", trace["page"], trace["diagnostics"])
+            probe_started = time.perf_counter()
+            values["ready_state"] = _diagnostic_ready_state(driver)
+            values["ready_state_probe_seconds"] = round(time.perf_counter() - probe_started, 3)
+        else:
+            values["ready_state_probe_seconds"] = 0.0
+        trace["diagnostics"] = _public_browser_diagnostics(values)
+        _log_browser_diagnostics("success" if success else "failure", trace["page"], trace["diagnostics"])
+    except Exception:
+        pass
+
+
 class _BrowserSession:
     def __init__(self):
         self.driver = None
@@ -348,22 +471,40 @@ class _BrowserSession:
             except Exception:
                 pass
 
-    def fetch(self, url, timeout=None):
+    def fetch(self, url, timeout=None, *, wait_seconds=None):
         requested = _request_identity(url)
+        diagnostic_started = time.perf_counter()
         trace = {"method": "browser_ssr", "page": int(requested[1]), "status_code": 0,
                  "chrome_major": self.major, "cache_disabled": True, "service_worker_bypassed": True}
+        _log_browser_diagnostics("browser_prepare_start", trace["page"], {})
         if self.driver is None:
             self.start()
             trace["chrome_major"] = self.major
-        self.driver.set_page_load_timeout(min(float(timeout or 45), 45))
+        trace["diagnostics"] = {"browser_prepare_seconds": round(time.perf_counter() - diagnostic_started, 3)}
+        _log_browser_diagnostics("browser_prepare_end", trace["page"], trace["diagnostics"])
+        page_load_timeout = min(float(timeout or 45), 45)
+        self.driver.set_page_load_timeout(page_load_timeout)
+        trace["diagnostics"]["page_load_timeout_seconds"] = page_load_timeout
         self.driver.get_log("performance")
         prior_frame = self.driver.execute_cdp_cmd("Page.getFrameTree", {})["frameTree"]["frame"]
+        _log_browser_diagnostics("navigation_start", trace["page"], trace["diagnostics"])
+        navigation_started = time.perf_counter()
         try:
             self.driver.get(url)
         except Exception as exc:
             trace["navigation_error_type"] = type(exc).__name__
-        wait_seconds = max(1.0, min(float(os.getenv("SEDA_CASAS_BAHIA_BROWSER_WAIT_SECONDS", "30")), 120.0))
+        trace["diagnostics"].update({
+            "navigation_seconds": round(time.perf_counter() - navigation_started, 3),
+            "navigation_raised": "navigation_error_type" in trace,
+            "navigation_timeout": trace.get("navigation_error_type") == "TimeoutException",
+        })
+        _log_browser_diagnostics("navigation_end", trace["page"], trace["diagnostics"])
+        wait_seconds = max(1.0, min(float(os.getenv("SEDA_CASAS_BAHIA_BROWSER_WAIT_SECONDS", "30")
+                                         if wait_seconds is None else wait_seconds), 120.0))
+        trace["diagnostics"]["evidence_wait_limit_seconds"] = wait_seconds
+        wait_started = time.perf_counter()
         deadline = time.monotonic() + wait_seconds
+        _log_browser_diagnostics("evidence_wait_start", trace["page"], trace["diagnostics"])
         messages, body_cache = [], {}
         failure = "missing_current_document"
         while True:
@@ -406,6 +547,8 @@ class _BrowserSession:
                         previous[requested[1]] = set(ids)
                         trace.update({"products": len(ids), "parsed_rows": row_count, "price_response_count": len(price_ids),
                                       "identity_checked": True, "document_completed": True})
+                        _finish_browser_diagnostics(self.driver, trace, messages, documents, price_ids, completed,
+                                                    frame, prior_frame, diagnostic_started, wait_started, True)
                         return {"success": True, "text": html, "status_code": 200, "method": "browser_ssr",
                                 "products": len(ids), "trace": [trace]}
                     except EvidenceError as exc:
@@ -414,6 +557,8 @@ class _BrowserSession:
                         failure = "response_validation_" + type(exc).__name__
             if time.monotonic() >= deadline:
                 trace["error"] = failure
+                _finish_browser_diagnostics(self.driver, trace, messages, documents, price_ids, completed,
+                                            frame, prior_frame, diagnostic_started, wait_started, False)
                 return {"success": False, "text": "", "status_code": trace["status_code"],
                         "method": "browser_ssr", "error": failure, "trace": [trace]}
             time.sleep(0.5)

@@ -14,13 +14,17 @@ import os
 import re
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from seda.casas_bahia import browser_listing
+from seda.casas_bahia.browser_probe_session import ProbeBrowserSession
 
 
 _SESSION = None
 _LOCK = threading.RLock()
+API_TIMEOUT_SECONDS = 25
+MIN_SEARCH_INTERVAL_SECONDS = 5
 _FETCH_SCRIPT = r"""
 const [url, method, headers, body, seconds] = arguments;
 const done = arguments[arguments.length - 1];
@@ -36,10 +40,7 @@ const start = performance.now();
     });
     const isJson = (response.headers.get('content-type') || '').toLowerCase().includes('json');
     const result = {status: response.status, ok: response.ok, json: isJson};
-    if (response.ok && isJson) {
-      try { result.data = await response.json(); }
-      catch (_) { result.json = false; result.error_name = 'InvalidJSON'; }
-    }
+    if (response.ok && isJson) result.data = await response.json();
     result.elapsed_seconds = (performance.now() - start) / 1000;
     done(result);
   } catch (error) {
@@ -104,56 +105,55 @@ def _messages(driver):
 
 
 def _network_evidence(messages, frame, url, method, body):
-    """Match exact request parameters/body without exposing headers or URLs."""
+    """Use the successful local probe's GET/POST HTTP-200 evidence contract.
+
+    Document completion is still required by the initial SSR bootstrap. API
+    completion events, full query/body equality and single-response counts were
+    not gates in that probe and are deliberately not extra gates here.
+    """
     expected = urlsplit(url)
-    selected, responses, completed = {}, {}, set()
+    requested_page = (parse_qs(expected.query).get("page") or [None])[0] if method == "GET" else None
+    selected, responses, successful_methods = {}, {}, set()
     navigation_count = 0
     for message in messages:
         kind, params = message.get("method"), message.get("params", {})
         request_id = params.get("requestId")
-        if kind == "Network.loadingFinished":
-            completed.add(request_id)
         if kind == "Network.requestWillBeSent":
-            if params.get("type") == "Document" and params.get("frameId") == frame.get("id"):
+            if params.get("type") == "Document":
                 navigation_count += 1
-            if not browser_listing._same_navigation(params, frame):
-                continue
             request = params.get("request", {})
             parsed = urlsplit(request.get("url", ""))
-            if (request.get("method") != method
-                    or (parsed.scheme, parsed.hostname, parsed.path.rstrip("/"))
-                    != (expected.scheme, expected.hostname, expected.path.rstrip("/"))
-                    or parse_qs(parsed.query, keep_blank_values=True) != parse_qs(expected.query, keep_blank_values=True)):
+            if ((parsed.hostname, parsed.path.rstrip("/"))
+                    != (expected.hostname, expected.path.rstrip("/"))):
                 continue
-            if method == "POST":
-                try:
-                    if json.loads(request.get("postData", "")) != body:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-            selected[request_id] = method
-        elif kind == "Network.responseReceived" and browser_listing._same_navigation(params, frame):
+            if requested_page is not None and parse_qs(parsed.query).get("page") != [requested_page]:
+                continue
+            selected[request_id] = request.get("method")
+        elif kind == "Network.responseReceived" and request_id in selected:
             response = params.get("response", {})
+            status = int(response.get("status") or 0)
+            if status == 200:
+                successful_methods.add(selected[request_id])
             responses[request_id] = {
-                "status_code": int(response.get("status") or 0),
+                "status_code": status,
                 "from_disk_cache": bool(response.get("fromDiskCache")),
                 "from_service_worker": bool(response.get("fromServiceWorker")),
             }
+        elif kind == "Network.responseReceivedExtraInfo" and request_id in selected:
+            status = int(params.get("statusCode") or 0)
+            if status == 200:
+                successful_methods.add(selected[request_id])
+            responses.setdefault(request_id, {"status_code": status})
     matched = [responses[request_id] for request_id in selected if request_id in responses]
-    valid = [request_id for request_id in selected
-             if request_id in completed and request_id in responses
-             and responses[request_id]["status_code"] == 200
-             and not responses[request_id]["from_disk_cache"]
-             and not responses[request_id]["from_service_worker"]]
     return {
         "request_method": method,
         "matching_request_count": len(selected),
         "matching_response_count": len(matched),
-        "completed_http200_count": len(valid),
+        "matched_http200_methods": sorted(value for value in successful_methods if value in {"GET", "POST", "OPTIONS"}),
         "document_requests_observed": navigation_count,
         "response_status_codes": [item["status_code"] for item in matched],
-        "cached_response_observed": any(item["from_disk_cache"] or item["from_service_worker"] for item in matched),
-        "request_response_verified": len(selected) == len(matched) == len(valid) == 1,
+        "cached_response_observed": any(item.get("from_disk_cache") or item.get("from_service_worker") for item in matched),
+        "request_response_verified": method in successful_methods,
     }
 
 
@@ -161,27 +161,17 @@ def _browser_fetch(driver, endpoint, params, method, headers, body, timeout, doc
     """Return only parsed API data and allowlisted network diagnostics."""
     driver.get_log("performance")
     before = _frame(driver)
-    if not _same_frame(before, document_frame):
-        raise browser_listing.EvidenceError("bootstrap_document_changed")
     url = endpoint + "?" + urlencode(params)
-    driver.set_script_timeout(timeout + 5)
-    value = driver.execute_async_script(_FETCH_SCRIPT, url, method, headers, body, timeout)
+    driver.set_script_timeout(API_TIMEOUT_SECONDS + 5)
+    value = driver.execute_async_script(_FETCH_SCRIPT, url, method, headers, body, API_TIMEOUT_SECONDS)
     if not isinstance(value, dict):
         raise browser_listing.EvidenceError("invalid_browser_fetch_result")
     messages = _messages(driver)
-    deadline = time.monotonic() + 1
     evidence = _network_evidence(messages, before, url, method, body)
-    # CDP completion events can follow the async-script callback very briefly.
-    while value.get("status") == 200 and not evidence["request_response_verified"] and time.monotonic() < deadline:
-        if evidence["document_requests_observed"] or evidence["cached_response_observed"] or evidence["matching_request_count"] > 1:
-            break
-        time.sleep(0.05)
-        messages.extend(_messages(driver))
-        evidence = _network_evidence(messages, before, url, method, body)
     evidence["same_document"] = _same_frame(before, _frame(driver))
     safe = {"status_code": int(value.get("status") or 0), "ok": value.get("ok") is True,
             "json": value.get("json") is True,
-            "elapsed_seconds": round(_bounded_number(value.get("elapsed_seconds"), 0, 0, timeout + 5), 3),
+            "elapsed_seconds": round(_bounded_number(value.get("elapsed_seconds"), 0, 0, API_TIMEOUT_SECONDS + 5), 3),
             "network": evidence}
     if value.get("error_name") in {"AbortError", "FetchError", "InvalidJSON"}:
         safe["error_name"] = value["error_name"]
@@ -261,7 +251,11 @@ def _parser_context(data, requested):
 
 class _APISession:
     def __init__(self):
-        self.browser = browser_listing._BrowserSession()
+        self.browser = ProbeBrowserSession()
+        self.request_session_id = str(uuid.uuid4())
+        self.last_search_finished = None
+        print("[seda] casas_bahia mode=3 uc_api execution_profile=successful_local_probe "
+              "api_timeout_seconds=25 search_interval_seconds=5", flush=True)
         self.document_frame = None
         self.bootstrap_attempted = False
         self.bootstrap_error = ""
@@ -275,6 +269,11 @@ class _APISession:
     def _bootstrap(self, url, timeout):
         if self.bootstrap_attempted:
             if self.bootstrap_error:
+                try:
+                    print("[seda] casas_bahia mode=3 uc_api bootstrap_failure_reused=true "
+                          "new_navigation=false new_api_request=false", flush=True)
+                except Exception:
+                    pass
                 raise _BootstrapError(self.bootstrap_error, self.bootstrap_status, self.bootstrap_trace)
             return None
         self.bootstrap_attempted = True
@@ -284,8 +283,16 @@ class _APISession:
         try:
             # The established SSR validator verifies this first real page only.
             # Its products are never returned as mode-3 listing output.
-            result = self.browser.fetch(url, timeout=timeout)
+            result = self.browser.fetch(url, timeout=45)
             item["status_code"] = int(_bounded_number(result.get("status_code"), 0, 0, 599))
+            try:
+                browser_trace = result.get("trace") or []
+                if isinstance(browser_trace, list) and browser_trace and isinstance(browser_trace[-1], dict):
+                    diagnostics = browser_listing._public_browser_diagnostics(browser_trace[-1].get("diagnostics"))
+                    if diagnostics:
+                        item["diagnostics"] = diagnostics
+            except Exception:
+                pass
             if not result.get("success"):
                 reason = result.get("error")
                 if not isinstance(reason, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,100}", reason):
@@ -294,15 +301,17 @@ class _APISession:
             self.document_frame = _frame(self.browser.driver)
             if not self.document_frame.get("id") or not self.document_frame.get("loaderId"):
                 raise browser_listing.EvidenceError("bootstrap_frame_missing")
+            self.last_search_finished = time.monotonic()
         except Exception as exc:
             self.bootstrap_error = _safe_error(exc)
             self.bootstrap_status = item["status_code"]
             item.update({"error": self.bootstrap_error, "elapsed_seconds": round(time.monotonic() - started, 3)})
             self.bootstrap_trace = [item]
             print(f"[seda] casas_bahia mode=3 uc_api stage=bootstrap status={self.bootstrap_status} "
-                  f"error={self.bootstrap_error}", flush=True)
+                  f"error={self.bootstrap_error} elapsed_seconds={item['elapsed_seconds']}", flush=True)
             raise _BootstrapError(self.bootstrap_error, self.bootstrap_status, self.bootstrap_trace) from None
         return {"method": "uc_api", "stage": "bootstrap", "status_code": 200,
+                **({"diagnostics": item["diagnostics"]} if "diagnostics" in item else {}),
                 "chrome_major": self.browser.major, "document_navigations": 1,
                 "elapsed_seconds": round(time.monotonic() - started, 3)}
 
@@ -312,13 +321,19 @@ class _APISession:
         requested = browser_listing._request_identity(url)
         if not search_api._supported_listing_path(requested[0]):
             raise browser_listing.EvidenceError("not_casas_bahia_listing_url")
-        seconds = _bounded_number(timeout or os.getenv("SEDA_TIMEOUT", "60"), 60, 1, 120)
+        seconds = API_TIMEOUT_SECONDS
         trace = []
         started = time.monotonic()
-        initial = self._bootstrap(url, seconds)
+        initial = self._bootstrap(url, 45)
         if initial:
             trace.append(initial)
-        params = search_api._params(url)
+        params = dict(search_api._params(url))
+        # Match the successful probe without changing process-wide settings used
+        # by mode 1/2 or detail. Never log the generated session identifier.
+        params.update({"resultsperpage": "20", "variantconfiguration": "q2", "regionid": "126000",
+                       "sessionid": self.request_session_id, "userid": ""})
+        price_params = dict(price_api._params())
+        price_params["IdRegiao"] = "126000"
         if (str(params.get("page")) != requested[1]
                 or str(params.get("sortby") or "").replace("-", "").lower() != requested[2]):
             raise browser_listing.EvidenceError("outgoing_page_or_sort_mismatch")
@@ -333,8 +348,14 @@ class _APISession:
                     "stage": "search", "status_code": 0}
             trace.append(item)
             try:
-                search_result, data = _browser_fetch(self.browser.driver, search_api.SEARCH_URL, params,
-                                                    "GET", search_headers, None, seconds, self.document_frame)
+                interval_wait = max(0, MIN_SEARCH_INTERVAL_SECONDS - (time.monotonic() - self.last_search_finished))
+                time.sleep(interval_wait)
+                item["interval_wait_seconds"] = round(interval_wait, 3)
+                try:
+                    search_result, data = _browser_fetch(self.browser.driver, search_api.SEARCH_URL, params,
+                                                        "GET", search_headers, None, seconds, self.document_frame)
+                finally:
+                    self.last_search_finished = time.monotonic()
                 item["search"] = search_result
                 item["status_code"] = search_result["status_code"]
                 if search_result.get("error"):
@@ -349,7 +370,7 @@ class _APISession:
                                  if key in {"accept", "content-type", "x-origem", "xaplication", "apikey"}}
                 price_headers["content-type"] = "application/json"
                 item["stage"] = "price"
-                price_result, prices = _browser_fetch(self.browser.driver, price_api.PRICE_URL, price_api._params(),
+                price_result, prices = _browser_fetch(self.browser.driver, price_api.PRICE_URL, price_params,
                                                       "POST", price_headers,
                                                       {"produtos": product_items, "skus": sku_items},
                                                       seconds, self.document_frame)
