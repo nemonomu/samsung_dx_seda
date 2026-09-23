@@ -10,6 +10,7 @@ __pycache__/
 *.py[cod]
 seda/data/
 seda/casas_bahia/test/
+seda/casas_bahia/log/
 seda/**/test/
 *.log
 .pytest_cache/

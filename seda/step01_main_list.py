@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import time
 from pathlib import Path
@@ -11,6 +11,16 @@ from .magalu.search_api import (
 from .parsers import extract_next_data, magalu_next_search_is_null, parse_listing, _magalu_is_relevant_product
 from .step00_config import RETAILERS, OUTPUT_COLUMNS, page_url, product_identity, run_root, selected_retailers, write_csv
 from .transport import fetch_url, is_blocked_html
+
+
+def _casas_listing_diagnostic_event(name, *args):
+    try:
+        from .casas_bahia.listing_auto_diagnostics import record_event
+
+        record_event(name, *args)
+    except Exception:
+        # Reporting may fail, but must not change data or collection decisions.
+        pass
 
 
 def page_numbers(run_id=None):
@@ -498,6 +508,29 @@ def _casas_raw_mode_error(raw_path, mode, url):
     return ""
 
 
+def _casas_listing_threshold(run_id, filtered_unique_count, failures, complete):
+    """Allow only Casas page failures after the user-approved filtered minimum.
+
+    This is a downstream acceptance policy, not a pagination/early-stop target.
+    ``complete`` continues to describe page coverage and never hides failures.
+    """
+    minimum = {"main": 300, "bsr": 100}.get(str(run_id or "").strip().lower())
+    threshold_met = minimum is not None and filtered_unique_count >= minimum
+    casas_failures_only = bool(failures) and all(
+        isinstance(item, dict)
+        and str(item.get("retailer") or "").strip().casefold() == "casas bahia"
+        for item in failures
+    )
+    accepted = bool(threshold_met and casas_failures_only)
+    return {
+        "filtered_unique_count": filtered_unique_count,
+        "minimum_unique_required": minimum,
+        "threshold_met": threshold_met,
+        "accepted_with_failures": accepted,
+        "downstream_allowed": bool(complete or accepted),
+    }
+
+
 def _main_once():
     run_id = os.getenv("SEDA_RUN_ID", "main").strip().lower()
     root = run_root() / run_id
@@ -505,6 +538,7 @@ def _main_once():
     failures = []
     listing_stats = []
     rank_offsets = {}
+    retailer_unique_seen = {}
     attempted_pages = []
     target = unique_target(run_id)
     no_growth_limit = int(os.getenv("SEDA_UNIQUE_NO_GROWTH_LIMIT", "5"))
@@ -519,10 +553,13 @@ def _main_once():
             casas_fetch_mode = fetch_mode(casas_mode)
         rank_offsets.setdefault(retailer_key, 0)
         unique_seen = set()
+        retailer_unique_seen[retailer_key] = unique_seen
         no_growth_pages = 0
         for page in page_numbers(run_id):
             url = page_url(config, page, run_id=run_id)
             attempted_pages.append(page)
+            if retailer_key == "casas_bahia":
+                _casas_listing_diagnostic_event("page_start", page)
             before_unique = len(unique_seen)
             raw_path = root / "raw" / retailer_key / f"page_{page:03d}.html"
             reuse_raw = os.getenv("SEDA_REUSE_RAW", "0").lower() in {"1", "true", "yes", "y"}
@@ -587,6 +624,9 @@ def _main_once():
                         method,
                         error,
                         attempts,
+                    )
+                    _casas_listing_diagnostic_event(
+                        "page_end", page, False, 0, len(unique_seen), error, attempts,
                     )
                 if _magalu_listing_fail_fast_enabled(config.name):
                     raise SystemExit(
@@ -694,6 +734,10 @@ def _main_once():
                 if key[1]:
                     unique_seen.add(key)
             unique_count = len(unique_seen)
+            if retailer_key == "casas_bahia":
+                _casas_listing_diagnostic_event(
+                    "page_end", page, True, len(parsed), unique_count, "", attempts,
+                )
             if unique_count == before_unique:
                 no_growth_pages += 1
             else:
@@ -740,23 +784,34 @@ def _main_once():
     casas_fail_closed = "casas_bahia" in selected_retailers()
     magalu_fail_closed = selected_retailers() == ["magalu"]
     listing_fail_closed = magalu_fail_closed or casas_fail_closed
+    threshold = (
+        _casas_listing_threshold(
+            run_id, len(retailer_unique_seen.get("casas_bahia", set())), failures, complete,
+        )
+        if casas_fail_closed else {}
+    )
+    accepted_with_failures = threshold.get("accepted_with_failures", False)
     final_output = parsed_dir / "main_occurrences.csv"
     partial_output = parsed_dir / "main_occurrences.partial.csv"
+    if casas_fail_closed and not complete and final_output.exists():
+        # Retire the previous run before writing either outcome. Even accepted
+        # partial coverage must not leave stale rows under the current filename.
+        final_output.replace(final_output.with_name(f"main_occurrences.previous.{time.time_ns()}.csv"))
     output_path = (
         final_output
-        if complete or not listing_fail_closed
+        if complete or accepted_with_failures or not listing_fail_closed
         else partial_output
     )
+    if accepted_with_failures:
+        # Keep an explicitly partial artifact as well as the usable downstream
+        # CSV; the manifest retains every failed page and complete=False.
+        write_csv(partial_output, rows, columns=OUTPUT_COLUMNS)
     write_csv(output_path, rows, columns=OUTPUT_COLUMNS)
     if listing_fail_closed:
         if complete:
             partial_output.unlink(missing_ok=True)
-        else:
-            if casas_fail_closed and final_output.exists():
-                # Preserve old data, but never publish it as this incomplete run.
-                final_output.replace(final_output.with_name(f"main_occurrences.previous.{time.time_ns()}.csv"))
-            else:
-                final_output.unlink(missing_ok=True)
+        elif not accepted_with_failures:
+            final_output.unlink(missing_ok=True)
     manifest = {
         "run_id": run_id,
         "rows": len(rows),
@@ -769,6 +824,7 @@ def _main_once():
         "fetch_mode": casas_fetch_mode if selected_retailers() == ["casas_bahia"] else os.getenv("SEDA_FETCH_MODE", "uc_first"),
         "global_fetch_mode": os.getenv("SEDA_FETCH_MODE", "uc_first"),
         "listing_stats": listing_stats,
+        **threshold,
     }
     if "casas_bahia" in selected_retailers():
         from .casas_bahia.listing_modes import MODES, selected_mode
@@ -779,7 +835,18 @@ def _main_once():
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if "casas_bahia" in selected_retailers():
+        _casas_listing_diagnostic_event("manifest_ready", manifest)
     print(f"[seda] wrote {output_path} rows={len(rows)}")
+    if accepted_with_failures:
+        print(
+            f"[seda] {run_id} Casas Bahia listing accepted with failures "
+            f"filtered_unique={threshold['filtered_unique_count']} "
+            f"minimum={threshold['minimum_unique_required']} "
+            f"failed_pages={','.join(map(str, _listing_failed_pages(manifest)))} "
+            "complete=false downstream_allowed=true",
+            flush=True,
+        )
     if not rows and not allow_empty:
         raise SystemExit(
             f"[seda] {run_id} listing produced 0 rows; "
@@ -788,6 +855,9 @@ def _main_once():
 
 
 def main():
+    diagnostic_module = None
+    diagnostic = None
+    exception_type = None
     try:
         if "casas_bahia" in selected_retailers():
             from .casas_bahia.listing_modes import MODES, selected_mode
@@ -797,12 +867,35 @@ def main():
             except ValueError as exc:
                 raise SystemExit(str(exc)) from None
             print(f"[seda] Casas Bahia listing mode={mode} ({MODES[mode]['label']})", flush=True)
-        return _main_with_retries()
-    finally:
-        if "casas_bahia" in selected_retailers():
-            from .casas_bahia.listing_modes import close_browsers
+            try:
+                from .casas_bahia import listing_auto_diagnostics as diagnostic_module
+                from .step00_config import product_line
 
-            close_browsers()
+                run_id = os.getenv("SEDA_RUN_ID", "main").strip().lower()
+                diagnostic = diagnostic_module.start_diagnostics(mode, run_id, page_numbers(run_id), product_line())
+            except Exception:
+                print("[seda] casas_bahia diagnostic_start_failed collection_unchanged=true", flush=True)
+        return _main_with_retries()
+    except BaseException as exc:
+        exception_type = type(exc).__name__
+        raise
+    finally:
+        close_failed = False
+        try:
+            if "casas_bahia" in selected_retailers():
+                from .casas_bahia.listing_modes import close_browsers
+
+                close_browsers()
+        except BaseException:
+            close_failed = True
+            raise
+        finally:
+            if diagnostic_module is not None:
+                try:
+                    diagnostic_module.finish_diagnostics(diagnostic, exception_type, close_failed)
+                except Exception:
+                    # A diagnostics failure must not mask the collection result.
+                    pass
 
 
 def _main_with_retries():
@@ -819,6 +912,11 @@ def _main_with_retries():
                 and str(failure.get("retailer") or "").strip().casefold()
                 in {"magalu", "casas bahia"}
                 and _safe_int(failure.get("page"), 0) > 0
+                and not (
+                    manifest.get("accepted_with_failures") is True
+                    and manifest.get("downstream_allowed") is True
+                    and str(failure.get("retailer") or "").strip().casefold() == "casas bahia"
+                )
             }
         )
         if unresolved_pages:

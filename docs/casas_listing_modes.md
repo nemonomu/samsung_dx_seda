@@ -53,7 +53,8 @@ Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경�
 - REST `sku`를 복사본의 `idSku` 별칭으로 대응시키고 URL·상품·SKU·판매자·가격을 정확한 ID로 검증한다. 충돌이나 누락은 실패다.
 - 응답이 page/sort를 생략하면 실제 요청 근거만 있음을 trace에 기록한다. 파서용 요청 page/sort를 넣은 것을 서버가 응답한 값으로 표현하지 않는다. 명시적 page/sort 불일치는 거부한다.
 - 다른 페이지가 이전 페이지 전체 SKU 집합을 그대로 반복하면 실패 처리한다.
-- 출력 CSV 계약과 기존 관련 상품 필터를 유지한다. 일부 페이지 실패 시 `.partial.csv`로 저장하고 완료 결과로 발행하지 않으며 downstream을 중단한다.
+- 출력 CSV 계약과 기존 관련 상품 필터를 유지한다. 실패 페이지가 있어도 필터링 후 누적 unique가 main 300개 / BSR 100개 이상이면 성공분으로 후속 단계를 진행한다. 실패 내역과 `complete=false`는 유지하고 `accepted_with_failures=true`, `downstream_allowed=true`로 구분하며 final CSV와 `.partial.csv`를 함께 저장한다. 실패가 있고 기준 미달이면 기존처럼 downstream을 중단한다. 이 기준 자체가 페이지 조기 종료 조건은 아니다.
+- 기존 배치의 각 main/BSR listing 종료 시 `seda/casas_bahia/log/`에 진단 ZIP을 자동 생성한다. 별도 진단 배치는 필요하지 않으며 모드 3의 기존 요청에 대한 관측만 추가한다. 자세한 항목과 보안 범위는 `docs/casas_listing_diagnostics.md`를 참조한다.
 - raw 옆 `.mode.json`에 선택 모드와 source URL을 기록한다. 모드가 다르거나 메타데이터가 없는 raw는 재사용하지 않는다.
 - manifest의 `casas_listing_mode`, `casas_listing_mode_label`, `fetch_mode`로 선택과 실제 경로를 확인할 수 있다.
 
