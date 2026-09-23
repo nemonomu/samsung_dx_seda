@@ -33,12 +33,20 @@
 - 원래 가격 API의 실패 상태와 Listing 성공 상태를 함께 기록한다. 응답 본문·키·쿠키는 진단에 포함하지 않는다.
 - 검증은 외부 통신/브라우저/DB/업로드를 차단한 오프라인 테스트다. 실제 GCP 수집 성공이나 모든 가격의 채워짐을 검증한 것은 아니다.
 
-## 2026-09-23 TV 실행의 Detail 이후 재개
+## 2026-09-23 TV Detail 재개 후 REF/LDY 연속 수집
+
+GCP에서 수정본 반영 및 필요한 Python 패키지 설치 후 기존 배치에 재개 인자를 준다.
+
+```bat
+run_casas_bahia_tv_ref_ldy_full.bat 4 --resume-tv-detail 20260923 308
+```
+
+TV의 저장된 308행을 복원해 누락 가격 보충 및 후속 단계를 수행하고, 성공하면 REF 전체, 이어서 LDY 전체 수집을 실행한다. 세 품목 모두 20260923 실행 날짜를 사용한다. 어느 품목이든 실패하면 다음 품목을 실행하지 않는다. 인자 없는 기존 전체 실행과 모드 1/2/3/4 선택 방식은 그대로다.
 
 - 대상은 기존 GCP 실행 폴더 `seda/data/casas_bahia/tv/20260923`의 308행이다. references에 복사한 파일이 아니라 원래 실행 폴더의 대상 CSV, enriched CSV, 정규 trace를 사용한다.
-- `SEDA_RUN_DATE=20260923`, `SEDA_PRODUCT_LINE=TV`, 명시적 `SEDA_RUN_ROOT`로 날짜/카테고리를 고정한다. 날짜가 바뀌었다고 20260924 폴더에서 재시작하지 않는다.
+- `SEDA_RUN_DATE=20260923`과 `SEDA_FORCE_DATED_RUN_ROOT=1`로 날짜를 고정하고, TV/REF/LDY 각 품목 인자에 따라 실행 폴더를 다시 계산한다. 이전 품목의 실행 폴더를 재사용하지 않으며 날짜가 바뀌었다고 20260924 폴더에서 재시작하지 않는다.
 - `SEDA_DETAIL_SKIP=308`은 기존 308행을 검증해 복원하고 상품별 Detail 루프를 건너뛴다. `SEDA_DETAIL_LIMIT=0`, worker ID 공란, shipping-only 모드 0을 사용한다. 대상/출력 CSV override는 원래 실행 폴더로 지정한다.
-- 이번 재개에서는 `SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK=0`으로 이미 실패한 유료 필드 보충을 반복하지 않는다. Mode 4의 `SEDA_CASAS_BAHIA_API_ENRICH=1` 가격 보충은 유지한다.
-- orchestrator의 정확한 시작 옵션은 `--product-line TV --from-step detail_enrichment --skip-local-cleanup`이다. 가격 보충 뒤 기존 배송비·리뷰·할인·최종 출력·DB 단계로 이어진다. Main/BSR과 기존 308개 Detail 호출은 재수행하지 않으며 REF/LDY를 시작하지 않는다.
-- 재개 환경변수는 자식 CMD 범위에 한정한다. `SEDA_DETAIL_SKIP=308`이 이후 REF/LDY 실행에 남아서는 안 된다. 기존 배치에서 사용한 배송 우편번호 등 업무 설정은 유지한다.
+- TV 재개에서만 `SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK=0`으로 이미 실패한 유료 필드 보충을 반복하지 않는다. Mode 4의 `SEDA_CASAS_BAHIA_API_ENRICH=1` 가격 보충은 유지한다.
+- TV orchestrator의 정확한 시작 옵션은 `--product-line TV --from-step detail_enrichment --skip-local-cleanup`이다. 가격 보충 뒤 기존 배송비·리뷰·할인·최종 출력·DB 단계로 이어진다. TV Main/BSR과 기존 308개 Detail 호출은 재수행하지 않는다. REF/LDY는 각각 `--all`로 처음부터 수집한다.
+- TV 전용 재개 설정은 중첩 `setlocal` 범위에 한정한다. 상속된 skip/worker/TV CSV 경로도 재개 모드 시작 시 정리하여 REF/LDY로 넘기지 않는다. REF/LDY의 ZenRows 필드 보충은 TV에서 일시 중지하기 전 기존 배치 설정으로 복원한다. 배송 우편번호 등 기존 업무 설정은 유지한다.
 - 원래 파일의 행 수·순서·헤더·trace 검증 실패는 우회하지 않는다. 실행 전 해당 파일들이 존재하는지 확인한다. 기존 체크포인트/트랜잭션 저장을 재사용한다.
