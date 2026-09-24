@@ -6,7 +6,10 @@ from . import browser_listing, search_api
 
 def _validation_error(text, url):
     """Validate actual source identities while retaining existing relevance filters."""
-    from seda.parsers import extract_next_data, parse_listing, sku_from_url
+    from seda.parsers import (
+        _casas_bahia_is_relevant_product,
+        extract_next_data, parse_listing, sku_from_url,
+    )
 
     try:
         payload = extract_next_data(text)
@@ -24,6 +27,12 @@ def _validation_error(text, url):
             return "requested_sort_mismatch"
         identities = set()
         for product in products:
+            if not isinstance(product, dict):
+                return "invalid_listing_payload"
+            # Validate the same product scope as the listing parser. An excluded
+            # accessory must not reject a page containing valid target products.
+            if not _casas_bahia_is_relevant_product(product):
+                continue
             product_id = str(product.get("id") or "")
             sku_id = sku_from_url(product.get("href") or product.get("url") or "")
             seller = str(product.get("lojista") or product.get("sellerId") or "")
@@ -38,6 +47,8 @@ def _validation_error(text, url):
                 return "price_identity_mismatch"
             if not price.get("currentPrice"):
                 return "missing_price"
+        if not identities:
+            return "no_relevant_parsed_products"
         rows = parse_listing(text, "Casas Bahia", "https://www.casasbahia.com.br", url)
         if not rows:
             return "no_relevant_parsed_products"
