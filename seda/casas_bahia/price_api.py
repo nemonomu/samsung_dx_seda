@@ -80,22 +80,9 @@ def fetch_listing_prices(products, timeout=None, *, include_offers=False):
 
 
 def attach_listing_prices(products, timeout=None):
-    result = fetch_listing_prices(products, timeout=timeout)
-    if not result.get("success"):
-        return result
-    prices = result.get("prices") or {}
-    for product in products:
-        if not isinstance(product, dict):
-            continue
-        price = prices.get(str(product.get("id"))) or prices.get(str(product.get("sku")))
-        if not price:
-            continue
-        product["price"] = price
-        if price.get("sellerId") and not product.get("lojista"):
-            product["lojista"] = price.get("sellerId")
-        if price.get("skuId") and not product.get("sku"):
-            product["sku"] = price.get("skuId")
-    return result
+    from .listing_price_identity import attach_prices
+
+    return attach_prices(products, timeout=timeout, fetcher=fetch_listing_prices)
 
 
 def _price_items(products):
