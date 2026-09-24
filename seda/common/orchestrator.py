@@ -210,7 +210,7 @@ def _execution_groups(retailer_key, package_name, chosen):
     enabled = (
         retailer_key == "casas_bahia"
         and package_name == "seda.casas_bahia"
-        and os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "4").strip() in {"3", "4"}
+        and os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "1").strip() in {"3", "4"}
     )
     allowed = {
         "main_list": "seda.casas_bahia.step01_main_list",

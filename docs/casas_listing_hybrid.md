@@ -1,6 +1,6 @@
 # REST API + SSR Document parsing hybrid
 
-> This document describes retained listing mode 2. The current default is mode 4 (URL-first); see `casas_listing_modes.md` for selection and scope. Mode 2 retains the original behavior described here. Mode 4 is specified separately in `casas_listing_url_first.md`.
+> This document describes retained listing mode 2. The current default is mode 1 (REST API); see `casas_listing_modes.md` for selection and scope. Mode 2 retains the original behavior described here. Mode 4 is specified separately in `casas_listing_url_first.md`.
 
 적용일: 2026-09-23. Casas Bahia main/BSR listing 전용.
 

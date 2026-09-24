@@ -4,7 +4,7 @@ import os
 from urllib.parse import parse_qs, urlsplit
 
 
-DEFAULT_MODE = "4"
+DEFAULT_MODE = "1"
 MODES = {
     "1": {"label": "rest_api", "fetch_mode": "casas_listing_rest"},
     "2": {"label": "hybrid", "fetch_mode": "casas_listing_hybrid"},

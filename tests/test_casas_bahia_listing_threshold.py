@@ -182,7 +182,7 @@ class CasasListingThresholdTests(unittest.TestCase):
                 self.assertTrue(self.manifest()["accepted_with_failures"])
                 self.assertEqual(self.manifest()["casas_listing_mode"], mode)
                 self.assertEqual({call[2] for call in self.calls}, {listing_modes.fetch_mode(mode)})
-        self.assertEqual(listing_modes.DEFAULT_MODE, "4")
+        self.assertEqual(listing_modes.DEFAULT_MODE, "1")
 
     def test_no_failure_below_minimum_keeps_existing_success_behavior(self):
         self.rows[("Casas Bahia", 1)] = [product(1)]

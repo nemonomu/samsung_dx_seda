@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 rem Listing: 1=REST API, 2=hybrid, 3=UC + API, 4=URL-first UC + API.
 rem Final selected default. Optional first argument 1/2/3/4 overrides this run only.
-set "SEDA_CASAS_BAHIA_LISTING_MODE=4"
+set "SEDA_CASAS_BAHIA_LISTING_MODE=1"
 if not "%~1"=="" set "SEDA_CASAS_BAHIA_LISTING_MODE=%~1"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" goto :listing_mode_valid

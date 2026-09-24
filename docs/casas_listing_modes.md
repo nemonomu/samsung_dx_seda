@@ -1,6 +1,6 @@
 # Casas Bahia listing modes
 
-최종 선택 기본값: **4 (UC + API, URL-first)**. 기존 mode 1/2/3의 수집 동작은 유지한다. Mode 4만 가격·판매자 연결 실패가 상품 URL 수집을 막지 않으며, 기존 Detail 후 남은 가격을 제한적으로 보완한다. 상세 라우팅·CSV·DB 형식은 유지한다. [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
+최종 선택 기본값: **1 (REST API)** — 2026-09-24 사용자 요청으로 변경. 모드 1/2/3/4의 수집 동작은 그대로 유지한다. Mode 4만 가격·판매자 연결 실패가 상품 URL 수집을 막지 않으며, 기존 Detail 후 남은 가격을 제한적으로 보완한다. 상세 라우팅·CSV·DB 형식은 유지한다. [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 | 번호 | 이름 | 실행 경로 | 실패 시 |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@
 ## 실행과 최종 선택
 
 ```bat
-rem 최종 기본값 4로 TV -> REF -> LDY 전체 실행
+rem 최종 기본값 1로 TV -> REF -> LDY 전체 실행
 run_casas_bahia_tv_ref_ldy_full.bat
 
 rem 이번 실행만 모드 지정
@@ -23,11 +23,11 @@ run_casas_bahia_tv_ref_ldy_full.bat 3
 run_casas_bahia_tv_ref_ldy_full.bat 4
 ```
 
-배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=4"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 1/2/3/4 이외의 값은 수집 전에 거부한다.
+배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=1"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 1/2/3/4 이외의 값은 수집 전에 거부한다.
 
-Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 4이다. 이 모드 변수는 listing 전용이다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
+Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 1이다. 이 모드 변수는 listing 전용이다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
 
-각 Casas listing 코드 수정 시 네 모드를 유지하고, 최종 선택 숫자를 명시적으로 확인·기록해야 한다. 현재 선택은 4이며 변경 요청 없이 다른 모드로 바꾸지 않는다.
+각 Casas listing 코드 수정 시 네 모드를 유지하고, 최종 선택 숫자를 명시적으로 확인·기록해야 한다. 현재 기본 선택은 1이며 변경 요청 없이 다른 모드로 바꾸지 않는다. `4 --resume-tv-detail ...`처럼 모드를 명시한 재개 명령은 계속 모드 4로 실행한다. 이미 모드가 설정되어 실행 중인 배치는 이 기본값 변경으로 전환하지 않는다.
 
 ## 모드 4의 추가 동작
 

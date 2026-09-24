@@ -18,10 +18,10 @@ from test_casas_bahia_listing_hybrid import TV_URL, _blocked_result, _listing_ht
 
 
 class ModeSelectionTests(unittest.TestCase):
-    def test_default_is_four(self):
+    def test_default_is_one(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(listing_modes.selected_mode(), "4")
-            self.assertEqual(listing_modes.fetch_mode(), "casas_listing_uc_api_url_first")
+            self.assertEqual(listing_modes.selected_mode(), "1")
+            self.assertEqual(listing_modes.fetch_mode(), "casas_listing_rest")
 
     def test_exact_four_modes_and_no_invalid_fallback(self):
         for value, fetch in (("1", "casas_listing_rest"), ("2", "casas_listing_hybrid"),
@@ -106,9 +106,9 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertEqual(result.method, "uc_api_url_first")
         self.assertEqual(result.error, "RuntimeError")
 
-    def test_batch_explicit_default_four_and_all_legacy_overrides(self):
+    def test_batch_explicit_default_one_and_all_mode_overrides(self):
         source = (Path(__file__).resolve().parents[1] / "run_casas_bahia_tv_ref_ldy_full.bat").read_text(encoding="utf-8-sig")
-        self.assertIn('set "SEDA_CASAS_BAHIA_LISTING_MODE=4"', source)
+        self.assertIn('set "SEDA_CASAS_BAHIA_LISTING_MODE=1"', source)
         for mode in ("1", "2", "3", "4"):
             self.assertIn(f'if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="{mode}" goto :listing_mode_valid', source)
 

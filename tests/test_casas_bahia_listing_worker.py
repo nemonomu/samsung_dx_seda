@@ -431,12 +431,15 @@ class ExecutionGroupingTests(unittest.TestCase):
         steps = listing_steps()
         self.assertEqual(self.groups(steps), [(tuple(steps), True)])
 
-    def test_mode_four_and_unset_default_keep_main_bsr_together(self):
+    def test_explicit_mode_four_keeps_main_bsr_together(self):
         steps = listing_steps()
         self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = "4"
         self.assertEqual(self.groups(steps), [(tuple(steps), True)])
+
+    def test_unset_default_mode_one_keeps_stages_separate(self):
+        steps = listing_steps()
         self.environment.pop("SEDA_CASAS_BAHIA_LISTING_MODE")
-        self.assertEqual(self.groups(steps), [(tuple(steps), True)])
+        self.assertEqual(self.groups(steps), [((step,), False) for step in steps])
 
     def test_explicit_subset_is_not_expanded(self):
         main, targets, bsr = listing_steps()

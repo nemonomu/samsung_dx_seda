@@ -368,9 +368,9 @@ class PendingPriceContracts(unittest.TestCase):
         accessory["title"] = "Suporte para TV fixture"
         self.assertEqual(hybrid._validation_error(document([accessory]), URL), "no_relevant_parsed_products")
 
-    def test_legacy_modes_retained_and_new_mode_four_is_default(self):
+    def test_all_modes_retained_and_mode_one_is_default(self):
         self.assertEqual(set(listing_modes.MODES), {"1", "2", "3", "4"})
-        self.assertEqual(listing_modes.DEFAULT_MODE, "4")
+        self.assertEqual(listing_modes.DEFAULT_MODE, "1")
 
     def test_legacy_modes_ignore_all_new_pending_and_quote_guard_behavior(self):
         for mode in ("1", "2", "3"):

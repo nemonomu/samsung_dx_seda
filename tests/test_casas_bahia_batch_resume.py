@@ -134,8 +134,8 @@ class CasasBatchResumeTests(unittest.TestCase):
                     self.assertEqual(call["SEDA_DETAIL_TARGET_CSV"], "")
                     self.assertEqual(call["SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK"], "1")
 
-    def test_no_argument_keeps_default_mode_four(self):
-        self.assert_success_chain(*self.run_batch())
+    def test_no_argument_uses_default_mode_one(self):
+        self.assert_success_chain(*self.run_batch(), mode="1")
 
     def test_valid_resume_then_ref_ldy_full(self):
         result, calls = self.run_batch(["4", "--resume-tv-detail", "20260923", "308"])
