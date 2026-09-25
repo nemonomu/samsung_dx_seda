@@ -51,8 +51,9 @@ def fetch_url(url, mode=None, timeout=None):
     for attempt in attempts:
         if attempt == "casas_listing_hybrid":
             result = _fetch_casas_listing_hybrid(url, timeout)
-        elif attempt in {"casas_listing_rest", "casas_listing_uc_api", "casas_listing_uc_api_url_first"}:
+        elif attempt in {"casas_listing_rest", "casas_listing_rest_url_first", "casas_listing_uc_api", "casas_listing_uc_api_url_first"}:
             numeric_mode = {"casas_listing_rest": "1", "casas_listing_uc_api": "3",
+                            "casas_listing_rest_url_first": "1-1",
                             "casas_listing_uc_api_url_first": "4"}[attempt]
             result = _fetch_casas_listing_mode(url, timeout, numeric_mode)
         elif attempt == "browser":
@@ -80,7 +81,7 @@ def fetch_url(url, mode=None, timeout=None):
         trace.append(trace_item)
         result.attempts = trace[:]
         listing_error = bool(result.error) and (_is_magalu_listing_url(url) or attempt in {
-            "casas_listing_rest", "casas_listing_hybrid", "casas_listing_uc_api", "casas_listing_uc_api_url_first"})
+            "casas_listing_rest", "casas_listing_rest_url_first", "casas_listing_hybrid", "casas_listing_uc_api", "casas_listing_uc_api_url_first"})
         if (
             result.text
             and len(result.text) > 500
@@ -194,7 +195,7 @@ def _fetch_requests(url, timeout):
 def _fetch_casas_listing_mode(url, timeout, mode):
     from .casas_bahia.listing_modes import fetch_listing
 
-    method = {"1": "api_partner", "3": "uc_api", "4": "uc_api_url_first"}[mode]
+    method = {"1": "api_partner", "1-1": "api_partner_url_first", "3": "uc_api", "4": "uc_api_url_first"}[mode]
     try:
         result = fetch_listing(url, timeout=timeout, mode=mode)
     except Exception as exc:

@@ -464,7 +464,7 @@ class ExecutionGroupingTests(unittest.TestCase):
 
     def test_modes_one_two_remain_separate_subprocess_steps(self):
         steps = listing_steps()
-        for mode in ("1", "2", "invalid"):
+        for mode in ("1", "1-1", "2", "invalid"):
             self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = mode
             with self.subTest(mode=mode):
                 self.assertEqual(self.groups(steps), [((step,), False) for step in steps])

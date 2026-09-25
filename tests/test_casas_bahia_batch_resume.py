@@ -17,6 +17,7 @@ WORK_ROOT = None
 CMD = Path(r"C:\Windows\System32\cmd.exe")
 CAPTURE_FIELDS = (
     "SEDA_CASAS_BAHIA_LISTING_MODE",
+    "SEDA_CASAS_BAHIA_SEARCH_RETRIES",
     "SEDA_RUN_DATE",
     "SEDA_FORCE_DATED_RUN_ROOT",
     "SEDA_RUN_ROOT",
@@ -125,7 +126,7 @@ class CasasBatchResumeTests(unittest.TestCase):
             self.assertEqual(call["SEDA_CASAS_BAHIA_LISTING_MODE"], mode)
 
     def test_normal_modes_preserve_three_full_runs(self):
-        for mode in ("1", "2", "3", "4"):
+        for mode in ("1", "1-1", "2", "3", "4"):
             with self.subTest(mode=mode):
                 result, calls = self.run_batch([mode])
                 self.assert_success_chain(result, calls, mode=mode)
@@ -136,6 +137,26 @@ class CasasBatchResumeTests(unittest.TestCase):
 
     def test_no_argument_uses_default_mode_one(self):
         self.assert_success_chain(*self.run_batch(), mode="1")
+
+    def test_mode_one_one_logs_explicit_url_first_rest_label(self):
+        result, calls = self.run_batch(["1-1"])
+        self.assert_success_chain(result, calls, mode="1-1")
+        self.assertIn("listing mode=1-1 (rest_api_url_first)", result.stdout)
+
+    def test_restored_mode_one_preserves_retry_configuration(self):
+        for args in ([], ["1"]):
+            for configured in (None, "4"):
+                runtime = {} if configured is None else {"SEDA_CASAS_BAHIA_SEARCH_RETRIES": configured}
+                result, calls = self.run_batch(args, runtime=runtime)
+                self.assert_success_chain(result, calls, mode="1")
+                self.assertEqual([call["SEDA_CASAS_BAHIA_SEARCH_RETRIES"] for call in calls],
+                                 [configured or ""] * 3)
+
+    def test_other_modes_keep_retry_ceiling_configuration(self):
+        for mode in ("1-1", "2", "3", "4"):
+            result, calls = self.run_batch([mode], runtime={"SEDA_CASAS_BAHIA_SEARCH_RETRIES": "4"})
+            self.assert_success_chain(result, calls, mode=mode)
+            self.assertEqual([call["SEDA_CASAS_BAHIA_SEARCH_RETRIES"] for call in calls], ["2"] * 3)
 
     def test_valid_resume_then_ref_ldy_full(self):
         result, calls = self.run_batch(["4", "--resume-tv-detail", "20260923", "308"])
@@ -174,7 +195,7 @@ class CasasBatchResumeTests(unittest.TestCase):
                 self.assertEqual(len(calls), index, result.stdout + result.stderr)
 
     def test_resume_rejects_legacy_modes_before_any_python(self):
-        for mode in ("1", "2", "3"):
+        for mode in ("1", "1-1", "2", "3"):
             with self.subTest(mode=mode):
                 result, calls = self.run_batch([mode, "--resume-tv-detail", "20260923", "308"])
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)

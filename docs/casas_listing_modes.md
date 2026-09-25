@@ -1,13 +1,13 @@
 # Casas Bahia listing modes
 
-최종 선택 기본값: **1 (REST API)** — 2026-09-24 사용자 요청으로 변경. 모드 1/2/3/4의 수집 동작은 그대로 유지한다. Mode 4만 가격·판매자 연결 실패가 상품 URL 수집을 막지 않으며, 기존 Detail 후 남은 가격을 제한적으로 보완한다. 상세 라우팅·CSV·DB 형식은 유지한다. [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
+최종 선택 기본값: **1 (REST API)**. 2026-09-25 사용자 요청으로 Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작으로 복원**한다. 9월 23일 추가된 엄격한 가격 검증을 Mode 1에 적용하지 않는다. 별도 Mode 1-1/2/3/4는 유지하며, CSV·DB 형식과 공통 번역은 변경하지 않는다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 | 번호 | 이름 | 실행 경로 | 실패 시 |
 | --- | --- | --- | --- |
-| 1 | REST API | Python Partner 검색 GET + 기존 가격 API | 검색 최대 3회 후 페이지 실패. Chrome/다른 모드로 전환하지 않음 |
+| 1 | REST API (1290145 복원) | 당시 Partner 검색 GET + 상품 ID 우선 가격 연결 | 상품 목록을 받으면 가격 오류만으로 실패시키지 않음. 재시도는 기존 환경 설정(기본 총 3회). Chrome 전환 없음 |
+| 1-1 | REST API URL-first | Mode 1과 같은 검색 설정 + 정확한 SKU별 가격 연결 | 가격 미확인 상품도 URL·순위 유지. Detail에서 누락 가격·판매자 검증 및 보완. Listing Chrome/ZenRows 전환 없음 |
 | 2 | hybrid | 기존 REST 최대 3회 → Chrome 실제 페이지 + SSR/가격 응답 | 기존 hybrid의 제한 재접속·실패 처리 유지 |
 | 3 | UC + API | 최초 Chrome 실제 페이지 검증 → 같은 Document에서 JS 검색 GET + 가격 POST | 기존 최대 3회 후 최종 HTTP 403이면 같은 Chrome으로 모드 2의 SSR 수집 부분 실행 |
-
 | 4 | UC + API URL-first | 전용 새 Chrome → 브라우저 검색 API, 검색 403 시 같은 Chrome SSR | URL 확보 시 가격·판매자 누락으로 실패시키지 않음. Detail의 남은 누락 가격만 기존 REST로 보완 |
 
 ## 실행과 최종 선택
@@ -18,25 +18,28 @@ run_casas_bahia_tv_ref_ldy_full.bat
 
 rem 이번 실행만 모드 지정
 run_casas_bahia_tv_ref_ldy_full.bat 1
+run_casas_bahia_tv_ref_ldy_full.bat 1-1
 run_casas_bahia_tv_ref_ldy_full.bat 2
 run_casas_bahia_tv_ref_ldy_full.bat 3
 run_casas_bahia_tv_ref_ldy_full.bat 4
 ```
 
-배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=1"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 1/2/3/4 이외의 값은 수집 전에 거부한다.
+배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=1"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 허용 값은 1, 1-1, 2, 3, 4이다.
 
-Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 1이다. 이 모드 변수는 listing 전용이다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
+Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 1이다. 이 변수는 listing 방식과 해당 모드의 Detail 가격 보완 여부를 선택한다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
 
-각 Casas listing 코드 수정 시 네 모드를 유지하고, 최종 선택 숫자를 명시적으로 확인·기록해야 한다. 현재 기본 선택은 1이며 변경 요청 없이 다른 모드로 바꾸지 않는다. `4 --resume-tv-detail ...`처럼 모드를 명시한 재개 명령은 계속 모드 4로 실행한다. 이미 모드가 설정되어 실행 중인 배치는 이 기본값 변경으로 전환하지 않는다.
+각 Casas listing 코드 수정 시 기존 모드와 Mode 1-1을 유지하고, 최종 선택 값을 명시적으로 확인·기록해야 한다. 현재 기본 선택은 1이며 변경 요청 없이 다른 모드로 바꾸지 않는다. `4 --resume-tv-detail ...` 재개 명령은 기존처럼 Mode 4 전용이다. 실행 중인 배치의 모드는 바꾸지 않는다.
 
 ## 모드 4의 추가 동작
+
+Mode 1의 복원 범위는 별도 [복원 계약](casas_listing_mode1_legacy.md)에 기록한다. Mode 1은 raw 재사용 및 일부 페이지 실패 처리도 당시 정책을 따른다. 아래 Mode 3/4의 엄격 검증·300/100 부분 성공 기준을 복원된 Mode 1에 적용하지 않는다.
 
 - 모드 3의 연결·Chrome 준비 조건을 기반으로 별도 모듈을 사용한다. 모드 3의 기존 구현은 변경하지 않는다.
 - Listing 성공은 상품 URL·기존 필터·페이지/정렬/순서 검증으로 판단한다. 가격·판매자 누락은 가격 보류 상태로 기록한다.
 - 검색 최대 3회 후 최종 403이면 같은 Chrome SSR로 전환한다. 가격만 실패하면 검색이나 SSR을 반복하지 않는다.
 - SSR Document가 완료되면 확보된 상품을 사용한다. 가격 응답 부재만으로 추가 대기/탐색하지 않는다.
 - Main→BSR Chrome 공유와 main 300/BSR 100 기준은 모드 3과 같다.
-- 모드 4에서만 기존 Detail 후에도 최종 가격이 빈 행에 제한된 기존 가격 REST 보완을 수행한다. 이미 있는 값은 덮어쓰지 않는다.
+- 모드 4는 기존처럼 Detail 후에도 최종 가격이 빈 행에 제한된 기존 가격 REST 보완을 수행한다. 이미 있는 값은 덮어쓰지 않는다. Mode 1-1의 별도 보완 로직을 이 모드에 적용하지 않는다.
 - 진단·raw metadata·manifest는 모드 4를 별도로 기록한다. 모드 1/2/3과 raw를 섞어 재사용하지 않는다.
 
 ## 모드 3의 정확한 범위 (기존 동작 유지)
@@ -73,7 +76,7 @@ Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경�
 - 다른 페이지가 이전 페이지 전체 SKU 집합을 그대로 반복하면 실패 처리한다.
 - 출력 CSV 계약과 기존 관련 상품 필터를 유지한다. 실패 페이지가 있어도 필터링 후 누적 unique가 main 300개 / BSR 100개 이상이면 성공분으로 후속 단계를 진행한다. 실패 내역과 `complete=false`는 유지하고 `accepted_with_failures=true`, `downstream_allowed=true`로 구분하며 final CSV와 `.partial.csv`를 함께 저장한다. 실패가 있고 기준 미달이면 기존처럼 downstream을 중단한다. 이 기준 자체가 페이지 조기 종료 조건은 아니다.
 - 기존 배치의 각 main/BSR listing 종료 시 `seda/casas_bahia/log/`에 진단 ZIP을 자동 생성한다. 별도 진단 배치는 필요하지 않으며 모드 3의 기존 요청에 대한 관측만 추가한다. 자세한 항목과 보안 범위는 `docs/casas_listing_diagnostics.md`를 참조한다.
-- raw 옆 `.mode.json`에 선택 모드와 source URL을 기록한다. 모드가 다르거나 메타데이터가 없는 raw는 재사용하지 않는다.
+- raw 옆 `.mode.json`에 선택 모드와 source URL을 기록한다. Mode 1-1/2/3/4는 모드가 다르거나 메타데이터가 없는 raw를 재사용하지 않는다. Mode 1은 명시적으로 raw 재사용을 요청하면 과거처럼 재파싱하므로, 다른 모드의 raw를 섞어 사용하지 않는다.
 - manifest의 `casas_listing_mode`, `casas_listing_mode_label`, `fetch_mode`로 선택과 실제 경로를 확인할 수 있다.
 
 ## 검증 범위와 주의사항

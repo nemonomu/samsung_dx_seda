@@ -52,6 +52,8 @@ ERRORS = {
     "missing_price", "no_relevant_parsed_products", "parsed_identity_or_price_mismatch", "invalid_listing_payload",
     "missing_product_url_identity", "optional_price_diagnostics_failed", "price_attach_disabled",
     "price_attach_failed", "price_request_failed", "invalid_price_offers", "invalid_price_json",
+    "search_http_not_200", "non_json_response", "invalid_json", "invalid_product_payload",
+    "rest_listing_request_failed", "rest_listing_failed", "invalid_price_result", "invalid_price_status",
 }
 ERRORS |= {f"price_http_{status}" for status in range(100, 600)}
 EXCEPTIONS = {
@@ -321,7 +323,7 @@ DIAGNOSTIC_NUMBERS = {
     "price_response_count", "bootstrap_navigation_count", "source_sku_aliases_added", "reported_page",
     "chrome_major", "document_navigations", "parser_sku_aliases_added",
     "navigation_attempt", "trigger_status_code",
-    "price_pending_products", "seller_pending_products",
+    "price_pending_products", "seller_pending_products", "price_count",
 }
 DIAGNOSTIC_FLAGS = {
     "navigation_raised", "navigation_timeout", "new_loader_observed", "selected_document_response_seen",
@@ -342,7 +344,7 @@ def _trace_projection(value, depth=0):
         safe = _numbers(item, DIAGNOSTIC_NUMBERS)
         safe.update(_flags(item, DIAGNOSTIC_FLAGS))
         for key, values in (("method", {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid",
-                                         "uc_api_url_first", "uc_api_url_first+browser_ssr"}),
+                                         "uc_api_url_first", "uc_api_url_first+browser_ssr", "api_partner_url_first"}),
                             ("stage", {"bootstrap", "search", "price", "validation", "complete", "ssr_fallback"}),
                             ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
                             ("document_network_error", NETWORK_ERRORS | {"none", "other"}),
@@ -376,7 +378,9 @@ def project_event(event, payload):
     if event == "run_start":
         safe["product_line"] = _enum(payload.get("product_line"), {"TV", "REF", "LDY"})
         safe["run_id"] = _enum(payload.get("run_id"), {"main", "bsr"})
-        mode = _integer(payload.get("mode"), 4, 1)
+        # Keep the legacy numeric modes in reports; the new branch is an exact string.
+        raw_mode = payload.get("mode")
+        mode = "1-1" if raw_mode == "1-1" else _integer(raw_mode, 4, 1)
         if mode is not None:
             safe["mode"] = mode
         safe.update(_flags(payload, {"browser_session_reused", "bootstrap_previously_completed"}))
@@ -415,7 +419,7 @@ def project_event(event, payload):
         safe.update(_flags(payload, {"success", "bootstrap_failure_reused", "fallback_used", "browser_reused", "recovery_pending"}))
         if "actual_method" in payload:
             safe["actual_method"] = _enum(payload["actual_method"], {"uc_api", "browser_ssr", "uc_api+browser_ssr", "api_partner", "rest_ssr_hybrid",
-                                                                    "uc_api_url_first", "uc_api_url_first+browser_ssr"})
+                                                                    "uc_api_url_first", "uc_api_url_first+browser_ssr", "api_partner_url_first"})
         safe["error"] = safe_error(payload.get("error"))
         safe["trace"] = _trace_projection(payload.get("trace"))
     elif event == "run_end":
@@ -528,7 +532,14 @@ def build_report(output_dir, *, archive_dir=None):
               "page_outcomes": pages, "api_timeline": calls, "first_api_403": first_403,
               "event_count": len(records), "ignored_lines": ignored, "partial_tail": partial}
     effective_mode = 4 if report["run"].get("mode") == 4 else 3
-    effective_page_size = report["run"].get(f"effective_mode{effective_mode}_page_size", "not recorded")
+    if report["run"].get("mode") != "1-1":
+        effective_page_size = report["run"].get(f"effective_mode{effective_mode}_page_size", "not recorded")
+        effective_page_note = (
+            f"The configured REST value and the effective mode {effective_mode} value may differ; this tool does not change either.")
+    else:
+        effective_mode = "1-1"
+        effective_page_size = "not independently recorded (REST configured size is shown above)"
+        effective_page_note = "This REST listing run has no browser-observed API page size."
     lines = ["# Casas Bahia automatic listing diagnostic report", "",
              "Evidence from the normal listing run; this report does not cover detail collection.",
              "No separate diagnostic requests are issued. Missing API detail does not establish that no traffic occurred.",
@@ -541,7 +552,7 @@ def build_report(output_dir, *, archive_dir=None):
              f"Bootstrap already validated at run start: {report['run'].get('bootstrap_previously_completed', 'not recorded')}",
              f"Configured REST page size: {report['run'].get('configured_rest_page_size', 'not recorded')}",
              f"Effective mode {effective_mode} page size: {effective_page_size}",
-             f"The configured REST value and the effective mode {effective_mode} value may differ; this tool does not change either.",
+             effective_page_note,
              f"Filtered unique products: {report['outcome'].get('filtered_unique_count', 'not recorded')}",
              f"Required unique products: {report['outcome'].get('required_unique', 'not recorded')}",
              f"Coverage complete: {report['outcome'].get('coverage_complete', 'not recorded')}",

@@ -168,7 +168,7 @@ class AutomaticListingDiagnostics:
         rest_params = evidence.request_summary(search_api._params(url))
         payload = {
             "product_line": self.product_line, "run_id": self.run_id, "pages": len(self.pages),
-            "mode": int(self.mode), "python_version": ".".join(map(str, sys.version_info[:3])),
+            "mode": self.mode, "python_version": ".".join(map(str, sys.version_info[:3])),
             "configured_rest_page_size": rest_params.get("resultsperpage"),
         }
         if self.mode in {"3", "4"}:
@@ -213,7 +213,7 @@ class AutomaticListingDiagnostics:
                             (entry.get("fallback_used") is True or entry.get("stage") == "ssr_fallback")
                             for entry in trace)
         allowed_methods = {"uc_api", "browser_ssr", "api_partner", "rest_ssr_hybrid", "uc_api+browser_ssr",
-                           "uc_api_url_first", "uc_api_url_first+browser_ssr"}
+                           "uc_api_url_first", "uc_api_url_first+browser_ssr", "api_partner_url_first"}
         actual_method = next((entry["method"] for entry in reversed(trace)
                               if isinstance(entry, dict) and isinstance(entry.get("method"), str)
                               and entry["method"] in allowed_methods), "other")

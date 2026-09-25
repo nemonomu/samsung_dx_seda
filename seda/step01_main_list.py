@@ -575,8 +575,8 @@ def _main_once():
                     url,
                     run_id,
                 )
-                if config.name == "Casas Bahia":
-                    if casas_mode == "4":
+                if config.name == "Casas Bahia" and casas_mode != "1":
+                    if casas_mode in {"1-1", "4"}:
                         from .casas_bahia.listing_url_first import _validation_error
                     else:
                         from .casas_bahia.listing_hybrid import _validation_error
@@ -788,14 +788,26 @@ def _main_once():
     }
     complete = not failures and (bool(rows) or allow_empty)
     casas_fail_closed = "casas_bahia" in selected_retailers()
+    legacy_mode_one = selected_retailers() == ["casas_bahia"] and casas_mode == "1"
     magalu_fail_closed = selected_retailers() == ["magalu"]
-    listing_fail_closed = magalu_fail_closed or casas_fail_closed
+    listing_fail_closed = magalu_fail_closed or (casas_fail_closed and not legacy_mode_one)
     threshold = (
         _casas_listing_threshold(
             run_id, len(retailer_unique_seen.get("casas_bahia", set())), failures, complete,
         )
         if casas_fail_closed else {}
     )
+    if legacy_mode_one:
+        # 1290145 Mode 1 published any nonempty Casas result and proceeded,
+        # regardless of failed pages. Preserve evidence without inventing a
+        # minimum-count gate that did not exist in that REST collection path.
+        threshold.update({
+            "minimum_unique_required": None,
+            "threshold_met": False,
+            "accepted_with_failures": bool(failures and (rows or allow_empty)),
+            "downstream_allowed": bool(rows or allow_empty),
+            "publication_policy": "legacy_mode1",
+        })
     accepted_with_failures = threshold.get("accepted_with_failures", False)
     final_output = parsed_dir / "main_occurrences.csv"
     partial_output = parsed_dir / "main_occurrences.partial.csv"
@@ -808,15 +820,15 @@ def _main_once():
         if complete or accepted_with_failures or not listing_fail_closed
         else partial_output
     )
-    if accepted_with_failures:
+    if accepted_with_failures or (legacy_mode_one and not complete):
         # Keep an explicitly partial artifact as well as the usable downstream
         # CSV; the manifest retains every failed page and complete=False.
         write_csv(partial_output, rows, columns=OUTPUT_COLUMNS)
     write_csv(output_path, rows, columns=OUTPUT_COLUMNS)
-    if listing_fail_closed:
+    if listing_fail_closed or legacy_mode_one:
         if complete:
             partial_output.unlink(missing_ok=True)
-        elif not accepted_with_failures:
+        elif not accepted_with_failures and not legacy_mode_one:
             final_output.unlink(missing_ok=True)
     manifest = {
         "run_id": run_id,
@@ -847,6 +859,7 @@ def _main_once():
     if accepted_with_failures:
         print(
             f"[seda] {run_id} Casas Bahia listing accepted with failures "
+            f"policy={'legacy_mode1' if legacy_mode_one else 'minimum_unique'} "
             f"filtered_unique={threshold['filtered_unique_count']} "
             f"minimum={threshold['minimum_unique_required']} "
             f"failed_pages={','.join(map(str, _listing_failed_pages(manifest)))} "

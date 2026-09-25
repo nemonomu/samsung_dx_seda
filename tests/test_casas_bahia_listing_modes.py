@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from seda import step01_main_list, transport
 from seda.casas_bahia import (browser_api, browser_listing, browser_api_url_first,
                               browser_listing_url_first, listing_hybrid, listing_modes,
-                              listing_url_first, search_api)
+                              listing_url_first, search_api, rest_legacy)
 from test_casas_bahia_listing_hybrid import TV_URL, _blocked_result, _listing_html, _successful_result
 
 
@@ -23,8 +23,9 @@ class ModeSelectionTests(unittest.TestCase):
             self.assertEqual(listing_modes.selected_mode(), "1")
             self.assertEqual(listing_modes.fetch_mode(), "casas_listing_rest")
 
-    def test_exact_four_modes_and_no_invalid_fallback(self):
+    def test_five_modes_and_no_invalid_fallback(self):
         for value, fetch in (("1", "casas_listing_rest"), ("2", "casas_listing_hybrid"),
+                             ("1-1", "casas_listing_rest_url_first"),
                              ("3", "casas_listing_uc_api"), ("4", "casas_listing_uc_api_url_first")):
             self.assertEqual(listing_modes.fetch_mode(value), fetch)
         for value in ("", "0", "5", "rest", "3;anything", "4;anything"):
@@ -32,17 +33,17 @@ class ModeSelectionTests(unittest.TestCase):
                 listing_modes.selected_mode(value)
 
     def test_mode_one_only_direct_rest(self):
-        with patch.object(search_api, "fetch_search_listing", return_value=_successful_result()) as rest, patch.object(
+        with patch.object(rest_legacy, "fetch_search_listing", return_value=_successful_result()) as rest, patch.object(
             browser_api, "fetch_listing", side_effect=AssertionError("wrong_mode")) as api, patch.object(
             browser_listing, "fetch_page", side_effect=AssertionError("wrong_mode")) as ssr, redirect_stdout(io.StringIO()):
             result = listing_modes.fetch_listing(TV_URL, timeout=7, mode="1")
         self.assertTrue(result["success"])
-        rest.assert_called_once_with(TV_URL, timeout=7, max_attempts=3, validator=listing_hybrid._validation_error)
+        rest.assert_called_once_with(TV_URL, timeout=7)
         api.assert_not_called()
         ssr.assert_not_called()
 
     def test_mode_one_failure_never_opens_browser(self):
-        with patch.object(search_api, "fetch_search_listing", return_value=_blocked_result()), patch.object(
+        with patch.object(rest_legacy, "fetch_search_listing", return_value=_blocked_result()), patch.object(
             browser_api, "fetch_listing", side_effect=AssertionError("wrong_mode")), patch.object(
             browser_listing, "fetch_page", side_effect=AssertionError("wrong_mode")), redirect_stdout(io.StringIO()):
             result = listing_modes.fetch_listing(TV_URL, timeout=7, mode="1")
@@ -84,7 +85,7 @@ class ModeSelectionTests(unittest.TestCase):
         close_four_ssr.assert_called_once()
 
     def test_explicit_transports_do_not_call_generic_requests_or_zenrows(self):
-        for numeric in ("1", "3", "4"):
+        for numeric in ("1", "1-1", "3", "4"):
             with self.subTest(mode=numeric), patch.object(listing_modes, "fetch_listing", return_value=_successful_result()) as fetch, patch.object(
                 transport, "_fetch_requests", side_effect=AssertionError("generic_forbidden")), patch.object(
                 transport, "_fetch_zenrows", side_effect=AssertionError("zenrows_forbidden")):
@@ -93,7 +94,7 @@ class ModeSelectionTests(unittest.TestCase):
                 fetch.assert_called_once_with(TV_URL, timeout=7, mode=numeric)
 
     def test_explicit_transports_reject_error_body(self):
-        for numeric in ("1", "3", "4"):
+        for numeric in ("1", "1-1", "3", "4"):
             bad = {**_successful_result(), "error": "bad_payload"}
             with self.subTest(mode=numeric), patch.object(listing_modes, "fetch_listing", return_value=bad), patch.object(transport.time, "sleep"):
                 result = transport.fetch_url(TV_URL, mode=listing_modes.fetch_mode(numeric), timeout=7)
@@ -109,7 +110,7 @@ class ModeSelectionTests(unittest.TestCase):
     def test_batch_explicit_default_one_and_all_mode_overrides(self):
         source = (Path(__file__).resolve().parents[1] / "run_casas_bahia_tv_ref_ldy_full.bat").read_text(encoding="utf-8-sig")
         self.assertIn('set "SEDA_CASAS_BAHIA_LISTING_MODE=1"', source)
-        for mode in ("1", "2", "3", "4"):
+        for mode in ("1", "1-1", "2", "3", "4"):
             self.assertIn(f'if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="{mode}" goto :listing_mode_valid', source)
 
 
@@ -124,7 +125,7 @@ class ListingModeStepTests(unittest.TestCase):
         return transport.FetchResult(url=url, text=_listing_html(), status_code=200, method="uc_api")
 
     def test_all_modes_main_and_bsr_use_explicit_route_and_keep_detail_mode(self):
-        for mode in ("1", "2", "3", "4"):
+        for mode in ("1", "1-1", "2", "3", "4"):
             for run in ("main", "bsr"):
                 with self.subTest(mode=mode, run=run), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)

@@ -3,11 +3,12 @@ setlocal
 
 cd /d "%~dp0"
 
-rem Listing: 1=REST API, 2=hybrid, 3=UC + API, 4=URL-first UC + API.
-rem Final selected default. Optional first argument 1/2/3/4 overrides this run only.
+rem Listing: 1=REST API, 1-1=URL-first REST API, 2=hybrid, 3=UC + API, 4=URL-first UC + API.
+rem Final selected default. Optional first argument 1/1-1/2/3/4 overrides this run only.
 set "SEDA_CASAS_BAHIA_LISTING_MODE=1"
 if not "%~1"=="" set "SEDA_CASAS_BAHIA_LISTING_MODE=%~1"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" goto :listing_mode_valid
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1-1" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" goto :listing_mode_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="4" goto :listing_mode_valid
@@ -38,6 +39,7 @@ set "SEDA_MAGALU_SHIPPING_BACKFILL_ONLY=0"
 
 :resume_args_valid
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api"
+if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1-1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api_url_first"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=hybrid"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="3" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=uc_api"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="4" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=uc_api_url_first"
@@ -47,8 +49,9 @@ for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\casas_bahia\log\casas_bahia_tv_ref_ldy_full_%SEDA_RUN_TIMESTAMP%.log"
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
-rem Search API ceiling in listing modes: 1 initial call + 2 retries.
-set SEDA_CASAS_BAHIA_SEARCH_RETRIES=2
+rem Restored Mode 1 keeps the pre-20260922 environment retry setting (default 2).
+rem Other modes keep their existing ceiling: 1 initial call + 2 retries.
+if not "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" set SEDA_CASAS_BAHIA_SEARCH_RETRIES=2
 if not defined SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS set SEDA_CASAS_BAHIA_DEFAULT_ALLOW_ZENROWS=1
 if not defined SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN set SEDA_CASAS_BAHIA_DEFAULT_ZENROWS_DRY_RUN=0
 if not defined SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_RETRIES set SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_RETRIES=0
@@ -134,7 +137,7 @@ call :log "[SEDA] Casas Bahia LDY full run failed"
 exit /b 1
 
 :invalid_listing_mode
-echo [SEDA] Invalid listing mode. Use 1=REST API, 2=hybrid, 3=UC+API, or 4=URL-first UC+API.
+echo [SEDA] Invalid listing mode. Use 1=REST API, 1-1=URL-first REST API, 2=hybrid, 3=UC+API, or 4=URL-first UC+API.
 exit /b 2
 
 :invalid_resume

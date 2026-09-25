@@ -857,10 +857,20 @@ def _backfill_casas_listing_prices(
     row_index_offset=0,
     checkpoint_writer=None,
     fetcher=None,
+    price_cache=None,
 ):
     """After normal detail work, fill only still-missing Casas price quotes."""
     if os.getenv("SEDA_CASAS_BAHIA_API_ENRICH", "1").lower() in {"0", "false", "no", "n"}:
         return rows
+    if os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "1-1":
+        from .casas_bahia.rest_detail_price_recovery import backfill_rest_price_fields
+
+        return backfill_rest_price_fields(
+            rows, checkpoint_every=checkpoint_every, trace_rows=trace_rows,
+            row_index_offset=row_index_offset, checkpoint_writer=checkpoint_writer,
+            fetcher=fetcher, cache=price_cache,
+            append_token=_append_token, record_subcall=_record_subcall,
+        )
     from .casas_bahia.detail_price_recovery import PRICE_FIELDS, is_blank, recover_missing_price
 
     candidates = [(index, row) for index, row in enumerate(rows, start=row_index_offset + 1)
@@ -918,7 +928,7 @@ def _backfill_casas_listing_prices(
     return rows
 
 
-def _merge_casas_bahia_apis(row):
+def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=None):
     if row.get("retailer") != "Casas Bahia":
         return
     _clear_legacy_casas_recommendation_default(row)
@@ -930,7 +940,13 @@ def _merge_casas_bahia_apis(row):
     sku_id = url_sku_id or (
         "" if _is_casas_bahia_ldy_row(row) else row.get("sku", "")
     )
-    seller_id = row.get("seller_id", "") or os.getenv("SEDA_CASAS_BAHIA_DEFAULT_SELLER_ID", "10037")
+    mode11 = os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "1-1"
+    if mode11:
+        from .casas_bahia.detail_price_recovery import _positive_id
+
+        seller_id = _positive_id(row.get("seller_id"))
+    else:
+        seller_id = row.get("seller_id", "") or os.getenv("SEDA_CASAS_BAHIA_DEFAULT_SELLER_ID", "10037")
 
     try:
         from .casas_bahia.detail_api import fetch_freight, fetch_pickup, fetch_product_source, fetch_similar_names
@@ -976,9 +992,28 @@ def _merge_casas_bahia_apis(row):
 
         product_id = row.get("retailer_product_id", "") or product_id
 
+        if mode11:
+            # Product source may provide the missing product ID. Resolve the
+            # exact URL quote before seller-dependent freight/pickup calls.
+            _backfill_casas_listing_prices(
+                [row], trace_rows=trace_rows, row_index_offset=max(int(row_index or 1) - 1, 0),
+                price_cache=price_cache,
+            )
+            seller_id = _positive_id(row.get("seller_id"))
+            if not seller_id:
+                row["parse_status"] = _append_token(
+                    row.get("parse_status", ""), "casas_mode11_seller_pending"
+                )
+                _record_subcall(
+                    trace_rows, row, row_index, row.get("product_url", ""),
+                    "casas_mode11_seller_dependent_apis", success=False,
+                    error="verified_seller_unavailable", detail="freight_pickup_not_requested",
+                )
+
         if (
             os.getenv("SEDA_CASAS_BAHIA_FREIGHT_API", "1").lower()
             not in {"0", "false", "no", "n"}
+            and (not mode11 or bool(seller_id))
             and not _skip_casas_sku_api(row, sku_id, "freight_api")
         ):
             freight = fetch_freight(sku_id, seller_id, referer_url=row.get("product_url", ""))
@@ -994,6 +1029,7 @@ def _merge_casas_bahia_apis(row):
         if (
             os.getenv("SEDA_CASAS_BAHIA_PICKUP_API", "1").lower()
             not in {"0", "false", "no", "n"}
+            and (not mode11 or bool(seller_id))
             and not _skip_casas_sku_api(row, sku_id, "pickup_api")
         ):
             pickup = fetch_pickup(sku_id, seller_id)
@@ -3493,6 +3529,8 @@ def main():
 
 
 def _run_detail_main(root, *, is_worker):
+    mode11 = os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "1-1"
+    mode11_price_cache = {}
     if not is_worker:
         # Resolve a crash-interrupted publish before reading checkpoint state or
         # issuing any network request.
@@ -3721,7 +3759,13 @@ def _run_detail_main(root, *, is_worker):
             review_page_trace_rows=review_page_trace_rows,
             row_index=index,
         )
-        _merge_casas_bahia_apis(row)
+        if mode11:
+            _merge_casas_bahia_apis(
+                row, trace_rows=subcall_trace_rows, row_index=index,
+                price_cache=mode11_price_cache,
+            )
+        else:
+            _merge_casas_bahia_apis(row)
         enriched.append(row)
         method = row.get("fetch_method") or (result.method if result else "")
         print(
@@ -3778,6 +3822,7 @@ def _run_detail_main(root, *, is_worker):
         trace_rows=subcall_trace_rows,
         row_index_offset=skip if is_worker else 0,
         checkpoint_writer=checkpoint_writer,
+        **({"price_cache": mode11_price_cache} if mode11 else {}),
     )
     _checkpoint_detail_state(
         root,

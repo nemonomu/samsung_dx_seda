@@ -173,8 +173,8 @@ class CasasListingThresholdTests(unittest.TestCase):
         listing._main_with_retries()
         self.assertEqual(self.manifest()["filtered_unique_count"], 300)
 
-    def test_all_four_modes_keep_their_fetch_route_and_same_acceptance(self):
-        for mode in ("1", "2", "3", "4"):
+    def test_nonlegacy_modes_keep_their_fetch_route_and_same_acceptance(self):
+        for mode in ("1-1", "2", "3", "4"):
             with self.subTest(mode=mode):
                 self.environment["SEDA_CASAS_BAHIA_LISTING_MODE"] = mode
                 self.calls.clear()
