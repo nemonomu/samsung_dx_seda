@@ -514,7 +514,7 @@ def _payload(url, page_size):
             "sortOrientation": _first(query, "sortOrientation"),
             "page": int(_first(query, "page") or "1"),
             "pageSize": page_size,
-            "zipCode": os.getenv("SEDA_POSTAL_CODE", os.getenv("SEDA_MAGALU_ZIP_CODE", "01001-001")),
+            "zipCode": os.getenv("SEDA_POSTAL_CODE", os.getenv("SEDA_MAGALU_ZIP_CODE", "01010-010")),
             "showUnavailable": True,
             "channelCode": "WEB",
         },

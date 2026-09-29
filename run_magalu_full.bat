@@ -13,7 +13,10 @@ if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\magalu\log\mag
 if not defined PYTHONUNBUFFERED set PYTHONUNBUFFERED=1
 if not defined PYTHONIOENCODING set PYTHONIOENCODING=utf-8
 
-if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
+rem Fixed SEDA collection destination; override inherited postal settings.
+set "SEDA_POSTAL_CODE=01010-010"
+set "SEDA_MAGALU_ZIP_CODE=%SEDA_POSTAL_CODE%"
+set "SEDA_MAGALU_SHIPPING_ZIP_CODE=%SEDA_POSTAL_CODE%"
 if not defined SEDA_TIMEOUT set SEDA_TIMEOUT=25
 if not defined SEDA_FETCH_MODE set SEDA_FETCH_MODE=magalu_graphql_first
 if not defined SEDA_MAGALU_LISTING_FETCH_MODE set SEDA_MAGALU_LISTING_FETCH_MODE=magalu_listing_graphql_zenrows

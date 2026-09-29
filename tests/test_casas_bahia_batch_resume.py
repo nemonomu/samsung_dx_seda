@@ -16,6 +16,8 @@ BATCH_SOURCE = Path(__file__).resolve().parents[1] / "run_casas_bahia_tv_ref_ldy
 WORK_ROOT = None
 CMD = Path(r"C:\Windows\System32\cmd.exe")
 CAPTURE_FIELDS = (
+    "SEDA_POSTAL_CODE",
+    "SEDA_CASAS_BAHIA_ZIPCODE",
     "SEDA_CASAS_BAHIA_LISTING_MODE",
     "SEDA_CASAS_BAHIA_SEARCH_RETRIES",
     "SEDA_RUN_DATE",
@@ -115,6 +117,23 @@ class CasasBatchResumeTests(unittest.TestCase):
                     current[key] = value
         self.assertIsNone(current, "stub capture must contain complete calls")
         return result, calls
+
+    def test_postal_default_reaches_all_product_line_processes(self):
+        result, calls = self.run_batch()
+        self.assert_success_chain(result, calls, mode="1")
+        self.assertEqual([call["SEDA_POSTAL_CODE"] for call in calls], ["01010-010"] * 3)
+
+    def test_inherited_postal_destinations_are_replaced(self):
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                args = ["4", "--resume-tv-detail", "20260923", "308"] if resume else []
+                result, calls = self.run_batch(args, runtime={
+                    "SEDA_POSTAL_CODE": "01001-001",
+                    "SEDA_CASAS_BAHIA_ZIPCODE": "01311000",
+                })
+                self.assert_success_chain(result, calls, resume=resume, mode="4" if resume else "1")
+                self.assertEqual([call["SEDA_POSTAL_CODE"] for call in calls], ["01010-010"] * 3)
+                self.assertEqual([call["SEDA_CASAS_BAHIA_ZIPCODE"] for call in calls], ["01010010"] * 3)
 
     def assert_success_chain(self, result, calls, *, resume=False, mode="4"):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
