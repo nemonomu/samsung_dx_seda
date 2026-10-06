@@ -11,6 +11,9 @@ from ._net import request_with_retry
 REVIEWS_URL = "https://pdp-api.casasbahia.com.br/api/v3/reviews/product/{product_id}/source/CB"
 
 
+from seda.casas_bahia.diagnostics import Span, trace, timed_request, timed_sleep
+
+@trace('reviews')
 def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
     if not product_id:
         return {"success": False, "error": "missing_product_id", "zenrows_requested": False}
@@ -115,6 +118,7 @@ def _review_text(item):
     return ""
 
 
+@trace('reviews_direct')
 def _fetch_review_page_direct(session, product_id, page, page_size, timeout):
     try:
         response = request_with_retry(
@@ -152,6 +156,7 @@ def _fetch_review_page_direct(session, product_id, page, page_size, timeout):
     return {"success": True, "data": data, "method": "casas_bahia_reviews_api", "headers": {}}
 
 
+@trace('reviews_zenrows')
 def _fetch_review_page_zenrows(product_id, page, page_size, timeout, referer_url=None):
     if os.getenv("SEDA_CASAS_BAHIA_REVIEW_ZENROWS_FALLBACK", "1").lower() in {"0", "false", "no", "n"}:
         return {
@@ -179,7 +184,7 @@ def _fetch_review_page_zenrows(product_id, page, page_size, timeout, referer_url
         "original_status": "true",
     }
     try:
-        result = request_url(
+        result = timed_request('zenrows_request', request_url,
             target_url,
             profile="premium_html",
             timeout=timeout,

@@ -40,6 +40,9 @@ RECS_API = "https://recs.casasbahia.com.br/v1/recommendations"
 PICKUP_API = "https://vv-retira-ponto-retirada-api-retira.viavarejo.com.br/api/v2/PontosRetirada/melhorLoja/cep"
 PRODUCT_SOURCE_URL = f"{PDP_API}/api/v2/sku/source/CB"
 
+from seda.casas_bahia.diagnostics import Span, trace, timed_request, timed_sleep
+
+@trace('product_source')
 def fetch_product_source(sku_id, timeout=None):
     if not sku_id:
         return {"success": False, "error": "missing_sku"}
@@ -70,7 +73,7 @@ def fetch_product_source(sku_id, timeout=None):
         )
         for retry in range(retries + 1):
             if retry:
-                time.sleep(float(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRY_SLEEP_SECONDS", "1.5")) * retry)
+                timed_sleep(float(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRY_SLEEP_SECONDS", "1.5")) * retry)
             if attempt == "zenrows":
                 result = _fetch_product_source_zenrows(url, timeout=timeout)
             else:
@@ -165,9 +168,10 @@ def _product_source_attempts():
         return ["zenrows"]
     return ["zenrows", "direct"]
 
+@trace('product_source_direct')
 def _fetch_product_source_direct(url, timeout=None):
     try:
-        response = requests.get(url, headers=_headers(), timeout=timeout)
+        response = timed_request('http_request', requests.get, url, headers=_headers(), timeout=timeout)
     except Exception as exc:
         return {"success": False, "error": f"direct_{type(exc).__name__}: {exc}", "method": "casas_bahia_product_source_direct"}
     if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
@@ -190,6 +194,7 @@ def _fetch_product_source_direct(url, timeout=None):
         }
     return {"success": True, "data": data, "method": "casas_bahia_product_source_direct"}
 
+@trace('product_source_zenrows')
 def _fetch_product_source_zenrows(url, timeout=None):
     if os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS", "1").lower() in {"0", "false", "no", "n"}:
         return {"success": False, "error": "zenrows_disabled", "method": "casas_bahia_product_source_zenrows"}
@@ -198,7 +203,7 @@ def _fetch_product_source_zenrows(url, timeout=None):
     except Exception as exc:
         return {"success": False, "error": f"zenrows_import_{type(exc).__name__}: {exc}", "method": "casas_bahia_product_source_zenrows"}
 
-    result = request_url(
+    result = timed_request('zenrows_request', request_url,
         url,
         profile=os.getenv(
             "SEDA_CASAS_BAHIA_PRODUCT_SOURCE_ZENROWS_PROFILE",
@@ -555,6 +560,7 @@ def _known_text(value):
         return ""
     return text
 
+@trace('freight_api')
 def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None, referer_url=None):
     if not sku_id or not seller_id:
         return {"success": False, "error": "missing_sku_or_seller"}
@@ -609,6 +615,7 @@ def fetch_freight(sku_id, seller_id, zipcode=None, timeout=None, referer_url=Non
 def _freight_zenrows_enabled():
     return os.getenv("SEDA_CASAS_BAHIA_FREIGHT_ZENROWS_FALLBACK", "0").lower() in {"1", "true", "yes", "y"}
 
+@trace('freight_zenrows')
 def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, timeout=None):
     try:
         from ..magalu.zenrows_client import request_url
@@ -640,7 +647,7 @@ def _fetch_freight_zenrows_pdp(product_url, sku_id, seller_id, zipcode=None, tim
     try:
         for attempt in range(max(1, attempts)):
             os.environ["SEDA_ZENROWS_SESSION_ID"] = str(base_session + attempt)
-            result = request_url(product_url, profile=profile, timeout=timeout, extra=extra)
+            result = timed_request('zenrows_request', request_url, product_url, profile=profile, timeout=timeout, extra=extra)
             _dump_zenrows_freight_response(result.text, attempt=attempt + 1)
             last_headers = result.headers
             last_method = f"zenrows_pdp_shipping:{result.estimated_multiplier}"
@@ -749,13 +756,14 @@ def _freight_transports():
     transports = [item.strip().lower() for item in raw.split(",") if item.strip()]
     return transports or ["requests"]
 
+@trace('freight_transport')
 def _freight_get(transport, url, params, headers, timeout):
     if transport == "requests":
-        return requests.get(url, params=params, headers=headers, timeout=timeout)
+        return timed_request('http_request', requests.get, url, params=params, headers=headers, timeout=timeout)
     if transport == "curl_cffi":
         from curl_cffi import requests as curl_requests
 
-        return curl_requests.get(
+        return timed_request('http_request', curl_requests.get,
             url,
             params=params,
             headers=headers,
@@ -764,6 +772,7 @@ def _freight_get(transport, url, params, headers, timeout):
         )
     raise ValueError(f"unknown_freight_transport:{transport}")
 
+@trace('similar_api')
 def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=None):
     if not product_id:
         return {"success": False, "error": "missing_product_id"}
@@ -806,6 +815,7 @@ def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=N
     ]
     return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
 
+@trace('pickup_api')
 def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
     if not sku_id or not seller_id:
         return {"success": False, "error": "missing_sku_or_seller"}
@@ -818,7 +828,7 @@ def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):
     }
     try:
         response = request_with_retry(
-            lambda: requests.get(PICKUP_API, params=params, headers=_pickup_headers(), timeout=timeout),
+            lambda: timed_request('http_request', requests.get, PICKUP_API, params=params, headers=_pickup_headers(), timeout=timeout),
             throttle_host="cb_pickup",
         )
     except Exception as exc:

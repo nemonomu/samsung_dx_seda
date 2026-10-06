@@ -25,6 +25,9 @@ _HOST_LAST_CALL = {}
 RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 
 
+from seda.casas_bahia.diagnostics import Span, trace, timed_request, timed_sleep
+
+@trace('throttle')
 def throttle(host="casas_bahia"):
     """Sleep so consecutive calls to ``host`` keep a minimum spacing."""
     try:
@@ -36,7 +39,7 @@ def throttle(host="casas_bahia"):
     elapsed = time.monotonic() - _HOST_LAST_CALL.get(host, 0.0)
     wait = min_interval - elapsed
     if wait > 0:
-        time.sleep(wait + random.uniform(0, min_interval * 0.3))
+        timed_sleep(wait + random.uniform(0, min_interval * 0.3))
     _HOST_LAST_CALL[host] = time.monotonic()
 
 
@@ -62,6 +65,7 @@ def retry_after_seconds(response):
     return seconds if seconds > 0 else None
 
 
+@trace('backoff')
 def sleep_backoff(attempt, base=None, retry_after=None, cap=None):
     """Exponential backoff with jitter, honoring ``Retry-After`` when given."""
     try:
@@ -76,7 +80,7 @@ def sleep_backoff(attempt, base=None, retry_after=None, cap=None):
         delay = retry_after
     else:
         delay = base * (2 ** attempt)
-    time.sleep(min(delay + random.uniform(0, base), cap))
+    timed_sleep(min(delay + random.uniform(0, base), cap))
 
 
 def _retries_default():
@@ -86,6 +90,7 @@ def _retries_default():
         return 3
 
 
+@trace('http_with_retry')
 def request_with_retry(do_request, *, retries=None, base_sleep=None,
                        retryable_status=RETRYABLE_STATUS, throttle_host=None):
     """Call ``do_request`` (returns a requests.Response) with backoff retries.
@@ -102,7 +107,7 @@ def request_with_retry(do_request, *, retries=None, base_sleep=None,
         if throttle_host:
             throttle(host=throttle_host)
         try:
-            response = do_request()
+            response = timed_request('http_attempt', do_request, )
         except Exception as exc:  # noqa: BLE001 - transport layer raises many types
             last_exc = exc
             if attempt < retries and is_retryable_exc(exc):
