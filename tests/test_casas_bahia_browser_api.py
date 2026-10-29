@@ -257,7 +257,7 @@ class SessionTests(unittest.TestCase):
             self.addCleanup(context.stop)
         self.browser = Mock()
         self.browser.major = 153
-        self.browser.fetch.return_value = {"success": True, "status_code": 200}
+        self.browser.prepare_api.return_value = {"success": True, "status_code": 200, "document_frame": FRAME}
         self.browser.driver.execute_cdp_cmd.return_value = {"frameTree": {"frame": FRAME}}
         with patch.object(api, "ProbeBrowserSession", return_value=self.browser):
             self.session = api._APISession()
@@ -274,7 +274,7 @@ class SessionTests(unittest.TestCase):
             second = self.session.fetch(URL.replace("page=1", "page=2"))
         self.assertTrue(first["success"])
         self.assertTrue(second["success"])
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.prepare_api.call_count)
         self.assertEqual(4, fetch.call_count)
         self.assertEqual(["GET", "POST", "GET", "POST"], [call.args[3] for call in fetch.call_args_list])
         self.browser.driver.get.assert_not_called()
@@ -287,7 +287,7 @@ class SessionTests(unittest.TestCase):
         with patch.dict(os.environ, {"SEDA_TIMEOUT": "120"}), \
                 patch.object(api, "_browser_fetch", side_effect=self.good()) as fetch:
             self.assertTrue(self.session.fetch(URL, timeout=1)["success"])
-        self.browser.fetch.assert_called_once_with(URL, timeout=45)
+        self.browser.prepare_api.assert_called_once_with(URL, timeout=45)
         self.assertEqual([25, 25], [call.args[6] for call in fetch.call_args_list])
 
     def test_probe_search_params_fixed_and_environment_not_mutated(self):
@@ -424,13 +424,13 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(500, result["status_code"])
         self.assertEqual(3, fetch.call_count)
         self.browser.close.assert_not_called()
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.prepare_api.call_count)
 
     def test_next_page_can_succeed_after_non403_without_new_navigation(self):
         with patch.object(api, "_browser_fetch", side_effect=[response(None, 500)] * 3 + self.good(200, 20)):
             self.assertFalse(self.session.fetch(URL)["success"])
             self.assertTrue(self.session.fetch(URL.replace("page=1", "page=2"))["success"])
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.prepare_api.call_count)
 
     def test_retry_recovers_within_three(self):
         with patch.object(api, "_browser_fetch", side_effect=[response(None, 403)] + self.good()) as fetch:
@@ -477,14 +477,14 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(result["trace"][-1]["parser_sort_context_injected"])
 
     def test_non403_bootstrap_failure_not_retried_or_replaced_by_ssr(self):
-        self.browser.fetch.return_value = {"success": False, "status_code": 500}
+        self.browser.prepare_api.return_value = {"success": False, "status_code": 500}
         for _ in range(2):
             with self.assertRaisesRegex(browser_listing.EvidenceError, "initial_page_not_verified"):
                 self.session.fetch(URL)
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.prepare_api.call_count)
 
     def test_bootstrap_public_error_preserves_status_and_safe_reason(self):
-        self.browser.fetch.return_value = {"success": False, "status_code": 403, "error": "document_not_200"}
+        self.browser.prepare_api.return_value = {"success": False, "status_code": 403, "error": "document_not_200"}
         with patch.object(api, "_SESSION", self.session):
             result = api.fetch_listing(URL)
         self.assertEqual(403, result["status_code"])
@@ -492,11 +492,22 @@ class SessionTests(unittest.TestCase):
         self.assertEqual("bootstrap", result["trace"][0]["stage"])
 
     def test_bootstrap_error_raw_message_not_exposed(self):
-        self.browser.fetch.return_value = {"success": False, "status_code": 200, "error": "private value https://private.invalid"}
+        self.browser.prepare_api.return_value = {"success": False, "status_code": 200, "error": "private value https://private.invalid"}
         with patch.object(api, "_SESSION", self.session):
             result = api.fetch_listing(URL)
         self.assertEqual("initial_page_not_verified", result["error"])
         self.assertNotIn("private", json.dumps(result))
+
+    def test_document_change_between_preparation_and_api_entry_is_rejected(self):
+        self.browser.prepare_api.return_value = {
+            "success": True, "status_code": 200,
+            "document_frame": dict(FRAME, loaderId="no-longer-current"),
+        }
+        with patch.object(api, "_browser_fetch") as fetch:
+            with self.assertRaisesRegex(api._BootstrapError, "document_navigation_during_api_call"):
+                self.session.fetch(URL)
+        fetch.assert_not_called()
+        self.browser.fetch.assert_not_called()
 
     def test_exception_message_not_exposed(self):
         with patch.object(api, "_browser_fetch", side_effect=RuntimeError("private-test-value https://secret.invalid/?private=1")):

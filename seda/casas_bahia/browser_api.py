@@ -108,7 +108,7 @@ def _messages(driver):
 def _network_evidence(messages, frame, url, method, body):
     """Use the successful local probe's GET/POST HTTP-200 evidence contract.
 
-    Document completion is still required by the initial SSR bootstrap. API
+    Document completion is still required by initial browser preparation. API
     completion events, full query/body equality and single-response counts were
     not gates in that probe and are deliberately not extra gates here.
     """
@@ -346,14 +346,19 @@ class _APISession:
             return None
         self.bootstrap_attempted = True
         started = time.monotonic()
-        item = {"method": "uc_api", "stage": "bootstrap", "status_code": 0, "document_navigations": 1}
-        print("[seda] casas_bahia mode=3 uc_api bootstrap_navigation=1", flush=True)
+        item = {"method": "uc_api", "stage": "bootstrap", "status_code": 0, "document_navigations": 0}
+        print("[seda] casas_bahia mode=3 uc_api bootstrap=homepage_then_listing price_required=false", flush=True)
         try:
-            # The established SSR validator verifies this first real page only.
-            # Its products are never returned as mode-3 listing output.
-            result = self.browser.fetch(url, timeout=45)
+            # Initial SSR products/offers are not collected output. Validate a
+            # normal document here, then validate the actual API rows below.
+            result = self.browser.prepare_api(url, timeout=45)
             item["status_code"] = int(_bounded_number(result.get("status_code"), 0, 0, 599))
+            item["document_navigations"] = int(_bounded_number(result.get("document_navigations"), 0, 0, 3))
+            item["homepage_ready"] = result.get("homepage_ready") is True
             try:
+                from .listing_diagnostic_evidence import _trace_projection
+
+                item["inner_attempts"] = _trace_projection(result.get("trace", []))
                 browser_trace = result.get("trace") or []
                 if isinstance(browser_trace, list) and browser_trace and isinstance(browser_trace[-1], dict):
                     diagnostics = browser_listing._public_browser_diagnostics(browser_trace[-1].get("diagnostics"))
@@ -369,6 +374,8 @@ class _APISession:
             self.document_frame = _frame(self.browser.driver)
             if not self.document_frame.get("id") or not self.document_frame.get("loaderId"):
                 raise browser_listing.EvidenceError("bootstrap_frame_missing")
+            if not _same_frame(result.get("document_frame", {}), self.document_frame):
+                raise browser_listing.EvidenceError("document_navigation_during_api_call")
             self.last_search_finished = time.monotonic()
         except Exception as exc:
             self.bootstrap_error = _safe_error(exc)
@@ -378,9 +385,7 @@ class _APISession:
             print(f"[seda] casas_bahia mode=3 uc_api stage=bootstrap status={self.bootstrap_status} "
                   f"error={self.bootstrap_error} elapsed_seconds={item['elapsed_seconds']}", flush=True)
             raise _BootstrapError(self.bootstrap_error, self.bootstrap_status, self.bootstrap_trace) from None
-        return {"method": "uc_api", "stage": "bootstrap", "status_code": 200,
-                **({"diagnostics": item["diagnostics"]} if "diagnostics" in item else {}),
-                "chrome_major": self.browser.major, "document_navigations": 1,
+        return {**item, "chrome_major": self.browser.major,
                 "elapsed_seconds": round(time.monotonic() - started, 3)}
 
     def fetch(self, url, timeout=None):
@@ -394,12 +399,9 @@ class _APISession:
         started = time.monotonic()
         if self.ssr_recovery_required:
             return self._ssr_fallback(url, timeout, trace, recovery_pending=True)
-        try:
-            initial = self._bootstrap(url, 45)
-        except _BootstrapError as exc:
-            if exc.status_code == 403:
-                return self._ssr_fallback(url, timeout, exc.trace)
-            raise
+        # An unprepared browser must not enter an SSR-output recovery loop.
+        # Preparation already has one bounded 403 retry on the same browser.
+        initial = self._bootstrap(url, 45)
         if initial:
             trace.append(initial)
         params = dict(search_api._params(url))

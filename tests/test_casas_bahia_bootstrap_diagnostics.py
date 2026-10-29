@@ -336,15 +336,15 @@ class BootstrapDiagnosticTests(unittest.TestCase):
         self.assertEqual(200, caught.exception.status_code)
         self.assertIs(trace, caught.exception.trace)
         self.assertEqual(original, trace)
-        owned_browser.fetch.assert_not_called()
+        owned_browser.prepare_api.assert_not_called()
 
     def test_diagnostic_summary_failure_cannot_change_bootstrap_outcome(self):
         for successful in (False, True):
             with self.subTest(successful=successful):
                 owned_browser = Mock()
                 owned_browser.major = 153
-                owned_browser.fetch.return_value = {
-                    "success": successful, "status_code": 200, "error": "document_not_completed",
+                owned_browser.prepare_api.return_value = {
+                    "success": successful, "status_code": 200, "document_frame": FRAME, "error": "document_not_completed",
                     "trace": [{"diagnostics": {"ready_state": "complete"}}]}
                 with patch.object(api, "ProbeBrowserSession", return_value=owned_browser):
                     session = api._APISession()
@@ -362,7 +362,7 @@ class BootstrapDiagnosticTests(unittest.TestCase):
                         self.assertEqual("document_not_completed", str(caught.exception))
                         self.assertEqual(200, caught.exception.status_code)
                         self.assertNotIn("diagnostics", caught.exception.trace[0])
-                owned_browser.fetch.assert_called_once_with(URL, timeout=45)
+                owned_browser.prepare_api.assert_called_once_with(URL, timeout=45)
 
     def test_allowlisted_diagnostics_survive_sticky_failure_without_extra_requests(self):
         browser_result = {"success": False, "status_code": 200, "error": "document_not_completed", "trace": [{
@@ -371,7 +371,7 @@ class BootstrapDiagnosticTests(unittest.TestCase):
             "body": "private-test-marker"}]}
         original = deepcopy(browser_result)
         owned_browser = Mock()
-        owned_browser.fetch.return_value = browser_result
+        owned_browser.prepare_api.return_value = browser_result
         with patch.object(api, "ProbeBrowserSession", return_value=owned_browser):
             session = api._APISession()
         stream = io.StringIO()
@@ -386,7 +386,7 @@ class BootstrapDiagnosticTests(unittest.TestCase):
             self.assertEqual({"ready_state": "complete", "navigation_seconds": 45.0,
                               "selected_document_loading_finished": False}, result["trace"][0]["diagnostics"])
             self.assertNotIn("private-test-marker", json.dumps(result))
-        owned_browser.fetch.assert_called_once()
+        owned_browser.prepare_api.assert_called_once()
         api_fetch.assert_not_called()
         self.assertEqual(original, browser_result)
         self.assertIn("bootstrap_failure_reused=true new_navigation=false new_api_request=false", stream.getvalue())
@@ -396,9 +396,9 @@ class BootstrapDiagnosticTests(unittest.TestCase):
     def test_successful_bootstrap_copies_diagnostics_and_is_not_repeated(self):
         owned_browser = Mock()
         owned_browser.major = 153
-        owned_browser.fetch.return_value = {"success": True, "status_code": 200, "trace": [{
+        owned_browser.prepare_api.return_value = {"success": True, "status_code": 200, "document_frame": FRAME, "trace": [{
             "diagnostics": {"ready_state": "not_probed", "navigation_seconds": 2.5, "raw": "private-test-marker"}}]}
-        source = deepcopy(owned_browser.fetch.return_value)
+        source = deepcopy(owned_browser.prepare_api.return_value)
         with patch.object(api, "ProbeBrowserSession", return_value=owned_browser):
             session = api._APISession()
         with patch.object(api, "_frame", return_value=FRAME), \
@@ -408,8 +408,8 @@ class BootstrapDiagnosticTests(unittest.TestCase):
         self.assertEqual({"ready_state": "not_probed", "navigation_seconds": 2.5}, first["diagnostics"])
         self.assertEqual(200, first["status_code"])
         self.assertIsNone(second)
-        owned_browser.fetch.assert_called_once_with(URL, timeout=45)
-        self.assertEqual(source, owned_browser.fetch.return_value)
+        owned_browser.prepare_api.assert_called_once_with(URL, timeout=45)
+        self.assertEqual(source, owned_browser.prepare_api.return_value)
         self.assertNotIn("private-test-marker", json.dumps(first))
 
 

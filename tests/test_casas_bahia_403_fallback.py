@@ -39,19 +39,19 @@ class FallbackTests(unittest.TestCase):
         self.browser = Mock()
         self.browser.major = 153
         self.browser.driver.execute_cdp_cmd.return_value = {"frameTree": {"frame": FRAME}}
-        self.browser.fetch.return_value = {"success": True, "status_code": 200}
+        self.browser.prepare_api.return_value = {"success": True, "status_code": 200, "document_frame": FRAME}
         with patch.object(api, "ProbeBrowserSession", return_value=self.browser):
             self.session = api._APISession()
 
     def test_three_search_403_then_same_browser_ssr_and_original_trace(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)) as fetch, \
                 patch.object(api, "ProbeBrowserSession", side_effect=AssertionError("no new Chrome")):
             result = self.session.fetch(URL)
         self.assertTrue(result["success"])
         self.assertEqual("uc_api+browser_ssr", result["method"])
         self.assertEqual(3, fetch.call_count)
-        self.assertEqual(2, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.fetch.call_count)  # recovery only
         self.browser.close.assert_not_called()
         self.assertEqual([403, 403, 403], [t["status_code"] for t in result["trace"] if t.get("stage") == "search"])
         self.assertEqual(200, result["trace"][-1]["status_code"])
@@ -63,17 +63,17 @@ class FallbackTests(unittest.TestCase):
             result = self.session.fetch(URL)
         self.assertTrue(result["success"])
         self.assertEqual("uc_api", result["method"])
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(0, self.browser.fetch.call_count)
 
     def test_final_non403_does_not_trigger_ssr(self):
         with patch.object(api, "_browser_fetch", side_effect=[response(None, 403), response(None, 403), response(None, 500)]):
             result = self.session.fetch(URL)
         self.assertFalse(result["success"])
         self.assertEqual(500, result["status_code"])
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.assertEqual(0, self.browser.fetch.call_count)
 
     def test_price_403_also_uses_ssr_after_three_attempts(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.object(api, "_browser_fetch", side_effect=[good()[0], response(None, 403)] * 3) as fetch:
             result = self.session.fetch(URL)
         self.assertTrue(result["success"])
@@ -82,36 +82,37 @@ class FallbackTests(unittest.TestCase):
 
     def test_success_refreshes_frame_and_next_page_uses_api(self):
         updated = {"id": "top", "loaderId": "after-ssr"}
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.object(api, "_frame", side_effect=[FRAME, updated]), \
                 patch.object(api, "_browser_fetch", side_effect=[response(None, 403)] * 3 + good(200, 20)) as fetch:
             self.assertTrue(self.session.fetch(URL)["success"])
             result = self.session.fetch(URL.replace("page=1", "page=2"))
         self.assertTrue(result["success"])
         self.assertEqual(updated, fetch.call_args_list[-1].args[7])
-        self.assertEqual(2, self.browser.fetch.call_count)
+        self.assertEqual(1, self.browser.fetch.call_count)  # recovery only
         self.assertFalse(self.session.ssr_recovery_required)
 
-    def test_bootstrap_403_has_no_api_and_can_recover_same_browser(self):
-        self.browser.fetch.side_effect = [failed_ssr(), ssr()]
+    def test_bootstrap_403_does_not_start_an_ssr_output_recovery_loop(self):
+        self.browser.prepare_api.return_value = failed_ssr()
         with patch.object(api, "_browser_fetch") as fetch:
-            result = self.session.fetch(URL)
+            for url in (URL, URL.replace("page=1", "page=2")):
+                with self.assertRaises(api._BootstrapError):
+                    self.session.fetch(url)
         fetch.assert_not_called()
-        self.assertTrue(result["success"])
-        self.assertEqual("bootstrap", result["trace"][0]["stage"])
-        self.assertEqual(403, result["trace"][0]["status_code"])
-        self.assertEqual("", self.session.bootstrap_error)
-        self.assertTrue(self.session.bootstrap_attempted)
+        self.browser.fetch.assert_not_called()
+        self.browser.prepare_api.assert_called_once_with(URL, timeout=45)
+        self.assertFalse(self.session.ssr_recovery_required)
 
     def test_bootstrap_non403_keeps_existing_failure_policy(self):
-        self.browser.fetch.return_value = failed_ssr(200, "document_not_completed")
+        self.browser.prepare_api.return_value = failed_ssr(200, "document_not_completed")
         with self.assertRaises(api._BootstrapError):
             self.session.fetch(URL)
-        self.assertEqual(1, self.browser.fetch.call_count)
+        self.browser.prepare_api.assert_called_once_with(URL, timeout=45)
+        self.browser.fetch.assert_not_called()
 
     def test_failed_ssr_bounded_then_next_page_recovers_without_api_on_error_document(self):
         next_url = URL.replace("page=1", "page=2")
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, failed_ssr(), failed_ssr(), ssr(next_url, 200, 20)]
+        self.browser.fetch.side_effect = [failed_ssr(), failed_ssr(), ssr(next_url, 200, 20)]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)) as fetch:
             first = self.session.fetch(URL)
             self.assertFalse(first["success"])
@@ -120,12 +121,12 @@ class FallbackTests(unittest.TestCase):
             second = self.session.fetch(next_url)
         self.assertTrue(second["success"])
         self.assertEqual(3, fetch.call_count)
-        self.assertEqual(4, self.browser.fetch.call_count)
+        self.assertEqual(3, self.browser.fetch.call_count)
         self.assertTrue(second["trace"][-1]["recovery_pending"])
         self.browser.close.assert_not_called()
 
     def test_ssr_price_recovery_uses_existing_two_navigation_limit(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200},
+        self.browser.fetch.side_effect = [
                                          failed_ssr(200, "missing_current_price_response"), ssr()]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)):
             result = self.session.fetch(URL)
@@ -133,7 +134,7 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual([1, 2], [t["navigation_attempt"] for t in result["trace"] if "navigation_attempt" in t])
 
     def test_invalid_ssr_payload_not_accepted_or_used_for_api(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200},
+        self.browser.fetch.side_effect = [
                                          {"success": True, "status_code": 200, "text": "<html>no data</html>"}]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)):
             result = self.session.fetch(URL)
@@ -143,7 +144,7 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual({}, self.session.page_ids)
 
     def test_ssr_missing_frame_not_published(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.object(api, "_frame", side_effect=[FRAME, {}]), \
                 patch.object(api, "_browser_fetch", return_value=response(None, 403)):
             result = self.session.fetch(URL)
@@ -153,7 +154,7 @@ class FallbackTests(unittest.TestCase):
 
     def test_repeated_set_across_api_then_ssr_rejected(self):
         next_url = URL.replace("page=1", "page=2")
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr(next_url)]
+        self.browser.fetch.side_effect = [ssr(next_url)]
         with patch.object(api, "_browser_fetch", side_effect=good() + [response(None, 403)] * 3):
             self.assertTrue(self.session.fetch(URL)["success"])
             result = self.session.fetch(next_url)
@@ -161,7 +162,7 @@ class FallbackTests(unittest.TestCase):
         self.assertNotIn("2", self.session.page_ids[("/tv/b", "")])
 
     def test_repeated_set_across_ssr_then_api_rejected(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.object(api, "_browser_fetch", side_effect=[response(None, 403)] * 3 + good() * 3):
             self.assertTrue(self.session.fetch(URL)["success"])
             result = self.session.fetch(URL.replace("page=1", "page=2"))
@@ -169,7 +170,7 @@ class FallbackTests(unittest.TestCase):
 
     def test_main_then_bsr_same_ids_allowed_and_sort_passed_without_restarting(self):
         bsr_url = URL + "&ordenacao=mais-vendidos"
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr(bsr_url)]
+        self.browser.fetch.side_effect = [ssr(bsr_url)]
         with patch.object(api, "_browser_fetch", side_effect=good() + [response(None, 403)] * 3) as fetch:
             self.assertTrue(self.session.fetch(URL)["success"])
             result = self.session.fetch(bsr_url)
@@ -179,7 +180,7 @@ class FallbackTests(unittest.TestCase):
         self.browser.close.assert_not_called()
 
     def test_ssr_exception_preserves_prior_trace_without_raw_exception(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200},
+        self.browser.fetch.side_effect = [
                                          failed_ssr(), RuntimeError("private-synthetic-value")]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)):
             result = self.session.fetch(URL)
@@ -190,7 +191,7 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(3, len([t for t in result["trace"] if t.get("stage") == "search"]))
 
     def test_reduced_attempt_limit_preserved(self):
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, ssr()]
+        self.browser.fetch.side_effect = [ssr()]
         with patch.dict(os.environ, {"SEDA_CASAS_BAHIA_SEARCH_RETRIES": "0"}), \
                 patch.object(api, "_browser_fetch", return_value=response(None, 403)) as fetch:
             result = self.session.fetch(URL)
@@ -200,7 +201,7 @@ class FallbackTests(unittest.TestCase):
     def test_ssr_summary_is_not_counted_as_extra_network_attempt(self):
         from seda import step01_main_list
 
-        self.browser.fetch.side_effect = [{"success": True, "status_code": 200}, failed_ssr(), failed_ssr()]
+        self.browser.fetch.side_effect = [failed_ssr(), failed_ssr()]
         with patch.object(api, "_browser_fetch", return_value=response(None, 403)):
             result = self.session.fetch(URL)
         leaves = step01_main_list._leaf_fetch_attempts([{"inner_attempts": result["trace"]}])

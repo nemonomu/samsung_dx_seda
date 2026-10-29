@@ -127,6 +127,12 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
         # transport timeout, headless or hybrid evidence-wait settings.
         return super().fetch(url, timeout=45, wait_seconds=30)
 
+    def prepare_api(self, url, timeout=None):
+        """Prepare a mode-3 API context without admitting SSR output rows."""
+        from .browser_api_document import prepare
+
+        return prepare(self, url)
+
     def _prepare_document(self, raw):
         """Adapt the root-state SSR layout for mode 3, before strict validation.
 

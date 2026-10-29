@@ -326,6 +326,7 @@ DIAGNOSTIC_NUMBERS = {
     "price_pending_products", "seller_pending_products", "price_count",
 }
 DIAGNOSTIC_FLAGS = {
+    "homepage_ready",
     "navigation_raised", "navigation_timeout", "new_loader_observed", "selected_document_response_seen",
     "selected_document_loading_finished", "selected_document_loading_failed", "selected_document_canceled",
     "selected_document_cached", "selected_document_service_worker", "bootstrap_failure_reused",

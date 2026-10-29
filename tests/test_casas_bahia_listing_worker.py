@@ -279,6 +279,10 @@ class WorkerIntegratedDiagnosticsTests(unittest.TestCase):
             original_frame = {"id": "owned-top", "loaderId": "initial-loader"}
             recovered_frame = {"id": "owned-top", "loaderId": "bsr-recovered-loader"}
             browser.driver.execute_cdp_cmd.return_value = {"frameTree": {"frame": original_frame}}
+            browser.prepare_api.return_value = {
+                "success": True, "status_code": 200, "document_frame": original_frame,
+                "homepage_ready": True, "document_navigations": 2,
+            }
 
             def source_products(count=1):
                 return [{"id": 10 + index, "sku": 100 + index,
@@ -293,8 +297,6 @@ class WorkerIntegratedDiagnosticsTests(unittest.TestCase):
                     for index in range(count)]}
 
             def navigation(url, timeout=None):
-                if browser.fetch.call_count == 1:
-                    return {"success": True, "status_code": 200}
                 if environment["SEDA_RUN_ID"] == "main":
                     return {"success": False, "status_code": 200,
                             "error": "document_not_completed", "trace": []}
@@ -363,6 +365,7 @@ class WorkerIntegratedDiagnosticsTests(unittest.TestCase):
             self.assertEqual(worker.run_steps([MAIN, TARGETS, BSR]), 0)
 
             constructor.assert_called_once_with()
+            browser.prepare_api.assert_called_once()
             close.assert_called_once_with()
             browser.close.assert_called_once_with()
             self.assertIs(stage_sessions[0], stage_sessions[1])
@@ -400,9 +403,9 @@ class WorkerIntegratedDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(reports["bsr"]["api_timeline"], [])
                 bsr_navigation = browser.fetch.call_args_list[-1].args[0]
                 self.assertEqual(parse_qs(urlparse(bsr_navigation).query)["ordenacao"], ["maisvendidos"])
-                self.assertEqual(browser.fetch.call_count, 4)  # Bootstrap, two failed SSRs, BSR recovery.
+                self.assertEqual(browser.fetch.call_count, 3)  # Two failed SSRs, BSR recovery.
             else:
-                self.assertEqual(browser.fetch.call_count, 1)
+                browser.fetch.assert_not_called()
                 self.assertEqual(len(get_calls), 2)
                 self.assertFalse(get_calls[0].args[2].get("sortby"))
                 self.assertEqual(get_calls[1].args[2]["sortby"], "maisvendidos")
