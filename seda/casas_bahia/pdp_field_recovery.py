@@ -24,6 +24,9 @@ _CONFIG_ERRORS = {
 }
 
 
+from seda.casas_bahia.diagnostics import Span, trace, timed_request, timed_sleep
+
+@trace('pdp_field_recovery')
 def fetch_pdp_fields_via_zenrows(
     product_url,
     requested_fields,
@@ -89,7 +92,7 @@ def fetch_pdp_fields_via_zenrows(
     identity_verified = False
 
     for profile in profiles[:max_requests]:
-        result = request_url(
+        result = timed_request('zenrows_request', request_url,
             product_url,
             profile=profile,
             timeout=timeout,

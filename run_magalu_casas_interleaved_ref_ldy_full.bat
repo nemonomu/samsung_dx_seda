@@ -7,7 +7,11 @@ for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss
 if not defined SEDA_MAGALU_BROWSER_PROFILE set "SEDA_MAGALU_BROWSER_PROFILE=C:/tmp/seda_magalu_profiles/run_magalu_casas_interleaved_ref_ldy_%SEDA_RUN_TIMESTAMP%"
 
 rem Shared defaults for stable RDP full runs.
-if not defined SEDA_POSTAL_CODE set SEDA_POSTAL_CODE=01001-001
+rem Fixed SEDA collection destination; override inherited postal settings.
+set "SEDA_POSTAL_CODE=01010-010"
+set "SEDA_MAGALU_ZIP_CODE=%SEDA_POSTAL_CODE%"
+set "SEDA_MAGALU_SHIPPING_ZIP_CODE=%SEDA_POSTAL_CODE%"
+set "SEDA_CASAS_BAHIA_ZIPCODE=%SEDA_POSTAL_CODE:-=%"
 if not defined SEDA_TIMEOUT set SEDA_TIMEOUT=25
 if not defined SEDA_RETAILER_SWITCH_SLEEP_SECONDS set SEDA_RETAILER_SWITCH_SLEEP_SECONDS=0
 set "SEDA_COMBINED_RETAILER_RUN=1"

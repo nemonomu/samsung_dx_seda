@@ -36,6 +36,14 @@ def run_module(module_name, env=None, dry_run=False, *, args=None):
     _log_line(f"[run] {' '.join(command)}", log_file)
     if dry_run:
         return 0
+    if module_name.startswith('seda.casas_bahia.'):
+        from seda.casas_bahia.diagnostics import stage_span
+        with stage_span(module_name, merged_env) as span:
+            code = (subprocess.call(command, env=merged_env, cwd=PROJECT_ROOT) if not log_file
+                    else _call_with_live_log(command, merged_env, log_file))
+            span.update(exit_code=code, success=code == 0,
+                        reason='completed' if code == 0 else 'stage_failed')
+            return code
     if not log_file:
         return subprocess.call(command, env=merged_env, cwd=PROJECT_ROOT)
     return _call_with_live_log(command, merged_env, log_file)

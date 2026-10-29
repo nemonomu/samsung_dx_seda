@@ -988,9 +988,9 @@ def _is_similar_showcase_title(title):
     return "quem viu" in raw and "tamb" in raw and "viu" in raw
 
 def _zipcode_for_graphql(env_name):
-    raw = os.getenv(env_name) or os.getenv("SEDA_POSTAL_CODE") or "01001-001"
+    raw = os.getenv(env_name) or os.getenv("SEDA_POSTAL_CODE") or "01010-010"
     digits = re.sub(r"\D+", "", str(raw))
-    return digits or "01001001"
+    return digits or "01010010"
 
 def _ascii_lower(value):
     import unicodedata
