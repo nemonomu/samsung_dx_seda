@@ -4,6 +4,7 @@ Only this session's fresh profile, driver copy and private provisioning cache
 are owned. Existing Chrome profiles and login state are never used.
 """
 
+import json
 import os
 from pathlib import Path
 import re
@@ -125,6 +126,37 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
         # The successful probe used these values, irrespective of global
         # transport timeout, headless or hybrid evidence-wait settings.
         return super().fetch(url, timeout=45, wait_seconds=30)
+
+    def _prepare_document(self, raw):
+        """Adapt the root-state SSR layout for mode 3, before strict validation.
+
+        Mode 2 uses the base identity hook. Mode 4 has its own fetch loop.
+        Never synthesize page/sort, price, or seller evidence here.
+        """
+        from seda.parsers import extract_next_data
+
+        payload = extract_next_data(raw)
+        if not isinstance(payload, dict):
+            return raw
+        props = payload.get("props")
+        if not isinstance(props, dict):
+            return raw
+        page_props = props.get("pageProps", {})
+        if not isinstance(page_props, dict) or "initialState" in page_props:
+            return raw
+        state = props.get("initialState")
+        if not isinstance(state, dict) or not isinstance(state.get("search"), dict):
+            return raw
+
+        # Keep the real HTML and original root state; expose only an equivalent
+        # path to the existing parser and all existing SSR admission checks.
+        props["pageProps"] = dict(page_props, initialState=state)
+        encoded = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace("&", "\\u0026")
+        prepared, count = browser_listing._NEXT_SCRIPT.subn(
+            lambda match: match[1] + encoded + match[3], raw)
+        if count != 1:
+            raise browser_listing.EvidenceError("next_data_script_count_invalid")
+        return prepared
 
     def _remove_owned_root(self):
         root, parent = self._owned_root, self._owned_parent

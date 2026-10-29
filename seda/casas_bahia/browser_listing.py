@@ -471,6 +471,10 @@ class _BrowserSession:
             except Exception:
                 pass
 
+    def _prepare_document(self, raw):
+        """Mode-specific input adaptation; admission checks remain below."""
+        return raw
+
     def fetch(self, url, timeout=None, *, wait_seconds=None):
         requested = _request_identity(url)
         diagnostic_started = time.perf_counter()
@@ -536,10 +540,11 @@ class _BrowserSession:
                         for request_id in [document_id] + price_ids:
                             if request_id not in body_cache:
                                 body_cache[request_id] = _response_body(self.driver, request_id)
+                        document_raw = self._prepare_document(body_cache[document_id])
                         price_payloads = [json.loads(body_cache[request_id]) for request_id in price_ids]
                         trace["price_response_count"] = len(price_ids)
-                        trace["price_coverage"] = _price_coverage(body_cache[document_id], price_payloads)
-                        html, ids, row_count = _enrich_document(body_cache[document_id], url, price_payloads)
+                        trace["price_coverage"] = _price_coverage(document_raw, price_payloads)
+                        html, ids, row_count = _enrich_document(document_raw, url, price_payloads)
                         group = (requested[0], requested[2])
                         previous = self.page_ids.setdefault(group, {})
                         if any(old_page != requested[1] and old_ids == set(ids) for old_page, old_ids in previous.items()):

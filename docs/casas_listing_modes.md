@@ -44,6 +44,9 @@ Mode 1의 복원 범위는 별도 [복원 계약](casas_listing_mode1_legacy.md)
 
 ## 모드 3의 정확한 범위 (기존 동작 유지)
 
+- 2026-10-29 관측된 SSR의 `props.initialState.search`도 모드 3에서 읽는다. 기존 `props.pageProps.initialState.search`가 없는 경우에만 같은 상태를 파서 경로에 연결하며, 원래 HTML·상품 순서·응답의 page/sort를 보존한다. 초기 검증과 403 SSR 복구에 같은 처리를 사용한다. 페이지·정렬·상품/SKU·판매자·가격 검증을 생략하지 않으며, Mode 1/1-1/2/4의 입력 처리와 기본 선택 **1**은 변경하지 않는다.
+- 이 구조 보정은 홈페이지 선접속을 자동 추가하거나 브라우저 접속 성공을 보장하는 변경이 아니다. RDP에서 홈페이지 선접속 후 검색·가격·파서 20행 검증은 성공했지만, 구조 보정 후 실제 모드 3 전체 수집은 별도 확인해야 한다.
+
 - 실행 조건은 성공한 로컬 TV 1→2→3→2 실험에 맞춘다. 시작 로그의 `execution_profile=successful_local_probe`로 확인한다. 세 번째 모드의 조건 정렬이지 새로운 네 번째 모드는 아니다.
 - 매 listing 프로세스에 전용 새 Chrome 프로필을 사용한다. 기존 Chrome 계정 로그인·쿠키·사용자 프로필에 의존하지 않는다. 성공한 로컬 실험도 새 프로필이었다.
 - Chrome은 창이 있는 방식이며 `--disable-gpu`, `--no-sandbox`, `--no-first-run`, `--no-default-browser-check`와 실험의 실행 인자를 사용한다. 모드 3에는 기존 headless 설정을 적용하지 않는다.
