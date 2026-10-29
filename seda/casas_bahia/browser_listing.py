@@ -475,6 +475,9 @@ class _BrowserSession:
         """Mode-specific input adaptation; admission checks remain below."""
         return raw
 
+    def _enrich(self, raw, url, price_payloads):
+        return _enrich_document(raw, url, price_payloads)
+
     def fetch(self, url, timeout=None, *, wait_seconds=None):
         requested = _request_identity(url)
         diagnostic_started = time.perf_counter()
@@ -544,7 +547,7 @@ class _BrowserSession:
                         price_payloads = [json.loads(body_cache[request_id]) for request_id in price_ids]
                         trace["price_response_count"] = len(price_ids)
                         trace["price_coverage"] = _price_coverage(document_raw, price_payloads)
-                        html, ids, row_count = _enrich_document(document_raw, url, price_payloads)
+                        html, ids, row_count = self._enrich(document_raw, url, price_payloads)
                         group = (requested[0], requested[2])
                         previous = self.page_ids.setdefault(group, {})
                         if any(old_page != requested[1] and old_ids == set(ids) for old_page, old_ids in previous.items()):

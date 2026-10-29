@@ -107,9 +107,9 @@ class ModeSelectionTests(unittest.TestCase):
         self.assertEqual(result.method, "uc_api_url_first")
         self.assertEqual(result.error, "RuntimeError")
 
-    def test_batch_explicit_default_one_and_all_mode_overrides(self):
+    def test_batch_default_three_and_all_mode_overrides(self):
         source = (Path(__file__).resolve().parents[1] / "run_casas_bahia_tv_ref_ldy_full.bat").read_text(encoding="utf-8-sig")
-        self.assertIn('set "SEDA_CASAS_BAHIA_LISTING_MODE=1"', source)
+        self.assertIn('set "SEDA_CASAS_BAHIA_LISTING_MODE=3"', source)
         for mode in ("1", "1-1", "2", "3", "4"):
             self.assertIn(f'if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="{mode}" goto :listing_mode_valid', source)
 

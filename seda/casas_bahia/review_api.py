@@ -17,6 +17,14 @@ from seda.casas_bahia.diagnostics import Span, trace, timed_request, timed_sleep
 def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
     if not product_id:
         return {"success": False, "error": "missing_product_id", "zenrows_requested": False}
+    session = requests.Session()
+    try:
+        return _fetch_reviews(session, product_id, limit, timeout, referer_url)
+    finally:
+        session.close()
+
+
+def _fetch_reviews(session, product_id, limit=None, timeout=None, referer_url=None):
     limit = int(limit or os.getenv("SEDA_CASAS_BAHIA_REVIEW_LIMIT", "20"))
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
     collected = []
@@ -28,15 +36,23 @@ def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
     zenrows_requested = False
     fetch_methods = []
     result_headers = {}
-    session = requests.Session()
+    from . import browser_recovery
+    mode3 = browser_recovery.enabled()
+    browser_selected = False
+    seen_items = set()
     session.trust_env = os.getenv("SEDA_CASAS_BAHIA_TRUST_ENV_PROXY", "0").lower() in {"1", "true", "yes", "y"}
     while len(collected) < limit:
-        page_result = _fetch_review_page_direct(session, product_id, page, page_size, timeout)
+        if mode3 and page > 10:
+            return {"success": False, "partial_validated": bool(general), "general": general,
+                    "reviews": collected, "error": "review_page_limit", "method": "+".join(fetch_methods),
+                    "review_items_seen": seen, "zenrows_requested": zenrows_requested}
+        page_result = (_fetch_review_page_browser(product_id, page, page_size) if browser_selected else
+                       _fetch_review_page_direct(session, product_id, page, page_size, min(timeout, 25) if mode3 else timeout))
         direct_error = ""
         page_method = page_result.get("method", "casas_bahia_reviews_api")
         if page_method not in fetch_methods:
             fetch_methods.append(page_method)
-        if not page_result.get("success") and not zenrows_attempted:
+        if not page_result.get("success") and not zenrows_attempted and not browser_selected:
             direct_error = page_result.get("error", "direct_unknown")
             zenrows_attempted = True
             fallback_result = _fetch_review_page_zenrows(
@@ -57,6 +73,14 @@ def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
                     fallback_result.get("error", "zenrows_unknown"),
                 )
             page_result = fallback_result
+        # Preserve paid-attempt accounting even when the browser later succeeds.
+        if page_result.get("headers"):
+            result_headers = page_result["headers"]
+        if mode3 and not page_result.get("success") and not browser_selected:
+            page_result = _fetch_review_page_browser(product_id, page, page_size)
+            browser_selected = page_result.get("success") is True
+        if page_result.get("method") and page_result["method"] not in fetch_methods:
+            fetch_methods.append(page_result["method"])
         page_headers = page_result.get("headers") or {}
         if page_headers:
             result_headers = page_headers
@@ -69,6 +93,8 @@ def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
                 "method": "+".join(fetch_methods) or "casas_bahia_reviews_api",
                 "headers": result_headers,
                 "zenrows_requested": zenrows_requested,
+                "partial_validated": mode3 and bool(general),
+                "review_items_seen": seen,
             }
         data = page_result.get("data") or {}
         page_method = page_result.get("method", "casas_bahia_reviews_api")
@@ -83,16 +109,30 @@ def fetch_reviews(product_id, limit=None, timeout=None, referer_url=None):
                 "recommendationPercentage": review.get("recommendationPercentage", ""),
                 "summary": str(ai_summary.get("aiSummaryText") or "").strip(),
             }
+        elif mode3 and not general.get("summary"):
+            ai_summary = review.get("aiSummary") or {}
+            general["summary"] = str(ai_summary.get("aiSummaryText") or "").strip()
         items = review.get("userReviews") or []
         seen += len(items)
+        new_items = 0
         for item in items:
             text = _review_text(item)
+            if mode3:
+                identity = str(item.get("id") or "") or (text, str(item.get("date") or ""), str(item.get("name") or ""))
+                if identity in seen_items:
+                    continue
+                seen_items.add(identity)
+                new_items += 1
             if not text:
                 continue
             collected.append(text)
             if len(collected) >= limit:
                 break
-        if len(items) < page_size:
+        if mode3 and items and not new_items:
+            return {"success": False, "partial_validated": bool(general), "general": general,
+                    "reviews": collected, "error": "review_page_repeated", "method": "+".join(fetch_methods),
+                    "review_items_seen": seen, "zenrows_requested": zenrows_requested, "headers": result_headers}
+        if len(items) < page_size or (mode3 and review.get("lastPage") is True):
             break
         page += 1
     return {
@@ -118,18 +158,31 @@ def _review_text(item):
     return ""
 
 
+def _fetch_review_page_browser(product_id, page, page_size):
+    from .browser_recovery import fetch
+    result = fetch(REVIEWS_URL.format(product_id=product_id),
+                   params={"page": page, "size": page_size, "orderBy": "MOST_USEFUL"}, label="reviews")
+    if result.get("success"):
+        error = _review_payload_error(result.get("data"))
+        review = (result.get("data") or {}).get("review") or {}
+        if not error and review.get("page") is not None and str(review["page"]) != str(page):
+            error = "review_page_mismatch"
+        if error:
+            result.update(success=False, error=error)
+    return result
+
+
 @trace('reviews_direct')
 def _fetch_review_page_direct(session, product_id, page, page_size, timeout):
     try:
-        response = request_with_retry(
-            lambda: session.get(
+        from .browser_recovery import enabled
+        request = lambda: session.get(
                 REVIEWS_URL.format(product_id=product_id),
                 params={"page": page, "size": page_size, "orderBy": "MOST_USEFUL"},
                 headers=_headers(),
                 timeout=timeout,
-            ),
-            throttle_host="cb_pdp",
-        )
+            )
+        response = request() if enabled() else request_with_retry(request, throttle_host="cb_pdp")
     except Exception as exc:
         return {
             "success": False,

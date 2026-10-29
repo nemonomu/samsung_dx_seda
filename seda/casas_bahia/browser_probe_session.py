@@ -12,12 +12,27 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 
 from . import browser_listing
 
 
 _TEMP_PREFIX = "seda_casas_mode3_"
 _OPTIONS = ("--disable-gpu", "--no-sandbox", "--no-first-run", "--no-default-browser-check")
+
+
+def _timed_startup(stage, call, *args, **kwargs):
+    started = time.monotonic()
+    print(f"[seda] casas_bahia mode=3 probe_browser stage={stage} start", flush=True)
+    try:
+        result = call(*args, **kwargs)
+    except Exception as exc:
+        print(f"[seda] casas_bahia mode=3 probe_browser stage={stage} error={type(exc).__name__} "
+              f"seconds={time.monotonic() - started:.3f}", flush=True)
+        raise
+    print(f"[seda] casas_bahia mode=3 probe_browser stage={stage} success=true "
+          f"seconds={time.monotonic() - started:.3f}", flush=True)
+    return result
 
 
 def _driver_major(executable):
@@ -83,12 +98,12 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
         executable = os.getenv("SEDA_CASAS_BAHIA_CHROME_PATH") or uc.find_chrome_executable()
         if not executable or not Path(executable).is_file():
             raise browser_listing.EvidenceError("chrome_executable_missing")
-        self.major = browser_listing._chrome_major(executable)
+        self.major = _timed_startup("chrome_version", browser_listing._chrome_major, executable)
         print(f"[seda] casas_bahia mode=3 probe_browser detected_browser_major={self.major}", flush=True)
         self._owned_parent = Path(tempfile.gettempdir()).resolve()
         self._owned_root = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(self._owned_parent))).absolute()
         try:
-            private_driver, driver_source = _prepare_driver(uc, self._owned_root, self.major)
+            private_driver, driver_source = _timed_startup("driver_prepare", _prepare_driver, uc, self._owned_root, self.major)
             options = uc.ChromeOptions()
             for argument in _OPTIONS:
                 options.add_argument(argument)
@@ -99,7 +114,7 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
             # Keep an owned reference even if UC raises partway through startup.
             driver = owned_type.__new__(owned_type)
             self.driver = driver
-            owned_type.__init__(
+            _timed_startup("chrome_start", owned_type.__init__,
                 driver, options=options, browser_executable_path=str(executable),
                 driver_executable_path=str(private_driver),
                 user_data_dir=str(self._owned_root / "chrome_profile"),
@@ -132,6 +147,10 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
         from .browser_api_document import prepare
 
         return prepare(self, url)
+
+    def _enrich(self, raw, url, price_payloads):
+        from .mode3_prices import enrich
+        return enrich(raw, url, price_payloads)
 
     def _prepare_document(self, raw):
         """Adapt the root-state SSR layout for mode 3, before strict validation.

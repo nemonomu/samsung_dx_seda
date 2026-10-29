@@ -11,6 +11,7 @@ DESTAQUE_URL = "https://api-destaque-descoberta.casasbahia.com.br/Destaque/Sku/{
 DISCOUNT_RE = re.compile(r"(\d+(?:[,.]\d+)?)\s*%\s*de\s+desconto\b", re.I)
 PERCENT_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*%")
 COUPON_RE = re.compile(r"\bcupom\b", re.I)
+_MODE3_DIRECT_BLOCKED = False
 
 
 def fetch_discount_type(sku_id, seller_id, timeout=None):
@@ -32,6 +33,10 @@ def fetch_discount_type(sku_id, seller_id, timeout=None):
     seller_id = str(seller_id or "").strip()
     if not sku_id or not seller_id:
         return {"success": False, "discount_type": "", "error": "missing_sku_or_seller"}
+
+    from .browser_recovery import enabled
+    if enabled():
+        return _fetch_mode3(sku_id, seller_id, timeout)
 
     timeout = int(timeout or os.getenv("SEDA_TIMEOUT", "60"))
     retries = int(os.getenv("SEDA_CASAS_BAHIA_DESTAQUE_RETRIES", "2"))
@@ -63,6 +68,41 @@ def fetch_discount_type(sku_id, seller_id, timeout=None):
             "trace": trace,
         }
     return {"success": False, "discount_type": "", "error": "destaque_http_failed", "trace": trace}
+
+
+def _valid_badges(data):
+    return (isinstance(data, dict) and isinstance(data.get("value"), dict)
+            and isinstance(data["value"].get("destaques"), list))
+
+
+def _fetch_mode3(sku_id, seller_id, timeout):
+    global _MODE3_DIRECT_BLOCKED
+    from .browser_recovery import fetch
+    url = DESTAQUE_URL.format(sku_id=sku_id, seller_id=seller_id)
+    data, status, error = None, 0, "direct_skipped_after_403"
+    method = "casas_bahia_destaque_api"
+    if not _MODE3_DIRECT_BLOCKED:
+        try:
+            with requests.Session() as session:
+                response = session.get(url, headers=_headers(), timeout=min(int(timeout or 25), 25))
+                status = response.status_code
+                _MODE3_DIRECT_BLOCKED = status == 403
+                if status == 200:
+                    data = response.json()
+                error = "" if _valid_badges(data) else "destaque_invalid_or_failed_response"
+        except Exception as exc:
+            error = type(exc).__name__
+    if error:
+        result = fetch(url, headers=_headers(), label="discount")
+        if not result.get("success"):
+            return {"success": False, "discount_type": "", "error": result.get("error"),
+                    "status_code": result.get("status_code", 0)}
+        data, method, status = result["data"], result["method"], 200
+    if not _valid_badges(data):
+        return {"success": False, "error": "invalid_badge_payload", "status_code": status}
+    values = discount_types_from_payload(data)
+    return {"success": True, "discount_type": "; ".join(values), "count": len(values),
+            "badge_count": len(data["value"]["destaques"]), "method": method, "status_code": status}
 
 
 def discount_types_from_payload(data):

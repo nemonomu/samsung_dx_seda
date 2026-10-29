@@ -71,10 +71,15 @@ def fetch_product_source(sku_id, timeout=None):
             0,
             _int_env(retry_env, 0 if attempt == "zenrows" else 1),
         )
+        if attempt == "browser":
+            retries = 0
         for retry in range(retries + 1):
             if retry:
                 timed_sleep(float(os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_RETRY_SLEEP_SECONDS", "1.5")) * retry)
-            if attempt == "zenrows":
+            if attempt == "browser":
+                from .browser_recovery import fetch
+                result = fetch(PRODUCT_SOURCE_URL, params={"skuId": str(sku_id)}, label="product_source")
+            elif attempt == "zenrows":
                 result = _fetch_product_source_zenrows(url, timeout=timeout)
             else:
                 result = _fetch_product_source_direct(url, timeout=timeout)
@@ -160,6 +165,9 @@ def _product_source_attempts():
     mode = os.getenv("SEDA_CASAS_BAHIA_PRODUCT_SOURCE_MODE", "direct_first").lower().strip()
     if mode in {"0", "false", "no", "n", "off"}:
         return []
+    from .browser_recovery import enabled
+    if enabled():
+        return ["zenrows", "browser"]
     if mode == "direct":
         return ["direct"]
     if mode == "direct_first":
@@ -793,27 +801,63 @@ def fetch_similar_names(product_id, sku_id=None, current_product=None, timeout=N
         body["skuId"] = str(sku_id)
     session = requests.Session()
     session.trust_env = os.getenv("SEDA_CASAS_BAHIA_TRUST_ENV_PROXY", "0").lower() in {"1", "true", "yes", "y"}
+    from . import browser_recovery
+    if not browser_recovery.enabled():
+        # Preserve the existing request/retry/empty-response decisions in other modes.
+        try:
+            response = request_with_retry(
+                lambda: session.post(RECS_API, json=body, headers=_headers(), timeout=timeout),
+                throttle_host="cb_recs")
+            if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+                return {"success": False, "error": f"status_{response.status_code}"}
+            try:
+                data = response.json()
+            except ValueError:
+                return {"success": False, "error": "invalid_json"}
+        except Exception as exc:
+            return {"success": False, "error": type(exc).__name__}
+        finally:
+            session.close()
+        products = (data.get("data") or {}).get("products") or []
+        names = [title for p in products for title in [str(p.get("title") or "").strip()]
+                 if title and _is_relevant_title(title)]
+        return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
+    error, data, method = "", None, "casas_bahia_recs_api"
     try:
-        response = request_with_retry(
-            lambda: session.post(RECS_API, json=body, headers=_headers(), timeout=timeout),
-            throttle_host="cb_recs",
-        )
+        request = lambda: session.post(RECS_API, json=body, headers=_headers(),
+                                       timeout=min(timeout, 25) if browser_recovery.enabled() else timeout)
+        response = request() if browser_recovery.enabled() else request_with_retry(request, throttle_host="cb_recs")
+        if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
+            error = f"status_{response.status_code}"
+        else:
+            data = response.json()
     except Exception as exc:
-        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
-    if response.status_code != 200 or "json" not in response.headers.get("content-type", ""):
-        return {"success": False, "error": f"status_{response.status_code}"}
-    try:
-        data = response.json()
-    except ValueError:
-        return {"success": False, "error": "invalid_json"}
-    products = (data.get("data") or {}).get("products") or []
+        error = type(exc).__name__
+    finally:
+        session.close()
+    if not error and (not isinstance(data, dict) or not isinstance(data.get("data"), dict)
+                      or not isinstance(data["data"].get("products"), list)):
+        error = "invalid_recommendations_payload"
+    if error and browser_recovery.enabled():
+        result = browser_recovery.fetch(RECS_API, method="POST", body=body, headers=_headers(), label="recs")
+        if result.get("success"):
+            data, error, method = result["data"], "", result["method"]
+        else:
+            error = result.get("error", "recs_browser_failed")
+    if error:
+        return {"success": False, "error": error}
+    if (not isinstance(data, dict) or not isinstance(data.get("data"), dict)
+            or not isinstance(data["data"].get("products"), list)):
+        return {"success": False, "error": "invalid_recommendations_payload"}
+    products = data["data"]["products"]
     names = [
         title
         for product in products
+        if isinstance(product, dict)
         for title in [str(product.get("title") or "").strip()]
         if title and _is_relevant_title(title)
     ]
-    return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names)}
+    return {"success": True, "names": names[:20], "source_count": len(products), "filtered_count": len(names), "method": method}
 
 @trace('pickup_api')
 def fetch_pickup(sku_id, seller_id, zipcode=None, timeout=None):

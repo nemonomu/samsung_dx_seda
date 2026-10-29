@@ -6,7 +6,7 @@
 run_casas_bahia_tv_ref_ldy_full.bat 1-1
 ```
 
-TV → REF → LDY의 기존 전체 배치를 실행한다. 기본값은 **1**이다. Mode 1은 별도 사용자 요청에 따라 `1290145`의 REST 동작으로 복원했으며 Mode 1-1에는 그 복원을 적용하지 않는다. `--resume-tv-detail`은 기존 Mode 4 전용으로 유지한다. 이 전체 배치는 dry-run이 아니며 업로드·DB 적재까지 진행한다.
+TV → REF → LDY의 기존 전체 배치를 실행한다. 운영 BAT의 기본값은 **3**, Python 미설정 기본값은 **1**이다. Mode 1-1은 인자 `1-1`로 선택한다. Mode 1은 `1290145`의 REST 동작을 보존하며 Mode 1-1에는 그 복원을 적용하지 않는다. `--resume-tv-detail`은 기존 Mode 4 전용으로 유지한다. 이 전체 배치는 dry-run이 아니며 업로드·DB 적재까지 진행한다.
 
 ## Listing
 

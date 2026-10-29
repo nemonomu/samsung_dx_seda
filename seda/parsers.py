@@ -939,6 +939,8 @@ def _casas_bahia_listing_parse_status(product, base):
     if product.get("_casas_listing_url_first") is not True:
         return base
     tokens = [base]
+    if product.get("_casas_mode3_price_pending") is True:
+        tokens.append("casas_mode3_price_pending")
     if product.get("_casas_listing_price_pending") is True:
         tokens.append("casas_listing_price_pending")
     if product.get("_casas_listing_seller_pending") is True:

@@ -271,7 +271,7 @@ class _APISession:
     def _ssr_fallback(self, url, timeout, trace, *, recovery_pending=False):
         """Use hybrid's bounded navigation policy on this same owned browser."""
         from seda.parsers import extract_next_data, parse_listing, sku_from_url
-        from .listing_hybrid import _validation_error
+        from .mode3_prices import validation_error as _validation_error
 
         requested = browser_listing._request_identity(url)
         started = time.monotonic()
@@ -353,7 +353,7 @@ class _APISession:
             # normal document here, then validate the actual API rows below.
             result = self.browser.prepare_api(url, timeout=45)
             item["status_code"] = int(_bounded_number(result.get("status_code"), 0, 0, 599))
-            item["document_navigations"] = int(_bounded_number(result.get("document_navigations"), 0, 0, 3))
+            item["document_navigations"] = int(_bounded_number(result.get("document_navigations"), 0, 0, 4))
             item["homepage_ready"] = result.get("homepage_ready") is True
             try:
                 from .listing_diagnostic_evidence import _trace_projection
@@ -400,7 +400,7 @@ class _APISession:
         if self.ssr_recovery_required:
             return self._ssr_fallback(url, timeout, trace, recovery_pending=True)
         # An unprepared browser must not enter an SSR-output recovery loop.
-        # Preparation already has one bounded 403 retry on the same browser.
+        # Preparation has bounded 3s/60s 403 retries on the same browser.
         initial = self._bootstrap(url, 45)
         if initial:
             trace.append(initial)
@@ -457,7 +457,8 @@ class _APISession:
                     raise browser_listing.EvidenceError(price_result["error"])
                 item["stage"] = "validation"
                 raw = search_api._as_next_data_html(parser_data, url)
-                html, ids, row_count = browser_listing._enrich_document(raw, url, [prices])
+                from .mode3_prices import enrich
+                html, ids, row_count = enrich(raw, url, [prices])
                 group = (requested[0], requested[2])
                 previous = self.page_ids.setdefault(group, {})
                 if any(page != requested[1] and old_ids == set(ids) for page, old_ids in previous.items()):

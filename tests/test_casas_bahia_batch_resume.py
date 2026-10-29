@@ -120,7 +120,7 @@ class CasasBatchResumeTests(unittest.TestCase):
 
     def test_postal_default_reaches_all_product_line_processes(self):
         result, calls = self.run_batch()
-        self.assert_success_chain(result, calls, mode="1")
+        self.assert_success_chain(result, calls, mode="3")
         self.assertEqual([call["SEDA_POSTAL_CODE"] for call in calls], ["01010-010"] * 3)
 
     def test_inherited_postal_destinations_are_replaced(self):
@@ -131,7 +131,7 @@ class CasasBatchResumeTests(unittest.TestCase):
                     "SEDA_POSTAL_CODE": "01001-001",
                     "SEDA_CASAS_BAHIA_ZIPCODE": "01311000",
                 })
-                self.assert_success_chain(result, calls, resume=resume, mode="4" if resume else "1")
+                self.assert_success_chain(result, calls, resume=resume, mode="4" if resume else "3")
                 self.assertEqual([call["SEDA_POSTAL_CODE"] for call in calls], ["01010-010"] * 3)
                 self.assertEqual([call["SEDA_CASAS_BAHIA_ZIPCODE"] for call in calls], ["01010010"] * 3)
 
@@ -154,8 +154,8 @@ class CasasBatchResumeTests(unittest.TestCase):
                     self.assertEqual(call["SEDA_DETAIL_TARGET_CSV"], "")
                     self.assertEqual(call["SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK"], "1")
 
-    def test_no_argument_uses_default_mode_one(self):
-        self.assert_success_chain(*self.run_batch(), mode="1")
+    def test_no_argument_uses_default_mode_three(self):
+        self.assert_success_chain(*self.run_batch(), mode="3")
 
     def test_mode_one_one_logs_explicit_url_first_rest_label(self):
         result, calls = self.run_batch(["1-1"])
@@ -163,7 +163,7 @@ class CasasBatchResumeTests(unittest.TestCase):
         self.assertIn("listing mode=1-1 (rest_api_url_first)", result.stdout)
 
     def test_restored_mode_one_preserves_retry_configuration(self):
-        for args in ([], ["1"]):
+        for args in (["1"],):
             for configured in (None, "4"):
                 runtime = {} if configured is None else {"SEDA_CASAS_BAHIA_SEARCH_RETRIES": configured}
                 result, calls = self.run_batch(args, runtime=runtime)

@@ -144,7 +144,7 @@ def _navigate(driver, url, requested):
 
 
 def prepare(browser, url):
-    """Homepage once, then target document; one bounded 403 navigation retry."""
+    """Homepage once; listing retries after 3s then 60s, only for HTTP 403."""
     requested = listing._request_identity(url)
     browser.start()
     trace = []
@@ -156,12 +156,17 @@ def prepare(browser, url):
     if not home["success"]:
         return dict(home, trace=trace, document_navigations=len(trace), homepage_ready=False)
     time.sleep(5)
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         _notice(f"[seda] casas_bahia mode=3 api_document stage=listing attempt={attempt} start")
         result = _navigate(browser.driver, url, requested)
         trace.extend(result["trace"])
         _notice(f"[seda] casas_bahia mode=3 api_document stage=listing status={result['status_code']} "
                 f"success={str(result['success']).lower()} error={result.get('error', 'none')}")
-        if result["success"] or result["status_code"] != 403 or attempt == 2:
+        if result["success"] or result["status_code"] != 403 or attempt == 3:
             return dict(result, trace=trace, document_navigations=len(trace), homepage_ready=True)
-        time.sleep(3)
+        if attempt == 1:
+            time.sleep(3)
+        else:
+            for remaining in (60, 30):
+                _notice(f"[seda] casas_bahia mode=3 api_document stage=listing recovery_wait_seconds={remaining}")
+                time.sleep(30)

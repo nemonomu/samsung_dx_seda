@@ -446,11 +446,15 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(6, fetch.call_count)
 
-    def test_wrong_price_identity_is_failure(self):
+    def test_wrong_price_identity_keeps_url_with_null_price(self):
         values = [self.good()[0], response({"Ofertas": [offer(sku=999)]})]
         with patch.object(api, "_browser_fetch", side_effect=values * 3):
             result = self.session.fetch(URL)
-        self.assertEqual("price_or_seller_identity_incomplete", result["error"])
+        self.assertTrue(result["success"])
+        from seda.parsers import parse_listing
+        row = parse_listing(result["text"], "Casas Bahia", "https://www.casasbahia.com.br", URL)[0]
+        self.assertEqual("", row["final_sku_price"])
+        self.assertIn("casas_mode3_price_pending", row["parse_status"])
 
     def test_response_page_mismatch_skips_price(self):
         with patch.object(api, "_browser_fetch", return_value=self.good(queries={"page": 2})[0]) as fetch:

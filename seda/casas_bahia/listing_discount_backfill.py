@@ -32,14 +32,20 @@ def default_output():
 
 
 def run(args):
+    from .browser_recovery import enabled
+    mode3 = enabled()
     rows = read_csv(args.input)
     stats = Counter(rows=len(rows))
     errors = []
     cache = {}
     limit = int(args.limit or 0)
     processed = 0
+    failure_streak = 0
 
     for index, row in enumerate(rows, start=1):
+        if mode3 and index > 1 and (index - 1) % 25 == 0:
+            checkpoint = Path(args.output).with_suffix(".partial.csv")
+            write_csv(checkpoint, rows, columns=list(rows[0].keys()) if rows else OUTPUT_COLUMNS)
         if limit and processed >= limit:
             stats.update(skipped_limit=1)
             continue
@@ -52,20 +58,32 @@ def run(args):
             stats.update(skipped_missing_keys=1)
             continue
         processed += 1
+        if mode3:
+            print(f"[seda] casas discount {index}/{len(rows)} sku={sku_id} seller={seller_id} start", flush=True)
         cache_key = (sku_id, seller_id)
         if cache_key not in cache:
             cache[cache_key] = fetch_discount_type(sku_id, seller_id, timeout=args.timeout)
         result = cache[cache_key]
+        if mode3:
+            print(f"[seda] casas discount {index}/{len(rows)} success={result.get('success')} "
+                  f"status={result.get('status_code', 0)} error={result.get('error') or 'none'}", flush=True)
         if not result.get("success"):
             stats.update(failed=1)
             errors.append({"row": index, "sku_id": sku_id, "seller_id": seller_id, "error": result.get("error", "")})
+            failure_streak += 1
+            if mode3 and failure_streak >= 3:
+                stats.update(stopped_failure_streak=1, not_attempted_after_stop=len(rows) - index)
+                break
             continue
+        failure_streak = 0
         value = str(result.get("discount_type") or "").strip()
         if not value:
             stats.update(no_discount=1)
+            if mode3:
+                row["parse_status"] = _append_token(row.get("parse_status", ""), "discount_checked_no_value")
             continue
         row["discount_type"] = value
-        row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_destaque_api")
+        row["fetch_method"] = _append_token(row.get("fetch_method", ""), result.get("method", "casas_bahia_destaque_api"))
         row["parse_status"] = _append_token(row.get("parse_status", ""), "discount_type_destaque_api")
         stats.update(updated=1)
 
@@ -102,7 +120,8 @@ def _seller_id(row):
         value = str(row.get(key) or "").strip()
         if value.isdigit():
             return value
-    return "10037"
+    from .browser_recovery import enabled
+    return "" if enabled() else "10037"
 
 
 def _sku_from_url(url):
@@ -136,7 +155,11 @@ def main():
     args = parser.parse_args()
     root = run_root()
     with detail_consumer_guard(root):
-        result = run(args)
+        try:
+            result = run(args)
+        finally:
+            from .browser_recovery import close_browser
+            close_browser()
     print(json.dumps({"stats": result.get("stats", {}), "output": result.get("output", args.output)}, ensure_ascii=False))
 
 

@@ -941,12 +941,13 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
         "" if _is_casas_bahia_ldy_row(row) else row.get("sku", "")
     )
     mode11 = os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "1-1"
+    mode3 = os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "3"
     if mode11:
         from .casas_bahia.detail_price_recovery import _positive_id
 
         seller_id = _positive_id(row.get("seller_id"))
     else:
-        seller_id = row.get("seller_id", "") or os.getenv("SEDA_CASAS_BAHIA_DEFAULT_SELLER_ID", "10037")
+        seller_id = row.get("seller_id", "") or ("" if mode3 else os.getenv("SEDA_CASAS_BAHIA_DEFAULT_SELLER_ID", "10037"))
 
     try:
         from .casas_bahia.detail_api import fetch_freight, fetch_pickup, fetch_product_source, fetch_similar_names
@@ -1013,7 +1014,7 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
         if (
             os.getenv("SEDA_CASAS_BAHIA_FREIGHT_API", "1").lower()
             not in {"0", "false", "no", "n"}
-            and (not mode11 or bool(seller_id))
+            and (not (mode11 or mode3) or bool(seller_id))
             and not _skip_casas_sku_api(row, sku_id, "freight_api")
         ):
             freight = fetch_freight(sku_id, seller_id, referer_url=row.get("product_url", ""))
@@ -1029,7 +1030,7 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
         if (
             os.getenv("SEDA_CASAS_BAHIA_PICKUP_API", "1").lower()
             not in {"0", "false", "no", "n"}
-            and (not mode11 or bool(seller_id))
+            and (not (mode11 or mode3) or bool(seller_id))
             and not _skip_casas_sku_api(row, sku_id, "pickup_api")
         ):
             pickup = fetch_pickup(sku_id, seller_id)
@@ -1043,7 +1044,7 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
             similar = fetch_similar_names(product_id, sku_id=sku_id, current_product=row)
             if similar.get("success") and similar.get("names"):
                 row["retailer_sku_name_similar"] = compact_json(similar.get("names"))
-                row["fetch_method"] = _append_token(row.get("fetch_method", ""), "casas_bahia_recs_api")
+                row["fetch_method"] = _append_token(row.get("fetch_method", ""), similar.get("method", "casas_bahia_recs_api"))
             elif similar.get("success"):
                 row["parse_status"] = _append_token(
                     row.get("parse_status", ""),
@@ -1056,12 +1057,15 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
 
     if os.getenv("SEDA_CASAS_BAHIA_REVIEW_API", "1").lower() in {"0", "false", "no", "n"}:
         return
-    if _review_count(row.get("detailed_review_content")) >= int(os.getenv("SEDA_CASAS_BAHIA_REVIEW_LIMIT", "20")):
+    from .casas_bahia.browser_recovery import enabled as mode3_recovery
+    enough_reviews = _review_count(row.get("detailed_review_content")) >= int(os.getenv("SEDA_CASAS_BAHIA_REVIEW_LIMIT", "20"))
+    if enough_reviews and (not mode3_recovery() or row.get("summarized_review_content")):
         return
     try:
         from .casas_bahia.review_api import fetch_reviews
 
-        result = fetch_reviews(product_id, referer_url=row.get("product_url", ""))
+        kwargs = {"limit": 1} if mode3_recovery() and enough_reviews else {}
+        result = fetch_reviews(product_id, referer_url=row.get("product_url", ""), **kwargs)
     except Exception as exc:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_api_error:{type(exc).__name__}")
         return
@@ -1078,13 +1082,13 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
             row.get("parse_status", ""),
             f"reviews_cost:{cost}",
         )
-    if result.get("success"):
+    if result.get("success") or (mode3_recovery() and result.get("partial_validated")):
         general = result.get("general") or {}
         reviews = result.get("reviews") or []
         summary = result.get("summary") or general.get("summary", "")
         if summary and not row.get("summarized_review_content"):
             row["summarized_review_content"] = summary
-        if reviews:
+        if reviews and (not mode3_recovery() or len(reviews) >= _review_count(row.get("detailed_review_content"))):
             row["detailed_review_content"] = compact_json(reviews)
             row["fetch_method"] = _append_token(row.get("fetch_method", ""), review_method)
             seen = int(result.get("review_items_seen") or len(reviews))
@@ -1097,6 +1101,8 @@ def _merge_casas_bahia_apis(row, *, trace_rows=None, row_index=0, price_cache=No
         _merge_zero_preserving(row, "count_of_reviews", general.get("ratingQty", ""))
         if general.get("recommendationPercentage") not in ("", None):
             row["recommendation_intent"] = f"{general.get('recommendationPercentage')}% dos clientes recomendam esse produto"
+        if result.get("partial_validated"):
+            row["parse_status"] = _append_token(row.get("parse_status", ""), "reviews_partial:" + result.get("error", "unknown"))
     else:
         row["parse_status"] = _append_token(row.get("parse_status", ""), f"reviews_api_failed:{result.get('error','unknown')}")
 

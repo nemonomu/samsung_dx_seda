@@ -311,6 +311,10 @@ def _format_row(row, now):
         item_for_output = sku
     original_sku_price = _price_for_output(row.get("original_sku_price", ""))
     final_sku_price = _price_for_output(row.get("final_sku_price", ""))
+    from .casas_bahia.mode3_prices import pending as mode3_price_pending
+    price_held = _is_casas_bahia_row(row) and mode3_price_pending(row)
+    if price_held:
+        original_sku_price = final_sku_price = ""
     if original_sku_price and final_sku_price and _prices_equal(original_sku_price, final_sku_price):
         original_sku_price = ""
     formatted = {
@@ -323,7 +327,7 @@ def _format_row(row, now):
         "product_url": row.get("product_url", ""),
         "original_sku_price": original_sku_price,
         "final_sku_price": final_sku_price,
-        "savings": _savings_for_output(row),
+        "savings": "" if price_held else _savings_for_output(row),
         "sku_status": row.get("sku_status", ""),
         "discount_type": _discount_type_for_output(row.get("discount_type", "")),
         "delivery_availability": _delivery_for_output(row),
