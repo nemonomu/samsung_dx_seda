@@ -862,6 +862,15 @@ def _backfill_casas_listing_prices(
     """After normal detail work, fill only still-missing Casas price quotes."""
     if os.getenv("SEDA_CASAS_BAHIA_API_ENRICH", "1").lower() in {"0", "false", "no", "n"}:
         return rows
+    if os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "3":
+        from .casas_bahia.mode3_price_recovery import backfill_mode3_prices
+
+        return backfill_mode3_prices(
+            rows, checkpoint_every=checkpoint_every, trace_rows=trace_rows,
+            row_index_offset=row_index_offset, checkpoint_writer=checkpoint_writer,
+            fetcher=fetcher, cache=price_cache,
+            append_token=_append_token, record_subcall=_record_subcall,
+        )
     if os.getenv("SEDA_CASAS_BAHIA_LISTING_MODE", "").strip() == "1-1":
         from .casas_bahia.rest_detail_price_recovery import backfill_rest_price_fields
 

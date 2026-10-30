@@ -1,5 +1,15 @@
 # Casas Bahia listing modes
 
+## 2026-10-30 모드 3 가격의 수집 출처 유지
+
+- 최종 대상에 Main에서 채택된 행은 Main 판매자·가격을 유지한다. Main에 없어서 BSR에서 추가한 행은 BSR 판매자·가격을 유지한다. 두 목록에 모두 있는 URL은 기존처럼 Main 행을 우선하며 BSR의 다른 판매자 가격을 가져오지 않는다.
+- 모드 3의 가격 보류/판매가 공란 행만 상세 처리 마지막에 원래 행의 상품 ID·URL SKU·판매자로 가격 API를 다시 조회한다. 별도 Chrome 세션은 이 보완 단계 안에서 재사용하고 종료한다. 성공한 진단과 같은 홈페이지→목록 준비, 배송지 설정, region `126000` 및 브라우저 가격 POST를 사용한다. 직접 REST/ZenRows 가격 전환은 없다.
+- 상품·SKU·판매자가 모두 일치하고 가격 검증을 통과해야 가격을 채운다. 검증 성공 시에만 `casas_mode3_price_pending`과 `casas_listing_price_pending`을 해제하고 `casas_mode3_price_recovered`를 기록해 최종 CSV/DB에서도 값이 보존되도록 한다. 기존 정상 가격은 재조회하거나 덮어쓰지 않는다.
+- 원래 판매자 또는 Main/BSR 출처가 확인되지 않으면 다른 판매자를 추정하지 않는다. 다른 판매자만 응답하거나 가격이 검증되지 않으면 보류 상태와 실패 사유를 남긴다. 동일 상품·SKU·판매자는 한 보완 단계에서 한 번 조회하며 실패 응답도 캐시한다. 연속 통신 실패 3회 뒤에는 해당 단계의 추가 가격 요청을 중단한다.
+- `detail/trace/subcall_trace.csv`의 `casas_mode3_price_recovery`에 출처(`origin`), 원래 판매자(`listing_seller`), 상품/SKU/판매자별 응답 일치 개수, 채운 필드, 검증 결과를 기록한다. 가격·쿠키·헤더를 포함한 원시 응답 전체는 기록하지 않는다.
+- 기존 대상 병합, 순위, CSV 컬럼 및 DB 로더는 변경하지 않는다. 모드 1/1-1/2/4의 가격 처리와 선택 기본값은 유지한다.
+- 가격 보완 중 한 상품의 조회·검증·행 갱신 오류는 해당 행의 기존 가격/보류 상태를 유지하고 다음 행으로 진행한다. 로그/trace 기록 및 보완용 Chrome 종료 실패도 가격 보완 단계 밖으로 전파하지 않는다. 기존 체크포인트 저장 실패나 사용자의 중단 신호까지 숨기지는 않는다.
+
 2026-10-30: 개별 `run_casas_bahia_tv_full.bat`, `run_casas_bahia_ref_full.bat`, `run_casas_bahia_ldy_full.bat`도 더블클릭하면 모드 **3 (uc_api)**으로 실행한다. 세 BAT는 상속된 모드 설정을 3으로 덮어쓰고 시작 로그에 선택 모드를 표시한다. Python 직접 실행의 미설정 기본값은 **1**로 유지한다.
 
 2026-10-29 운영 BAT 기본값: **3 (Chrome + API)**. Python 직접 실행의 미설정 기본값은 **1**이다. Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작**을 보존하며 명시적으로 인자 `1`로 실행한다. Mode 1-1/2/4, CSV·DB 형식과 공통 번역은 유지한다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.

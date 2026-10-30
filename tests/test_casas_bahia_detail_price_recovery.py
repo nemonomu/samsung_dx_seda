@@ -327,7 +327,7 @@ class BackfillTests(unittest.TestCase):
         fetch.assert_not_called()
 
     def test_legacy_modes_do_not_add_price_calls_or_change_rows(self):
-        for mode in ("1", "2", "3"):
+        for mode in ("1", "2"):
             source, fetch = [row(), row(seller_id="")], Mock()
             before = deepcopy(source)
             with self.subTest(mode=mode), patch.dict(os.environ, {"SEDA_CASAS_BAHIA_LISTING_MODE": mode}):
