@@ -124,3 +124,19 @@ Mode 1의 복원 범위는 별도 [복원 계약](casas_listing_mode1_legacy.md)
 이 배치는 dry-run이 아니며 이후 업로드·DB 적재까지 진행한다. 진단 시에는 별도 출력 폴더의 listing 단계만 실행하고 전체 배치를 호출하지 않는다.
 
 구현: `listing_modes.py`, `browser_api.py`, `browser_probe_session.py`, `listing_worker.py`, 기존 `listing_hybrid.py`/`browser_listing.py`, 공통 `orchestrator.py`/`retailer_runner.py`/`step01_main_list.py`와 `transport.py`.
+
+
+### Mode 3: missing listing seller recovery (2026-10-30)
+
+Known Main/BSR sellers remain authoritative. If the listing seller is blank,
+the detail price pass queries the product offers to discover candidate sellers,
+then requests the original URL SKU and each candidate seller explicitly (SKU-only
+price request). Only an exact product/SKU/seller quote passing the existing price
+validator can fill seller_id and price together. Candidate-SKU prices are never
+copied. Candidates are tried in response order until the first verified quote.
+Discovery is cached per product; exact quotes, including failures, per identity.
+The trace records seller_source=product_offer_candidate, and parse_status records
+casas_mode3_seller_discovered, without claiming the seller came from the listing.
+Failed verification preserves the row and continues. This uses the existing
+Mode-3 browser API session; no per-product page navigation is added. Freight,
+Mode 1/1-1/2/4, output columns and DB load contracts remain unchanged.

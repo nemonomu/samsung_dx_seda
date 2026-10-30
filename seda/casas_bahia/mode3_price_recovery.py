@@ -1,7 +1,7 @@
-"""Recover a Mode-3 row's quote from its original listing seller only."""
+"""Recover Mode-3 quotes using original sellers or verified seller candidates."""
 import time
 
-from .detail_price_recovery import PRICE_FIELDS, _positive_id, is_blank
+from .detail_price_recovery import PRICE_FIELDS, _positive_id, _identity, _safe_response, is_blank
 from .mode3_prices import PENDING, pending
 from .rest_detail_price_recovery import recover_rest_price_fields
 
@@ -52,8 +52,8 @@ class BrowserPriceFetcher:
                     _notice("[seda] casas mode=3 price_recovery bootstrap_failed=true")
                     return unavailable
             product_items, sku_items = price_api._price_items(products)
-            # Callers must preserve a known listing seller; no product-only query.
-            if not product_items or not sku_items:
+            # Product-only discovers candidates; exact SKU requests verify their quotes.
+            if not product_items and not sku_items:
                 return unavailable
             params = dict(price_api._params())
             params["IdRegiao"] = "126000"
@@ -63,7 +63,7 @@ class BrowserPriceFetcher:
             time.sleep(5)
             result, data = api._browser_fetch(
                 self.session.browser.driver, price_api.PRICE_URL, params, "POST", headers,
-                {"produtos": product_items, "skus": sku_items}, 25, self.session.document_frame)
+                {"produtos": [] if sku_items else product_items, "skus": sku_items}, 25, self.session.document_frame)
             status = result.get("status_code", 0)
             good = (status == 200 and not result.get("error") and isinstance(data, dict)
                     and isinstance(data.get("Ofertas"), list))
@@ -83,6 +83,42 @@ def _origin(row):
     return "unknown"
 
 
+def _recover_without_seller(work, cache, fetcher):
+    identity, error = _identity(work)
+    if error:
+        return _failed_result(error)
+    product, _, _ = identity
+    key = ("mode3_seller_candidates", product)
+    discovery_cached = key in cache
+    if not discovery_cached:
+        try:
+            cache[key] = _safe_response(fetcher([{"id": product}], include_offers=True))
+        except Exception:
+            cache[key] = _safe_response(None)
+    response = cache[key]
+    if not response["success"] or response["status_code"] != 200:
+        result = _failed_result("seller_discovery_unavailable")
+        result.update(attempted=not discovery_cached, cache_hit=discovery_cached,
+                      status_code=response["status_code"])
+        return result
+    sellers = list(dict.fromkeys(
+        _positive_id(o.get("sellerId")) for o in response["offers"]
+        if isinstance(o, dict) and _positive_id(o.get("productId")) == product
+        and _positive_id(o.get("sellerId"))))
+    result = _failed_result("missing_candidate_seller")
+    result.update(attempted=not discovery_cached, cache_hit=discovery_cached,
+                  status_code=response["status_code"])
+    for seller in sellers:
+        candidate = dict(work, seller_id=seller)
+        result = recover_rest_price_fields(candidate, cache=cache, fetcher=fetcher)
+        result["evidence"]["seller_source"] = "product_offer_candidate"
+        result["evidence"]["candidate_seller"] = seller
+        if result["verified"]:
+            result["detail"]["seller_id"] = seller
+            return result
+    return result
+
+
 def _recover_row(row, cache, fetcher, append_token):
     """Prepare all updates off-row so errors cannot leave a half-released quote."""
     origin, seller = _origin(row), _positive_id(row.get("seller_id"))
@@ -91,13 +127,18 @@ def _recover_row(row, cache, fetcher, append_token):
     if held:
         for field in ("original_sku_price", "final_sku_price", "savings"):
             work[field] = ""
-    if origin == "unknown" or not seller:
-        result = _failed_result("missing_listing_origin" if origin == "unknown" else "missing_listing_seller")
+    if origin == "unknown":
+        result = _failed_result("missing_listing_origin")
+    elif not seller:
+        result = _recover_without_seller(work, cache, fetcher)
     else:
         result = recover_rest_price_fields(work, cache=cache, fetcher=fetcher)
     filled = []
     success = result["verified"] and not is_blank(result["detail"].get("final_sku_price"))
     if success:
+        if not seller:
+            updated["seller_id"] = result["detail"]["seller_id"]
+            filled.append("seller_id")
         for field in PRICE_FIELDS:
             if held and field in ("original_sku_price", "final_sku_price", "savings"):
                 updated[field] = result["detail"].get(field, "")
@@ -106,8 +147,11 @@ def _recover_row(row, cache, fetcher, append_token):
                 updated[field] = result["detail"][field]
                 filled.append(field)
         updated["parse_status"] = "+".join(token for token in str(row.get("parse_status") or "").split("+")
-                                          if token not in {PENDING, "casas_listing_price_pending"})
+                                          if token not in {PENDING, "casas_listing_price_pending", "casas_listing_seller_pending"}
+                                          and not token.startswith("casas_mode3_price_failed:"))
         updated["parse_status"] = append_token(updated["parse_status"], "casas_mode3_price_recovered")
+        if not seller:
+            updated["parse_status"] = append_token(updated["parse_status"], "casas_mode3_seller_discovered")
         method = "casas_bahia_mode3_price_cache" if result["cache_hit"] else "casas_bahia_mode3_price_api"
         updated["fetch_method"] = append_token(row.get("fetch_method", ""), method)
     else:
@@ -123,7 +167,7 @@ def _recover_row(row, cache, fetcher, append_token):
 def backfill_mode3_prices(rows, *, checkpoint_every=25, trace_rows=None,
                           row_index_offset=0, checkpoint_writer=None,
                           fetcher=None, cache=None, append_token, record_subcall):
-    """Main rows retain Main seller/price; BSR-only rows retain BSR seller/price."""
+    """Preserve known listing sellers; discover and verify only missing sellers."""
     candidates = [(index, row) for index, row in enumerate(rows, row_index_offset + 1)
                   if row.get("retailer") == "Casas Bahia"
                   and (pending(row) or is_blank(row.get("final_sku_price")))]
@@ -134,7 +178,7 @@ def backfill_mode3_prices(rows, *, checkpoint_every=25, trace_rows=None,
     cache = {} if cache is None else cache
     recovered = 0
     _notice(f"[seda] casas mode=3 price_recovery candidates={len(candidates)} "
-            "source=browser_api seller_policy=original_listing max_calls_per_identity=1")
+            "source=browser_api seller_policy=original_listing_or_verified_candidate max_calls_per_identity=1")
     try:
         for position, (index, row) in enumerate(candidates, 1):
             try:

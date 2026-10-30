@@ -116,7 +116,7 @@ def test_duplicate_identity_cached_but_sellers_never_share_quotes():
     assert [t["attempt"] for t in trace] == [1, 0, 1]
 
 
-@pytest.mark.parametrize("changes", [{"seller_id": ""}, {"seller_id": "bad"}, {"main_rank": "", "bsr_rank": ""}])
+@pytest.mark.parametrize("changes", [{"seller_id": "bad"}, {"main_rank": "", "bsr_rank": ""}])
 def test_missing_listing_context_is_not_guessed(changes):
     source, fetch = row(**changes), Mock()
     detail._backfill_casas_listing_prices([source], fetcher=fetch)
@@ -255,3 +255,73 @@ def test_browser_close_and_its_error_log_are_both_nonfatal():
         fetcher.close()
     session.close.assert_called_once()
     assert fetcher.session is None
+
+
+def test_missing_seller_discovers_then_verifies_original_sku_and_persists(tmp_path):
+    source = row("", parse_status="casas_mode3_price_pending+casas_listing_seller_pending")
+    fetch = Mock(side_effect=[reply(offer("24506", skuId="999", currentPrice=9999)),
+                              reply(offer("24506", 2399))])
+    trace = []
+    detail._backfill_casas_listing_prices([source], fetcher=fetch, trace_rows=trace)
+    assert fetch.call_args_list[0].args[0] == [{"id": "87459673"}]
+    assert fetch.call_args_list[1].args[0] == [{"id": "87459673", "sku": "55071153", "lojista": "24506"}]
+    assert source["final_sku_price"] == "R$2.399,00"
+    assert source["seller_id"] == "24506" and not mode3_prices.pending(source)
+    assert "casas_listing_seller_pending" not in source["parse_status"]
+    assert "seller_source:product_offer_candidate" in trace[0]["detail"]
+    path = tmp_path / "checkpoint.csv"
+    write_csv(path, [source], columns=OUTPUT_COLUMNS)
+    saved = read_csv(path)[0]
+    assert saved["seller_id"] == "24506"
+    output = _format_row(saved, datetime(2026, 10, 30))
+    assert _db_value("final_sku_price", output["final_sku_price"]) is not None
+
+
+@pytest.mark.parametrize("second", [reply(offer("24506", skuId="999")),
+    reply(offer("24506", currentPrice=0)), reply(offer("777")),
+    {"success": False, "status_code": 403, "offers": []}])
+def test_candidate_price_never_used_without_exact_second_quote(second):
+    source = row("")
+    fetch = Mock(side_effect=[reply(offer("24506", skuId="999")), second])
+    detail._backfill_casas_listing_prices([source], fetcher=fetch)
+    assert source["seller_id"] == "" and source["final_sku_price"] == ""
+    assert mode3_prices.pending(source)
+
+
+def test_discovery_and_exact_quote_cached_across_duplicate_rows():
+    sources = [row(""), row("")]
+    fetch = Mock(side_effect=[reply(offer("24506", skuId="999")), reply(offer("24506"))])
+    detail._backfill_casas_listing_prices(sources, fetcher=fetch)
+    assert fetch.call_count == 2
+    assert all(r["seller_id"] == "24506" for r in sources)
+
+
+def test_discovery_failure_does_not_stop_next_row():
+    sources = [row(""), row()]
+    fetch = Mock(side_effect=[RuntimeError("failure"), reply(offer())])
+    detail._backfill_casas_listing_prices(sources, fetcher=fetch)
+    assert sources[0]["seller_id"] == "" and mode3_prices.pending(sources[0])
+    assert sources[1]["final_sku_price"] == "R$3.558,90"
+
+
+def test_discovery_transport_and_exact_transport_request_bodies():
+    with patch.object(browser_api, "_APISession"), patch.object(browser_api, "_browser_fetch",
+            return_value=({"status_code": 200}, {"Ofertas": []})) as api:
+        fetch = recovery.BrowserPriceFetcher()
+        try:
+            fetch([{"id": 123}])
+            assert api.call_args.args[5] == {"produtos": [{"idProduto": 123}], "skus": []}
+            fetch([{"id": 123, "sku": 456, "lojista": 789}])
+            assert api.call_args.args[5] == {"produtos": [], "skus": [{"idSku": 456, "idLojista": 789}]}
+        finally:
+            fetch.close()
+
+
+def test_candidate_product_mismatch_ignored_and_next_seller_verified():
+    source = row("")
+    fetch = Mock(side_effect=[reply(offer("999", productId="999"), offer("24506", skuId="999"),
+        offer("10037", skuId="999")), reply(), reply(offer("10037"))])
+    detail._backfill_casas_listing_prices([source], fetcher=fetch)
+    assert source["seller_id"] == "10037"
+    assert fetch.call_count == 3
+    assert [c.args[0][0].get("lojista") for c in fetch.call_args_list] == [None, "24506", "10037"]
