@@ -36,12 +36,43 @@ ZIP에는 허용한 정보로만 생성한 `REPORT.md`, `report.json`, `events.j
 
 모드 1·2도 단계별 집계 ZIP을 만든다. 상세 브라우저 API 관측은 모드 3에만 적용되므로
 다른 모드에서 API 이벤트가 없다고 실제 요청이 없었다고 해석하면 안 된다.
-원래 콘솔 로그는 그대로 출력하며, 진단을 위해 추가 HTTP/CDP 호출이나 `get_log` 호출을 하지 않는다.
+원래 콘솔 로그는 그대로 출력하며, 네트워크 관측을 위해 추가 HTTP 요청이나 `get_log` 호출을 하지 않는다.
+모드 3 초기 문서 준비 실패 후에는 아래의 읽기 전용 CDP 상태 조회만 추가한다.
 진단 기록 자체는 기본 모드·요청 개수·타임아웃·간격·재시도·상세 수집 방식을 변경하지 않는다.
 모드 3의 403→SSR 복구 및 Main→BSR Chrome 재사용 정책은 `casas_listing_modes.md`를 따른다.
 SSR 페이지의 탐색 과정에서 사이트가 보내는 요청은 collector API 호출 개수와 다르다.
 Main/BSR API 타임라인의 경과시간과 호출 번호는 각각의 진단 단계 시작 기준이다.
 통계 계산과 파일 기록에 걸리는 소량의 시간은 추가될 수 있다.
+
+## 모드 3 초기 문서 실패 진단 (2026-10-30)
+
+`document_not_completed` 등 초기 준비 실패가 확정된 뒤 기존에 받은 이벤트에서
+해당 문서의 응답·완료·실패·취소 여부와 허용된 네트워크 오류 코드를 기록한다.
+홈페이지/목록 구분, 45초 탐색 제한·30초 증거 대기 제한, 실제 탐색 시간,
+최상위 문서 요청·리다이렉트 개수도 함께 남긴다.
+
+먼저 `mode3_bootstrap_failure_decided`를 출력한 뒤, Chrome에 읽기 전용 상태 조회를 한다.
+두 번의 `Page.getFrameTree` 사이에서 한 번의 `Runtime.evaluate`(평가 제한 1초)로
+`document.readyState`, NEXT_DATA 존재/JSON 파싱 여부, 상품 배열 존재 여부와 개수만 받는다.
+본문·상품명·URL·요청 식별자·쿠키는 출력하거나 저장하지 않는다. 이 조회는 서버 요청이나 재접속을 하지 않는다.
+Chrome 제어 채널 자체가 멈춘 경우 전체 CDP 왕복 시간까지 1초로 보장되는 것은 아니다.
+
+결과는 `mode3_bootstrap_failure` 로그와 manifest의 `diagnostics`, 자동 진단 ZIP에 보존한다.
+`diagnostic_frame_matches_decision`은 조회 직전 문서가 실패 판정 문서와 같은지,
+`diagnostic_frame_stable`은 조회 전후 문서가 같은지를 뜻한다. 둘 다 true일 때만
+DOM 상태를 실패한 문서와 연결해서 해석한다. 조회 실패는 `ready_state=unavailable`,
+`dom_probe_succeeded=false`로 구분하며 상품 0개라고 간주하지 않는다.
+
+- `ready_state=complete`, `dom_product_count>0`인데 `selected_document_loading_finished=false`라면
+  완료 이벤트 관측/연결 문제를 의심할 근거다. 이벤트 누락을 확정하는 판정은 아니다.
+- `selected_document_loading_failed=true`이면 같은 문서 요청의 실패 증거가 있다.
+  `selected_document_canceled`, `document_network_error`를 함께 확인한다.
+- `ready_state=loading`만으로 네트워크 실패라고 단정하지 않는다.
+- 기존 `bootstrap_failure_reused=true`, `new_navigation=false`, `new_api_request=false` 로그와
+  ZIP의 재사용 표시로 이후 페이지가 새로 접속했는지 구분한다.
+
+스냅샷은 실패 판정 직후의 관측값이다. 수집 승인·실패 기준, 재시도, API/SSR 전환,
+CSV/DB 저장 계약은 변경하지 않는다. 진단 중 예외도 원래 실패를 덮어쓰지 않는다.
 
 ## 실패 페이지가 있을 때의 진행 기준
 

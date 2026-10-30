@@ -3,6 +3,8 @@ setlocal
 
 cd /d "%~dp0"
 
+set "SEDA_CASAS_BAHIA_LISTING_MODE=3"
+
 if not exist "%~dp0seda\casas_bahia\log" mkdir "%~dp0seda\casas_bahia\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\casas_bahia\log\casas_bahia_ref_full_%SEDA_RUN_TIMESTAMP%.log"
@@ -28,6 +30,7 @@ set SEDA_FETCH_MODE=graphql
 set SEDA_RETRY_SLEEP_SECONDS=0
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
+call :log "[SEDA] Casas Bahia listing mode=%SEDA_CASAS_BAHIA_LISTING_MODE% (uc_api)"
 call :log "[SEDA] Casas Bahia REF full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line REF --all
 if errorlevel 1 goto :failed

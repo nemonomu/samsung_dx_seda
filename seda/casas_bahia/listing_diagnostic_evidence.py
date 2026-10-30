@@ -324,6 +324,7 @@ DIAGNOSTIC_NUMBERS = {
     "chrome_major", "document_navigations", "parser_sku_aliases_added",
     "navigation_attempt", "trigger_status_code",
     "price_pending_products", "seller_pending_products", "price_count",
+    "dom_product_count", "dom_probe_seconds", "top_document_request_count", "top_document_redirect_count",
 }
 DIAGNOSTIC_FLAGS = {
     "homepage_ready",
@@ -334,6 +335,8 @@ DIAGNOSTIC_FLAGS = {
     "response_queries_is_mapping", "response_page_present", "parser_page_context_injected", "response_sort_present",
     "parser_sort_context_injected",
     "fallback_used", "browser_reused", "recovery_pending",
+    "dom_probe_succeeded", "dom_next_data_present", "dom_next_data_valid", "dom_products_present",
+    "diagnostic_frame_matches_decision", "diagnostic_frame_stable", "document_url_matches_requested",
 }
 
 
@@ -349,6 +352,7 @@ def _trace_projection(value, depth=0):
                             ("stage", {"bootstrap", "search", "price", "validation", "complete", "ssr_fallback"}),
                             ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
                             ("document_network_error", NETWORK_ERRORS | {"none", "other"}),
+                             ("document_stage", {"homepage", "listing"}),
                             ("page_evidence_source", {"response_and_observed_request", "observed_request_only"}),
                             ("sort_evidence_source", {"response_and_observed_request", "observed_request_only", "not_requested"})):
             if key in item:

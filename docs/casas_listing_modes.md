@@ -1,5 +1,7 @@
 # Casas Bahia listing modes
 
+2026-10-30: 개별 `run_casas_bahia_tv_full.bat`, `run_casas_bahia_ref_full.bat`, `run_casas_bahia_ldy_full.bat`도 더블클릭하면 모드 **3 (uc_api)**으로 실행한다. 세 BAT는 상속된 모드 설정을 3으로 덮어쓰고 시작 로그에 선택 모드를 표시한다. Python 직접 실행의 미설정 기본값은 **1**로 유지한다.
+
 2026-10-29 운영 BAT 기본값: **3 (Chrome + API)**. Python 직접 실행의 미설정 기본값은 **1**이다. Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작**을 보존하며 명시적으로 인자 `1`로 실행한다. Mode 1-1/2/4, CSV·DB 형식과 공통 번역은 유지한다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 ## 2026-10-29 후속 복구 정책

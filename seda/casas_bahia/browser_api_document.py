@@ -13,6 +13,84 @@ from . import browser_listing as listing
 
 HOME_URL = "https://www.casasbahia.com.br/"
 
+# Only aggregates leave the browser. No HTML, product text, URL or identifiers.
+_DOM_DIAGNOSTIC_SCRIPT = """(() => {
+    const result = {ready_state: document.readyState, dom_probe_succeeded: true};
+    const element = document.getElementById('__NEXT_DATA__');
+    result.dom_next_data_present = !!element;
+    result.dom_next_data_valid = false;
+    if (!element) return result;
+    let payload;
+    try { payload = JSON.parse(element.textContent); }
+    catch (_) { return result; }
+    result.dom_next_data_valid = !!payload && typeof payload === 'object' && !Array.isArray(payload);
+    const props = payload && payload.props;
+    const state = props && ((props.pageProps && props.pageProps.initialState) ?? props.initialState);
+    const products = state && state.search && state.search.results && state.search.results.products;
+    result.dom_products_present = Array.isArray(products);
+    if (result.dom_products_present) result.dom_product_count = products.length;
+    return result;
+})()"""
+
+
+def _failure_diagnostics(driver, trace, messages, frame, prior, requested):
+    """Observe after failure is decided; never drain logs or change admission."""
+    try:
+        documents = [m["params"] for m in messages
+                     if m.get("method") == "Network.responseReceived"
+                     and m.get("params", {}).get("type") == "Document"
+                     and listing._same_navigation(m.get("params", {}), frame)]
+        completed = {m.get("params", {}).get("requestId") for m in messages
+                     if m.get("method") == "Network.loadingFinished"}
+        requests = [m["params"] for m in messages
+                    if m.get("method") == "Network.requestWillBeSent"
+                    and m.get("params", {}).get("type") == "Document"
+                    and m.get("params", {}).get("frameId") == frame.get("id")]
+        values = listing._document_diagnostics(
+            messages, [(d.get("requestId"), d.get("response", {})) for d in documents], [], completed)
+        values.update({
+            "document_stage": "homepage" if requested is None else "listing",
+            "page_load_timeout_seconds": 45, "evidence_wait_limit_seconds": 30,
+            "navigation_seconds": trace["navigation_seconds"],
+            "navigation_raised": trace.get("navigation_raised", False),
+            "navigation_timeout": trace.get("navigation_timeout", False),
+            "new_loader_observed": bool(frame.get("loaderId") and frame.get("loaderId") != prior.get("loaderId")),
+            "document_url_matches_requested": _matches(frame.get("url", ""), requested),
+            "top_document_request_count": len(requests),
+            "top_document_redirect_count": sum(isinstance(r.get("redirectResponse"), dict) for r in requests),
+            "ready_state": "not_probed", "dom_probe_succeeded": False,
+        })
+        page = requested[1] if requested is not None else 0
+        trace["diagnostics"] = listing._public_browser_diagnostics(values)
+        listing._log_browser_diagnostics("mode3_bootstrap_failure_decided", page, values)
+        started = time.perf_counter()
+        values["ready_state"] = "unavailable"
+        try:
+            before = _frame(driver)
+            values["diagnostic_frame_matches_decision"] = (
+                bool(before.get("id") and before.get("loaderId"))
+                and all(before.get(k) == frame.get(k) for k in ("id", "loaderId")))
+            result = driver.execute_cdp_cmd("Runtime.evaluate", {
+                "expression": _DOM_DIAGNOSTIC_SCRIPT, "returnByValue": True,
+                "silent": True, "throwOnSideEffect": True, "timeout": 1000,
+            })
+            observed = listing._public_browser_diagnostics(result.get("result", {}).get("value"))
+            values.update({k: v for k, v in observed.items() if k in {
+                "ready_state", "dom_probe_succeeded", "dom_next_data_present",
+                "dom_next_data_valid", "dom_products_present", "dom_product_count"}})
+            after = _frame(driver)
+            values["diagnostic_frame_stable"] = (
+                bool(before.get("id") and before.get("loaderId"))
+                and all(before.get(k) == after.get(k) for k in ("id", "loaderId")))
+        except Exception:
+            pass
+        values["dom_probe_seconds"] = round(time.perf_counter() - started, 3)
+        trace["diagnostics"] = listing._public_browser_diagnostics(values)
+        listing._log_browser_diagnostics("mode3_bootstrap_failure", page, values)
+    except Exception:
+        # Diagnostic failures must never replace the already-decided error.
+        pass
+
 
 def _notice(message):
     try:
@@ -139,6 +217,7 @@ def _navigate(driver, url, requested):
                         failure = "response_validation_" + type(exc).__name__
         if time.monotonic() >= deadline:
             trace["error"] = failure
+            _failure_diagnostics(driver, trace, messages, frame, prior, requested)
             return {"success": False, "status_code": trace["status_code"], "error": failure, "trace": [trace]}
         time.sleep(0.5)
 

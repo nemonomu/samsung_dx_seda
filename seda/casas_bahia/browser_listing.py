@@ -314,12 +314,15 @@ _DIAGNOSTIC_NUMBERS = {
     "page_load_timeout_seconds", "evidence_wait_limit_seconds",
     "fetch_seconds_before_diagnostic", "ready_state_probe_seconds",
     "selected_document_response_count", "current_price_response_count", "performance_event_count",
+    "dom_product_count", "dom_probe_seconds", "top_document_request_count", "top_document_redirect_count",
 }
 _DIAGNOSTIC_FLAGS = {
     "navigation_raised", "navigation_timeout", "new_loader_observed",
     "selected_document_response_seen", "selected_document_loading_finished",
     "selected_document_loading_failed", "selected_document_canceled",
     "selected_document_cached", "selected_document_service_worker",
+    "dom_probe_succeeded", "dom_next_data_present", "dom_next_data_valid", "dom_products_present",
+    "diagnostic_frame_matches_decision", "diagnostic_frame_stable", "document_url_matches_requested",
 }
 _NETWORK_ERROR_CODES = {
     "net::ERR_ABORTED", "net::ERR_TIMED_OUT", "net::ERR_CONNECTION_RESET",
@@ -349,6 +352,7 @@ def _public_browser_diagnostics(value):
     for key, allowed in (
         ("ready_state", {"loading", "interactive", "complete", "unavailable", "not_probed"}),
         ("document_network_error", _NETWORK_ERROR_CODES | {"none", "other"}),
+        ("document_stage", {"homepage", "listing"}),
     ):
         item = value.get(key)
         if isinstance(item, str) and item in allowed:
