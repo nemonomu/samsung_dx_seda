@@ -8,6 +8,7 @@ import pytest
 from seda import step07_final_targets as targets, step08_detail_enrichment as detail
 from seda.casas_bahia import mode3_price_recovery as recovery, mode3_prices
 from seda.casas_bahia import browser_api, price_api
+from seda.casas_bahia import browser_listing_url_first as quotes
 from seda.step00_config import read_csv, write_csv, OUTPUT_COLUMNS
 from seda.step15_final_output import _format_row
 from seda.step14_db_load import _db_value
@@ -325,3 +326,138 @@ def test_candidate_product_mismatch_ignored_and_next_seller_verified():
     assert source["seller_id"] == "10037"
     assert fetch.call_count == 3
     assert [c.args[0][0].get("lojista") for c in fetch.call_args_list] == [None, "24506", "10037"]
+
+
+def raw_offer(**changes):
+    price = {"IdProduto": 87459673, "IdSku": 55071153, "IdLojista": 22161, "Preco": 2399}
+    price.update(changes)
+    return {"PrecoVenda": price}
+
+
+def test_normalization_logs_missing_invalid_and_conflicting_entries_without_changing_results():
+    payload = {"Ofertas": [raw_offer(IdProduto=None), raw_offer(IdSku="bad"),
+        raw_offer(IdLojista=None), raw_offer(), raw_offer(Preco=2499), raw_offer(),
+        raw_offer(IdLojista=10037)]}
+    diagnostics = []
+    expected = quotes._normalize_offers([payload], allow_partial=True)
+    actual = quotes._normalize_offers([payload], allow_partial=True, diagnostics=diagnostics)
+    assert actual == expected and len(actual) == 1
+    assert [d["fields"] for d in diagnostics[:3]] == [
+        {"IdProduto": "missing"}, {"IdSku": "invalid"}, {"IdLojista": "missing"}]
+    conflict = diagnostics[3]
+    assert conflict["reason"] == "conflicting_price_offers"
+    assert conflict["previous_location"] == {"payload_index": 1, "offer_index": 4}
+    assert conflict["offer_index"] == 5 and conflict["payload_index"] == 1
+    assert {"currentPrice", "standardPrice"} <= set(conflict["changed_fields"])
+    assert diagnostics[4]["reason"] == "previously_conflicted_identity"
+    assert diagnostics[-1] == {"reason": "normalization_summary", "raw_offer_count": 7,
+                              "normalized_offer_count": 1, "conflicting_identity_count": 1}
+
+
+def test_same_prices_with_other_conflicting_fields_are_identified():
+    diagnostics = []
+    assert not quotes._normalize_offers([{"Ofertas": [raw_offer(Parcelamento="A"),
+        raw_offer(Parcelamento="B")]}], allow_partial=True, diagnostics=diagnostics)
+    assert diagnostics[0]["changed_fields"] == ["installment"]
+    for sink in (None, []):
+        with pytest.raises(quotes.EvidenceError, match="conflicting_price_offers"):
+            quotes._normalize_offers([{"Ofertas": [raw_offer(), raw_offer(Preco=2499)]}], diagnostics=sink)
+
+
+def test_diagnostic_sink_failure_does_not_change_normalization():
+    payload = [{"Ofertas": [raw_offer(IdProduto=None), raw_offer()]}]
+    sink = Mock()
+    sink.append.side_effect = OSError("private-marker")
+    assert quotes._normalize_offers(payload, allow_partial=True, diagnostics=sink) == \
+        quotes._normalize_offers(payload, allow_partial=True)
+
+
+@pytest.mark.parametrize("raw,raw_count,reason", [
+    ({"Ofertas": []}, 0, "normalization_summary"),
+    ({"Ofertas": [raw_offer(IdSku=None)]}, 1, "invalid_identity"),
+    ({"Ofertas": [raw_offer(), raw_offer(Preco=2499)]}, 2, "conflicting_price_offers"),
+])
+def test_empty_quote_reason_survives_trace_csv_without_releasing_price(tmp_path, raw, raw_count, reason):
+    source, trace = row(), []
+    with patch.object(browser_api, "_APISession"), patch.object(browser_api, "_browser_fetch",
+            return_value=({"status_code": 200}, raw)):
+        fetch = recovery.BrowserPriceFetcher()
+        detail._backfill_casas_listing_prices([source], fetcher=fetch, trace_rows=trace)
+        fetch.close()
+    assert mode3_prices.pending(source) and source["final_sku_price"] == ""
+    assert trace[0]["error"] == "missing_price_offer"
+    path = tmp_path / "subcall_trace.csv"
+    write_csv(path, trace, columns=list(trace[0]))
+    saved = read_csv(path)[0]
+    import json
+    diagnostic = json.loads(saved["detail"].split(";price_diagnostics_json:", 1)[1])[0]
+    assert diagnostic["request_kind"] == "exact_sku"
+    assert diagnostic["normalization"][0]["reason"] == reason
+    assert diagnostic["normalization"][-1]["raw_offer_count"] == raw_count
+    assert diagnostic["normalization"][-1]["normalized_offer_count"] == 0
+
+
+def test_transport_errors_log_safe_stage_and_reused_failure(capsys):
+    with patch.object(browser_api, "_APISession") as session:
+        session.return_value._bootstrap.side_effect = TimeoutError("private-marker")
+        fetch = recovery.BrowserPriceFetcher()
+        for _ in range(2):
+            assert fetch([{"id": 1}]) == {"success": False, "status_code": 0, "offers": []}
+        fetch.close()
+    assert fetch.request_diagnostics[0]["stage"] == "bootstrap"
+    assert fetch.request_diagnostics[0]["exception_type"] == "TimeoutError"
+    assert fetch.request_diagnostics[1]["reason"] == "bootstrap_failure_reused"
+    assert "private-marker" not in capsys.readouterr().out + str(fetch.request_diagnostics)
+
+
+def test_diagnostics_stay_with_the_requesting_row_and_keep_normal_prices(capsys):
+    sources, trace = [row(), row("10037", "bsr")], []
+    raw = {"Ofertas": [raw_offer()]}
+    with patch.object(browser_api, "_APISession"), patch.object(browser_api, "_browser_fetch",
+            side_effect=[({"status_code": 200}, raw), ({"status_code": 200}, {"Ofertas": []})]):
+        fetch = recovery.BrowserPriceFetcher()
+        detail._backfill_casas_listing_prices(sources, fetcher=fetch, trace_rows=trace)
+        fetch.close()
+    import json
+    first, second = [json.loads(t["detail"].split(";price_diagnostics_json:", 1)[1]) for t in trace]
+    assert [d["request_index"] for d in first] == [1]
+    assert [d["request_index"] for d in second] == [2]
+    assert sources[0]["final_sku_price"] == "R$2.399,00" and not mode3_prices.pending(sources[0])
+    assert sources[1]["final_sku_price"] == "" and mode3_prices.pending(sources[1])
+
+
+def test_other_trace_details_keep_existing_length_limit():
+    trace = []
+    detail._record_subcall(trace, row(), 1, "", "other_stage", detail="x" * 1000)
+    assert len(trace[0]["detail"]) == 500 and trace[0]["detail"].endswith("...")
+
+
+def test_review_log_links_missing_target_price_to_other_sku_without_claiming_page_absent(capsys):
+    source = row("", product_line="REF", retailer_sku_name="LG refrigerator",
+                 retailer_product_id="74187836",
+                 product_url="https://www.casasbahia.com.br/refrigerator/p/55065274?tracking=private-marker")
+    fetch = Mock(side_effect=[reply(offer("10037", productId="74187836", skuId="55065275")), reply()])
+    detail._backfill_casas_listing_prices([source], fetcher=fetch)
+    import json
+    lines = capsys.readouterr().out.splitlines()
+    review = json.loads(next(line.split("price_recovery_review ", 1)[1]
+                             for line in lines if "price_recovery_review " in line))
+    assert review["target_sku"] == "55065274" and review["candidate_skus"] == ["55065275"]
+    assert review["seller_id"] == "10037" and review["product_line"] == "REF"
+    assert review["url"] == "https://www.casasbahia.com.br/refrigerator/p/55065274"
+    assert "가격 항목 없음" in review["reason"] and review["page_status"].startswith("미확인")
+    assert review["action"] == "NULL 유지" and review["price_api_status"] == 200
+    assert "private-marker" not in str(review)
+    assert source["final_sku_price"] == "" and mode3_prices.pending(source)
+
+
+@pytest.mark.parametrize("status", [0, 403, 404])
+def test_price_api_error_is_not_reported_as_missing_product_page(status, capsys):
+    source = row()
+    detail._backfill_casas_listing_prices([source], fetcher=Mock(return_value={
+        "success": False, "status_code": status, "offers": []}))
+    import json
+    review = json.loads(next(line.split("price_recovery_review ", 1)[1]
+        for line in capsys.readouterr().out.splitlines() if "price_recovery_review " in line))
+    assert review["page_status"].startswith("미확인") and review["reason"] != "페이지 없음"
+    assert review["price_api_status"] == status

@@ -297,7 +297,7 @@ def _record_subcall(trace_rows, row, row_index, product_url, subcall, **values):
             "error": _compact_trace_value(values.get("error", "")),
             "graphql_errors": _compact_trace_value(values.get("graphql_errors", "")),
             "response_preview": _compact_trace_value(values.get("response_preview", "")),
-            "detail": _compact_trace_value(values.get("detail", "")),
+            "detail": _compact_trace_value(values.get("detail", ""), limit=values.get("detail_limit", 500)),
         }
     )
     trace_rows.append(record)

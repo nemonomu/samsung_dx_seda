@@ -347,28 +347,44 @@ def _document_matches(url, requested):
         return False
 
 
-def _normalize_offers(price_payloads, *, allow_partial=False):
+def _offer_diagnostic(diagnostics, **fields):
+    """Optional allowlisted metadata; diagnostic failures never reject a quote."""
+    try:
+        if diagnostics is not None:
+            diagnostics.append(fields)
+    except Exception:
+        pass
+
+
+def _normalize_offers(price_payloads, *, allow_partial=False, diagnostics=None):
     # These existing helpers are pure numeric/formatting functions. No HTTP call.
     from seda.casas_bahia.price_api import _discount_rate, _savings_text
 
     offers, conflicts = {}, set()
+    locations, raw_count = {}, 0
     if isinstance(price_payloads, (str, bytes, dict)) or price_payloads is None:
+        _offer_diagnostic(diagnostics, reason="invalid_price_payload")
         if allow_partial:
             return offers
         raise EvidenceError("invalid_price_payload")
     try:
         payloads = list(price_payloads)
     except TypeError:
+        _offer_diagnostic(diagnostics, reason="invalid_price_payload")
         if allow_partial:
             return offers
         raise EvidenceError("invalid_price_payload") from None
-    for data in payloads:
+    for payload_index, data in enumerate(payloads, 1):
         if not isinstance(data, dict) or not isinstance(data.get("Ofertas"), list):
+            _offer_diagnostic(diagnostics, reason="invalid_price_payload", payload_index=payload_index)
             if allow_partial:
                 continue
             raise EvidenceError("invalid_price_payload")
-        for offer in data["Ofertas"]:
+        raw_count += len(data["Ofertas"])
+        for offer_index, offer in enumerate(data["Ofertas"], 1):
+            location = {"payload_index": payload_index, "offer_index": offer_index}
             if not isinstance(offer, dict):
+                _offer_diagnostic(diagnostics, reason="invalid_price_offer", **location)
                 if allow_partial:
                     continue
                 raise EvidenceError("invalid_price_offer")
@@ -379,6 +395,14 @@ def _normalize_offers(price_payloads, *, allow_partial=False):
                         _positive_id(price.get("IdSku") or availability.get("IdSku")),
                         _positive_id(price.get("IdLojista") or availability.get("IdLojista")))
             if not all(identity):
+                identity_values = (price.get("IdProduto"),
+                                   price.get("IdSku") or availability.get("IdSku"),
+                                   price.get("IdLojista") or availability.get("IdLojista"))
+                _offer_diagnostic(diagnostics, reason="invalid_identity", **location,
+                    product_id=identity[0], sku_id=identity[1], seller_id=identity[2],
+                    fields={name: ("missing" if value is None or value == "" else "invalid")
+                            for name, value, valid in zip(
+                                ("IdProduto", "IdSku", "IdLojista"), identity_values, identity) if not valid})
                 continue
             try:
                 normalized = {
@@ -392,19 +416,30 @@ def _normalize_offers(price_payloads, *, allow_partial=False):
                     "availability": availability,
                     "sellerId": identity[2], "skuId": identity[1], "productId": identity[0],
                 }
-            except Exception:
+            except Exception as exc:
+                _offer_diagnostic(diagnostics, reason="normalization_exception", **location,
+                                  exception_type=type(exc).__name__)
                 if allow_partial:
                     continue
                 raise
             if identity in conflicts:
+                _offer_diagnostic(diagnostics, reason="previously_conflicted_identity", **location,
+                                  product_id=identity[0], sku_id=identity[1], seller_id=identity[2])
                 continue
             if identity in offers and offers[identity] != normalized:
+                _offer_diagnostic(diagnostics, reason="conflicting_price_offers", **location,
+                    previous_location=locations[identity],
+                    product_id=identity[0], sku_id=identity[1], seller_id=identity[2],
+                    changed_fields=[key for key in normalized if offers[identity].get(key) != normalized[key]])
                 if allow_partial:
                     offers.pop(identity, None)
                     conflicts.add(identity)
                     continue
                 raise EvidenceError("conflicting_price_offers")
             offers[identity] = normalized
+            locations[identity] = location
+    _offer_diagnostic(diagnostics, reason="normalization_summary", raw_offer_count=raw_count,
+                      normalized_offer_count=len(offers), conflicting_identity_count=len(conflicts))
     return offers
 
 
