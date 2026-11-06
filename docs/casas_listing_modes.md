@@ -1,6 +1,6 @@
 # Casas Bahia listing modes
 
-최종 선택 기본값: **1 (REST API)**. 2026-09-25 사용자 요청으로 Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작으로 복원**한다. 9월 23일 추가된 엄격한 가격 검증을 Mode 1에 적용하지 않는다. 별도 Mode 1-1/2/3/4는 유지하며, CSV·DB 형식과 공통 번역은 변경하지 않는다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
+예약용 TV/REF/LDY 배치와 LDY 단독 배치의 기본값은 **3 (UC + API)**이다. Python 직접 실행의 기본값은 1이다. Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작으로 복원**한다. 9월 23일 추가된 엄격한 가격 검증을 Mode 1에 적용하지 않는다. 별도 Mode 1-1/2/3/4는 유지하며, CSV·DB 형식과 공통 번역은 변경하지 않는다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 | 번호 | 이름 | 실행 경로 | 실패 시 |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@
 ## 실행과 최종 선택
 
 ```bat
-rem 최종 기본값 1로 TV -> REF -> LDY 전체 실행
+rem 기본값 3으로 TV -> REF -> LDY 전체 실행
 run_casas_bahia_tv_ref_ldy_full.bat
 
 rem 이번 실행만 모드 지정
@@ -24,11 +24,11 @@ run_casas_bahia_tv_ref_ldy_full.bat 3
 run_casas_bahia_tv_ref_ldy_full.bat 4
 ```
 
-배치 파일 상단 `set "SEDA_CASAS_BAHIA_LISTING_MODE=1"` 한 줄이 최종 기본 선택이다. 첫 번째 인자를 주면 해당 실행에만 덮어쓴다. 대화형 입력을 요구하지 않으므로 예약 실행에도 사용할 수 있다. 허용 값은 1, 1-1, 2, 3, 4이다.
+TV/REF/LDY 배치 파일 상단의 기본 선택은 3이며 첫 번째 인자로 해당 실행에만 덮어쓸 수 있다. LDY 단독 배치는 환경변수가 없을 때 3을 사용하고 명시된 환경변수는 유지한다. 허용 값은 1, 1-1, 2, 3, 4이다.
 
 Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 1이다. 이 변수는 listing 방식과 해당 모드의 Detail 가격 보완 여부를 선택한다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
 
-각 Casas listing 코드 수정 시 기존 모드와 Mode 1-1을 유지하고, 최종 선택 값을 명시적으로 확인·기록해야 한다. 현재 기본 선택은 1이며 변경 요청 없이 다른 모드로 바꾸지 않는다. `4 --resume-tv-detail ...` 재개 명령은 기존처럼 Mode 4 전용이다. 실행 중인 배치의 모드는 바꾸지 않는다.
+각 Casas listing 코드 수정 시 기존 모드와 Mode 1-1을 유지하고, 최종 선택 값을 명시적으로 확인·기록해야 한다. `4 --resume-tv-detail ...` 재개 명령은 기존처럼 Mode 4 전용이다. 실행 중인 배치의 모드는 바꾸지 않는다.
 
 ## 모드 4의 추가 동작
 

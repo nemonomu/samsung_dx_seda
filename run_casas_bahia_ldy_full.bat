@@ -3,6 +3,7 @@ setlocal
 
 cd /d "%~dp0"
 
+if not defined SEDA_CASAS_BAHIA_LISTING_MODE set "SEDA_CASAS_BAHIA_LISTING_MODE=3"
 if not exist "%~dp0seda\casas_bahia\log" mkdir "%~dp0seda\casas_bahia\log"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "SEDA_RUN_TIMESTAMP=%%i"
 if not defined SEDA_RUN_LOG_FILE set "SEDA_RUN_LOG_FILE=%~dp0seda\casas_bahia\log\casas_bahia_ldy_full_%SEDA_RUN_TIMESTAMP%.log"

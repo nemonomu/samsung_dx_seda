@@ -135,8 +135,21 @@ class CasasBatchResumeTests(unittest.TestCase):
                     self.assertEqual(call["SEDA_DETAIL_TARGET_CSV"], "")
                     self.assertEqual(call["SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK"], "1")
 
-    def test_no_argument_uses_default_mode_one(self):
-        self.assert_success_chain(*self.run_batch(), mode="1")
+    def test_no_argument_uses_default_mode_three(self):
+        self.assert_success_chain(*self.run_batch(), mode="3")
+
+    def test_standalone_ldy_defaults_to_mode_three_and_allows_override(self):
+        standalone = BATCH_SOURCE.with_name("run_casas_bahia_ldy_full.bat")
+        self.batch = self.root / standalone.name
+        shutil.copyfile(standalone, self.batch)
+        for selected in (None, "1"):
+            with self.subTest(selected=selected):
+                runtime = {"SEDA_CASAS_BAHIA_LISTING_MODE": selected} if selected else None
+                result, calls = self.run_batch(runtime=runtime)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["ARGS"], "-m seda.casas_bahia.casas_bahia_orchestrator --product-line LDY --all")
+                self.assertEqual(calls[0]["SEDA_CASAS_BAHIA_LISTING_MODE"], selected or "3")
 
     def test_mode_one_one_logs_explicit_url_first_rest_label(self):
         result, calls = self.run_batch(["1-1"])
@@ -144,13 +157,12 @@ class CasasBatchResumeTests(unittest.TestCase):
         self.assertIn("listing mode=1-1 (rest_api_url_first)", result.stdout)
 
     def test_restored_mode_one_preserves_retry_configuration(self):
-        for args in ([], ["1"]):
-            for configured in (None, "4"):
-                runtime = {} if configured is None else {"SEDA_CASAS_BAHIA_SEARCH_RETRIES": configured}
-                result, calls = self.run_batch(args, runtime=runtime)
-                self.assert_success_chain(result, calls, mode="1")
-                self.assertEqual([call["SEDA_CASAS_BAHIA_SEARCH_RETRIES"] for call in calls],
-                                 [configured or ""] * 3)
+        for configured in (None, "4"):
+            runtime = {} if configured is None else {"SEDA_CASAS_BAHIA_SEARCH_RETRIES": configured}
+            result, calls = self.run_batch(["1"], runtime=runtime)
+            self.assert_success_chain(result, calls, mode="1")
+            self.assertEqual([call["SEDA_CASAS_BAHIA_SEARCH_RETRIES"] for call in calls],
+                             [configured or ""] * 3)
 
     def test_other_modes_keep_retry_ceiling_configuration(self):
         for mode in ("1-1", "2", "3", "4"):
