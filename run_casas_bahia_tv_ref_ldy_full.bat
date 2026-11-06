@@ -71,28 +71,35 @@ set SEDA_RETRY_SLEEP_SECONDS=0
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
 call :log "[SEDA] Casas Bahia listing mode=%SEDA_CASAS_BAHIA_LISTING_MODE% (%SEDA_CASAS_BAHIA_LISTING_MODE_LABEL%)"
+set "SEDA_BATCH_EXIT_CODE=0"
 if "%SEDA_CASAS_BAHIA_RESUME_TV%"=="1" goto :resume_tv
 call :log "[SEDA] Casas Bahia TV full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line TV --all
-if errorlevel 1 goto :failed_tv
+if not "%errorlevel%"=="0" goto :failed_tv
 goto :start_ref
 
 :resume_tv
 call :log "[SEDA] Casas Bahia TV resume date=%SEDA_RUN_DATE% completed_detail_rows=%SEDA_CASAS_BAHIA_RESUME_COUNT%"
 call :run_tv_detail_resume
-if errorlevel 1 goto :failed_tv
+if not "%errorlevel%"=="0" goto :failed_tv
 
 :start_ref
 call :log "[SEDA] Casas Bahia REF full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line REF --all
-if errorlevel 1 goto :failed_ref
+if not "%errorlevel%"=="0" goto :failed_ref
 
+:start_ldy
 call :log "[SEDA] Casas Bahia LDY full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line LDY --all
-if errorlevel 1 goto :failed_ldy
+if not "%errorlevel%"=="0" goto :failed_ldy
 
-call :log "[SEDA] Casas Bahia TV/REF/LDY full run completed"
-exit /b 0
+:finish
+if "%SEDA_BATCH_EXIT_CODE%"=="0" (
+    call :log "[SEDA] Casas Bahia TV/REF/LDY full run completed"
+) else (
+    call :log "[SEDA] Casas Bahia TV/REF/LDY full run failed"
+)
+exit /b %SEDA_BATCH_EXIT_CODE%
 
 :run_tv_detail_resume
 setlocal
@@ -126,15 +133,21 @@ exit /b 0
 
 :failed_tv
 call :log "[SEDA] Casas Bahia TV full run failed"
-exit /b 1
+if "%SEDA_CASAS_BAHIA_RESUME_TV%"=="1" exit /b 1
+set "SEDA_BATCH_EXIT_CODE=1"
+goto :start_ref
 
 :failed_ref
 call :log "[SEDA] Casas Bahia REF full run failed"
-exit /b 1
+if "%SEDA_CASAS_BAHIA_RESUME_TV%"=="1" exit /b 1
+set "SEDA_BATCH_EXIT_CODE=1"
+goto :start_ldy
 
 :failed_ldy
 call :log "[SEDA] Casas Bahia LDY full run failed"
-exit /b 1
+if "%SEDA_CASAS_BAHIA_RESUME_TV%"=="1" exit /b 1
+set "SEDA_BATCH_EXIT_CODE=1"
+goto :finish
 
 :invalid_listing_mode
 echo [SEDA] Invalid listing mode. Use 1=REST API, 1-1=URL-first REST API, 2=hybrid, 3=UC+API, or 4=URL-first UC+API.

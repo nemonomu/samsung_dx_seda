@@ -68,7 +68,7 @@ class CasasBatchResumeTests(unittest.TestCase):
         ]
         (self.stub_dir / "python.bat").write_text("\n".join(stub_lines) + "\n", encoding="ascii")
 
-    def run_batch(self, args=(), *, runtime=None, fail=None):
+    def run_batch(self, args=(), *, runtime=None, fail=None, fail_code="7"):
         # Fixed nonsecret Windows paths; do not copy/read the parent environment.
         child_env = {
             "SystemRoot": r"C:\Windows",
@@ -90,7 +90,7 @@ class CasasBatchResumeTests(unittest.TestCase):
             child_env.update(runtime)
         if fail:
             self.assertIn(fail, ("TV", "REF", "LDY"))
-            child_env[f"HARNESS_{fail}_EXIT"] = "7"
+            child_env[f"HARNESS_{fail}_EXIT"] = fail_code
         self.capture.unlink(missing_ok=True)
         # cwd is the fixture root; avoiding a quoted nested absolute command
         # also avoids Windows' different CRT/CMD quote-escaping rules.
@@ -187,12 +187,23 @@ class CasasBatchResumeTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(calls), index, result.stdout + result.stderr)
 
-    def test_normal_failures_remain_fail_fast(self):
-        for index, category in enumerate(("TV", "REF", "LDY"), 1):
+    def test_normal_failures_continue_other_categories_and_report_failure(self):
+        for category in ("TV", "REF", "LDY"):
             with self.subTest(category=category):
-                result, calls = self.run_batch(["4"], fail=category)
+                result, calls = self.run_batch(["1"], fail=category)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(len(calls), index, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 3, result.stdout + result.stderr)
+                self.assertEqual([call["SEDA_CASAS_BAHIA_LISTING_MODE"] for call in calls], ["1"] * 3)
+                self.assertIn(f"Casas Bahia {category} full run failed", result.stdout)
+                self.assertIn("Casas Bahia TV/REF/LDY full run failed", result.stdout)
+
+    def test_negative_exit_is_a_failure_and_other_categories_run(self):
+        for category in ("TV", "REF", "LDY"):
+            with self.subTest(category=category):
+                result, calls = self.run_batch(["1"], fail=category, fail_code="-1")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 3)
+                self.assertIn(f"Casas Bahia {category} full run failed", result.stdout)
 
     def test_resume_rejects_legacy_modes_before_any_python(self):
         for mode in ("1", "1-1", "2", "3"):
