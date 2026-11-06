@@ -75,22 +75,11 @@ def _call_with_live_log(command, env, log_file):
         for line in process.stdout:
             print(line, end="", flush=True)
             if handle:
-                try:
-                    handle.write(line)
-                    handle.flush()
-                except OSError as exc:
-                    print(f"[run] log file disabled: {type(exc).__name__}", flush=True)
-                    try:
-                        handle.close()
-                    except OSError:
-                        pass
-                    handle = None
+                handle.write(line)
+                handle.flush()
     finally:
         if handle:
-            try:
-                handle.close()
-            except OSError as exc:
-                print(f"[run] log file close failed: {type(exc).__name__}", flush=True)
+            handle.close()
     return process.wait()
 
 
