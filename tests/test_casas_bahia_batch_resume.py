@@ -231,18 +231,20 @@ class CasasBatchResumeTests(unittest.TestCase):
                 final = "failed" if failed_product else "completed"
                 self.assertIn(f"Casas Bahia TV/REF/LDY full run {final}", result.stdout)
 
-    def test_standalone_ldy_defaults_to_mode_three_and_allows_override(self):
-        standalone = BATCH_SOURCE.with_name("run_casas_bahia_ldy_full.bat")
-        self.batch = self.root / standalone.name
-        shutil.copyfile(standalone, self.batch)
-        for selected in (None, "1"):
-            with self.subTest(selected=selected):
-                runtime = {"SEDA_CASAS_BAHIA_LISTING_MODE": selected} if selected else None
-                result, calls = self.run_batch(runtime=runtime)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(calls[0]["ARGS"], "-m seda.casas_bahia.casas_bahia_orchestrator --product-line LDY --all")
-                self.assertEqual(calls[0]["SEDA_CASAS_BAHIA_LISTING_MODE"], selected or "3")
+    def test_standalone_batches_default_to_mode_three_and_allow_override(self):
+        for product in ("TV", "REF", "LDY"):
+            standalone = BATCH_SOURCE.with_name(f"run_casas_bahia_{product.lower()}_full.bat")
+            self.batch = self.root / standalone.name
+            shutil.copyfile(standalone, self.batch)
+            for selected in (None, "1", "1-1", "2", "3", "4"):
+                with self.subTest(product=product, selected=selected):
+                    runtime = {"SEDA_CASAS_BAHIA_LISTING_MODE": selected} if selected else None
+                    result, calls = self.run_batch(runtime=runtime)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0]["ARGS"], f"-m seda.casas_bahia.casas_bahia_orchestrator --product-line {product} --all")
+                    self.assertEqual(calls[0]["SEDA_CASAS_BAHIA_LISTING_MODE"], selected or "3")
+                    self.assertIn(f"listing mode={selected or '3'}", result.stdout)
 
     def test_mode_one_one_logs_explicit_url_first_rest_label(self):
         result, calls = self.run_batch(["1-1"])

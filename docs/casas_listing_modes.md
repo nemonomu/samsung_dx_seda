@@ -5,9 +5,9 @@
 - TV·REF·LDY 단독 BAT와 TV/REF/LDY 통합 BAT는 상속된 우편번호와 관계없이 `SEDA_POSTAL_CODE=01010-010`, `SEDA_CASAS_BAHIA_ZIPCODE=01010010`을 지정한다. 가격·배송비·픽업 요청에 같은 배송지를 전달한다.
 - Casas 상태 확인에서 이메일 미전송은 `email_status`와 `email_warning=true`, 콘솔 경고로 남긴다. 이메일 실패만으로 종료 코드 1을 반환하지 않는다. 기존 데이터/DB 적재 행 수 및 사용량 추적 성공 조건은 유지하고, Magalu 상태 판정은 변경하지 않는다.
 - 일반 통합 실행은 기존처럼 실패한 상품군 뒤에도 나머지 상품군을 실행한다. 이메일만 실패한 상품군은 성공으로 처리하고, 모든 상품군의 필수 단계가 성공하면 전체 종료 코드는 0이다. 실제 수집·DB 등의 실패가 하나라도 있으면 전체 종료 코드는 1이다. 재개 실행의 실제 실패 시 중단 정책은 유지한다.
-- 모드 선택은 그대로 유지한다. 통합 BAT 기본값은 3이며 첫 인자로 변경할 수 있다. LDY 단독은 미설정 시 3, TV·REF 단독은 외부 설정을 따르며 Python 미설정 기본값은 1이다.
+- 통합 BAT 기본값은 3이며 첫 인자로 변경할 수 있다. TV·REF·LDY 단독 BAT도 모드 환경변수가 없으면 3을 사용하고, 명시된 외부 설정은 유지한다. 시작 로그에 선택 모드를 출력한다. Python 직접 실행의 미설정 기본값은 1이다.
 
-예약용 TV/REF/LDY 배치와 LDY 단독 배치의 기본값은 **3 (UC + API)**이다. Python 직접 실행의 기본값은 1이다. Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작으로 복원**한다. 9월 23일 추가된 엄격한 가격 검증을 Mode 1에 적용하지 않는다. 별도 Mode 1-1/2/3/4는 유지하며, CSV·DB 형식과 공통 번역은 변경하지 않는다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
+예약용 TV/REF/LDY 배치와 TV·REF·LDY 단독 배치의 기본값은 **3 (UC + API)**이다. Python 직접 실행의 기본값은 1이다. Mode 1은 **9월 22일 이전 최신본 `1290145`의 REST 수집 동작으로 복원**한다. 9월 23일 추가된 엄격한 가격 검증을 Mode 1에 적용하지 않는다. 별도 Mode 1-1/2/3/4는 유지하며, CSV·DB 형식과 공통 번역은 변경하지 않는다. [Mode 1 복원 계약](casas_listing_mode1_legacy.md), [Mode 1-1 계약](casas_listing_rest_url_first.md), [Mode 4 계약](casas_listing_url_first.md)을 참조한다.
 
 | 번호 | 이름 | 실행 경로 | 실패 시 |
 | --- | --- | --- | --- |
@@ -31,7 +31,7 @@ run_casas_bahia_tv_ref_ldy_full.bat 3
 run_casas_bahia_tv_ref_ldy_full.bat 4
 ```
 
-TV/REF/LDY 배치 파일 상단의 기본 선택은 3이며 첫 번째 인자로 해당 실행에만 덮어쓸 수 있다. LDY 단독 배치는 환경변수가 없을 때 3을 사용하고 명시된 환경변수는 유지한다. 허용 값은 1, 1-1, 2, 3, 4이다.
+TV/REF/LDY 배치 파일 상단의 기본 선택은 3이며 첫 번째 인자로 해당 실행에만 덮어쓸 수 있다. TV·REF·LDY 단독 배치는 환경변수가 없을 때 3을 사용하고 명시된 환경변수는 유지한다. 허용 값은 1, 1-1, 2, 3, 4이다.
 
 Python 모듈을 직접 실행할 때는 `SEDA_CASAS_BAHIA_LISTING_MODE` 환경변수로 선택하며, 없으면 기본 1이다. 이 변수는 listing 방식과 해당 모드의 Detail 가격 보완 여부를 선택한다. 전역 `SEDA_FETCH_MODE`를 이 변수로 대체하지 않는다.
 

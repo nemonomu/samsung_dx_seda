@@ -29,6 +29,7 @@ set SEDA_FETCH_MODE=graphql
 set SEDA_RETRY_SLEEP_SECONDS=0
 
 call :log "[SEDA] log file: %SEDA_RUN_LOG_FILE%"
+call :log "[SEDA] Casas Bahia listing mode=%SEDA_CASAS_BAHIA_LISTING_MODE%"
 call :log "[SEDA] Casas Bahia LDY full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line LDY --all
 if errorlevel 1 goto :failed
