@@ -5,17 +5,23 @@ The child environment is constructed explicitly, never copied or dumped.
 """
 
 from pathlib import Path
+from contextlib import ExitStack, nullcontext
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 
 BATCH_SOURCE = Path(__file__).resolve().parents[1] / "run_casas_bahia_tv_ref_ldy_full.bat"
 WORK_ROOT = None
 CMD = Path(r"C:\Windows\System32\cmd.exe")
 CAPTURE_FIELDS = (
+    "SEDA_POSTAL_CODE",
+    "SEDA_CASAS_BAHIA_ZIPCODE",
     "SEDA_CASAS_BAHIA_LISTING_MODE",
     "SEDA_CASAS_BAHIA_SEARCH_RETRIES",
     "SEDA_RUN_DATE",
@@ -68,7 +74,7 @@ class CasasBatchResumeTests(unittest.TestCase):
         ]
         (self.stub_dir / "python.bat").write_text("\n".join(stub_lines) + "\n", encoding="ascii")
 
-    def run_batch(self, args=(), *, runtime=None, fail=None, fail_code="7"):
+    def run_batch(self, args=(), *, runtime=None, fail=None, fail_code="7", status_worker=None):
         # Fixed nonsecret Windows paths; do not copy/read the parent environment.
         child_env = {
             "SystemRoot": r"C:\Windows",
@@ -91,6 +97,9 @@ class CasasBatchResumeTests(unittest.TestCase):
         if fail:
             self.assertIn(fail, ("TV", "REF", "LDY"))
             child_env[f"HARNESS_{fail}_EXIT"] = fail_code
+        if status_worker:
+            child_env["HARNESS_REAL_PYTHON"] = sys.executable
+            child_env["HARNESS_STATUS_WORKER"] = str(status_worker)
         self.capture.unlink(missing_ok=True)
         # cwd is the fixture root; avoiding a quoted nested absolute command
         # also avoids Windows' different CRT/CMD quote-escaping rules.
@@ -137,6 +146,90 @@ class CasasBatchResumeTests(unittest.TestCase):
 
     def test_no_argument_uses_default_mode_three(self):
         self.assert_success_chain(*self.run_batch(), mode="3")
+
+    def test_all_casas_batches_override_inherited_postal_codes(self):
+        for name in (BATCH_SOURCE.name, "run_casas_bahia_tv_full.bat",
+                     "run_casas_bahia_ref_full.bat", "run_casas_bahia_ldy_full.bat"):
+            self.batch = self.root / name
+            shutil.copyfile(BATCH_SOURCE.with_name(name), self.batch)
+            for inherited in ({}, {"SEDA_POSTAL_CODE": "01001-001",
+                                   "SEDA_CASAS_BAHIA_ZIPCODE": "20040020"}):
+                with self.subTest(batch=name, inherited=inherited):
+                    result, calls = self.run_batch(runtime=inherited)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(len(calls), 3 if name == BATCH_SOURCE.name else 1)
+                    for call in calls:
+                        self.assertEqual(call["SEDA_POSTAL_CODE"], "01010-010")
+                        self.assertEqual(call["SEDA_CASAS_BAHIA_ZIPCODE"], "01010010")
+                    if name == BATCH_SOURCE.name:
+                        self.check_postal_requests(calls[0])
+
+    def check_postal_requests(self, call):
+        disabled_env = self.root / "never-created.env"
+        self.assertFalse(disabled_env.exists())
+        with patch.dict(os.environ, {
+            "SEDA_ENV_PATH": str(disabled_env),
+            "SEDA_POSTAL_CODE": call["SEDA_POSTAL_CODE"],
+            "SEDA_CASAS_BAHIA_ZIPCODE": call["SEDA_CASAS_BAHIA_ZIPCODE"],
+        }, clear=True), ExitStack() as stack:
+            from seda.casas_bahia import detail_api, price_api, freight_cdp_backfill
+            self.assertEqual(price_api._params()["cep"], "01010010")
+            response = Mock(status_code=200, headers={"content-type": "application/json"})
+            response.json.return_value = {"options": []}
+            stack.enter_context(patch.object(detail_api, "_headers", return_value={}))
+            stack.enter_context(patch.object(detail_api, "throttle"))
+            stack.enter_context(patch.object(detail_api, "_freight_transports", return_value=["requests"]))
+            request = stack.enter_context(patch.object(detail_api, "_freight_get", return_value=response))
+            self.assertTrue(detail_api.fetch_freight("fixture-sku", "fixture-seller")["success"])
+            self.assertIn("/zipcode/01010-010/source/CB", request.call_args.args[1])
+            stack.enter_context(patch("sys.argv", ["freight_cdp_backfill"]))
+            stack.enter_context(patch.object(freight_cdp_backfill, "detail_consumer_guard", return_value=nullcontext()))
+            run = stack.enter_context(patch.object(freight_cdp_backfill, "run", new=Mock(return_value={})))
+            stack.enter_context(patch.object(freight_cdp_backfill.asyncio, "run", side_effect=lambda result: result))
+            stack.enter_context(patch("builtins.print"))
+            freight_cdp_backfill.main()
+            self.assertEqual(run.call_args.args[0].zipcode, "01010-010")
+
+    def test_real_status_email_failure_continues_all_categories(self):
+        # Exercise the actual status module/exit code under CMD. Collection, DB
+        # receipts and SMTP are fixtures; no live requests or env files are used.
+        stub = self.stub_dir / "python.bat"
+        source = stub.read_text(encoding="ascii").split('if /i "%~4"=="TV"')[0]
+        source += '"%HARNESS_REAL_PYTHON%" "%HARNESS_STATUS_WORKER%" "%~4"\nexit /b %errorlevel%\n'
+        stub.write_text(source, encoding="ascii")
+        worker = self.root / "status_worker.py"
+        worker.write_text(
+            "import json, os, smtplib, sys\n"
+            "from pathlib import Path\n"
+            "from unittest.mock import patch\n"
+            f"sys.path.insert(0, {str(BATCH_SOURCE.parent)!r})\n"
+            "from seda import step10_status_check as status\n"
+            "product = sys.argv[1]\n"
+            "root = Path(__file__).parent / product\n"
+            "(root / 'db').mkdir(parents=True, exist_ok=True)\n"
+            "failed = os.getenv('HARNESS_' + product + '_EXIT') != '0'\n"
+            "receipt = {'success': not failed, 'inserted': 2, 'mode': 'append'}\n"
+            "(root / 'db' / 'manifest_db_load.json').write_text(json.dumps(receipt), encoding='utf-8')\n"
+            "os.environ['SEDA_ACTIVE_RETAILER'] = 'casas_bahia'\n"
+            "os.environ['SEDA_PRODUCT_LINE'] = product\n"
+            "with patch.object(status, 'run_root', return_value=root), "
+            "patch.object(status, 'csv_count', return_value=2), "
+            "patch.object(status, 'summarize_usage', return_value={'tracking_status': 'complete', 'http_calls': 0}), "
+            "patch.object(status, '_send_email', side_effect=smtplib.SMTPServerDisconnected('fixture disconnect')):\n"
+            "    status.main()\n", encoding="utf-8")
+        for failed_product in (None, "TV", "REF", "LDY"):
+            with self.subTest(failed_product=failed_product):
+                result, calls = self.run_batch(status_worker=worker, fail=failed_product)
+                self.assertEqual(result.returncode, 1 if failed_product else 0, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 3, result.stdout + result.stderr)
+                for product in ("TV", "REF", "LDY"):
+                    status_path = self.root / product / "status" / "status_summary.json"
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                    self.assertEqual(status["success"], product != failed_product)
+                    self.assertTrue(status["email_warning"])
+                self.assertIn("WARNING Casas Bahia email notification not sent", result.stdout)
+                final = "failed" if failed_product else "completed"
+                self.assertIn(f"Casas Bahia TV/REF/LDY full run {final}", result.stdout)
 
     def test_standalone_ldy_defaults_to_mode_three_and_allows_override(self):
         standalone = BATCH_SOURCE.with_name("run_casas_bahia_ldy_full.bat")

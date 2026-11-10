@@ -184,9 +184,19 @@ def main():
         email_status = f"failed:{type(exc).__name__}: {exc}"
     status["email_status"] = email_status
     status["email_subject"] = subject
-    status["success"] = status["report_success"] and email_status == "sent"
+    active = os.getenv("SEDA_ACTIVE_RETAILER") or os.getenv("SEDA_RETAILERS", "")
+    if active.split(",", 1)[0].strip().lower() == "casas_bahia":
+        # Notification delivery must not invalidate a completed Casas data run.
+        # Keep the existing data/DB and usage-tracking checks authoritative.
+        status["success"] = status["report_success"]
+        status["email_warning"] = email_status != "sent"
+    else:
+        status["success"] = status["report_success"] and email_status == "sent"
     write_json(output, status)
     print(f"[seda] wrote {output} email={email_status}")
+    if status.get("email_warning"):
+        print(f"[seda] WARNING Casas Bahia email notification not sent: {email_status}; "
+              f"data_success={status['data_success']} success={status['success']}", flush=True)
     if not status["success"]:
         raise SystemExit(1)
 
