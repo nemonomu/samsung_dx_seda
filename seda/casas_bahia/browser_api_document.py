@@ -222,8 +222,46 @@ def _navigate(driver, url, requested):
         time.sleep(0.5)
 
 
-def prepare(browser, url):
-    """Homepage once; listing retries after 3s then 60s, only for HTTP 403."""
+def _fresh_listing_recovery(url, requested, trace, restart_browser):
+    """Two fresh homepage/listing attempts after the initial listing 403s."""
+    for attempt, delay in enumerate((300, 600), 1):
+        for remaining in range(delay, 0, -30):
+            _notice(f"[seda] casas_bahia mode=3 api_document stage=listing "
+                    f"fresh_browser_attempt={attempt} recovery_wait_seconds={remaining}")
+            time.sleep(30)
+        homepage_ready = False
+        stage = "browser_start"
+        try:
+            browser = restart_browser()
+            browser.start()
+            stage = "homepage"
+            _notice(f"[seda] casas_bahia mode=3 api_document stage=homepage "
+                    f"fresh_browser_attempt={attempt} start")
+            result = _navigate(browser.driver, HOME_URL, None)
+            trace.extend(result["trace"])
+            homepage_ready = result["success"]
+            _notice(f"[seda] casas_bahia mode=3 api_document stage=homepage "
+                    f"status={result['status_code']} success={str(homepage_ready).lower()}")
+            if homepage_ready:
+                time.sleep(5)
+                stage = "listing"
+                _notice(f"[seda] casas_bahia mode=3 api_document stage=listing "
+                        f"fresh_browser_attempt={attempt} start")
+                result = _navigate(browser.driver, url, requested)
+                trace.extend(result["trace"])
+        except Exception as exc:
+            # Only exception types are safe to expose; cancellation propagates.
+            result = {"success": False, "status_code": 0,
+                      "error": "browser_api_" + type(exc).__name__}
+        _notice(f"[seda] casas_bahia mode=3 api_document stage={stage} "
+                f"fresh_browser_attempt={attempt} status={result['status_code']} "
+                f"success={str(result['success']).lower()} error={result.get('error', 'none')}")
+        if result["success"] or attempt == 2:
+            return dict(result, trace=trace, document_navigations=len(trace), homepage_ready=homepage_ready)
+
+
+def prepare(browser, url, *, restart_browser=None):
+    """Keep legacy retries unless the listing caller opts into fresh Chrome."""
     requested = listing._request_identity(url)
     browser.start()
     trace = []
@@ -245,6 +283,8 @@ def prepare(browser, url):
             return dict(result, trace=trace, document_navigations=len(trace), homepage_ready=True)
         if attempt == 1:
             time.sleep(3)
+        elif restart_browser is not None:
+            return _fresh_listing_recovery(url, requested, trace, restart_browser)
         else:
             for remaining in (60, 30):
                 _notice(f"[seda] casas_bahia mode=3 api_document stage=listing recovery_wait_seconds={remaining}")

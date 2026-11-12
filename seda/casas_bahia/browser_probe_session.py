@@ -142,11 +142,11 @@ class ProbeBrowserSession(browser_listing._BrowserSession):
         # transport timeout, headless or hybrid evidence-wait settings.
         return super().fetch(url, timeout=45, wait_seconds=30)
 
-    def prepare_api(self, url, timeout=None):
+    def prepare_api(self, url, timeout=None, *, restart_browser=None):
         """Prepare a mode-3 API context without admitting SSR output rows."""
         from .browser_api_document import prepare
 
-        return prepare(self, url)
+        return prepare(self, url, restart_browser=restart_browser)
 
     def _enrich(self, raw, url, price_payloads):
         from .mode3_prices import enrich

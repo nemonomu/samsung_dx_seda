@@ -38,6 +38,7 @@ set "SEDA_DETAIL_OUTPUT_CSV="
 set "SEDA_MAGALU_SHIPPING_BACKFILL_ONLY=0"
 
 :resume_args_valid
+set "SEDA_CASAS_BAHIA_FAILED_PRODUCTS="
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="1-1" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=rest_api_url_first"
 if "%SEDA_CASAS_BAHIA_LISTING_MODE%"=="2" set "SEDA_CASAS_BAHIA_LISTING_MODE_LABEL=hybrid"
@@ -89,12 +90,19 @@ call :log "[SEDA] Casas Bahia REF full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line REF --all
 if errorlevel 1 goto :failed_ref
 
+:start_ldy
 call :log "[SEDA] Casas Bahia LDY full run started"
 call python -m seda.casas_bahia.casas_bahia_orchestrator --product-line LDY --all
 if errorlevel 1 goto :failed_ldy
 
+:finish
+if defined SEDA_CASAS_BAHIA_FAILED_PRODUCTS goto :completed_with_failures
 call :log "[SEDA] Casas Bahia TV/REF/LDY full run completed"
 exit /b 0
+
+:completed_with_failures
+call :log "[SEDA] Casas Bahia TV/REF/LDY full run completed with failures:%SEDA_CASAS_BAHIA_FAILED_PRODUCTS%"
+exit /b 1
 
 :run_tv_detail_resume
 setlocal
@@ -128,15 +136,18 @@ exit /b 0
 
 :failed_tv
 call :log "[SEDA] Casas Bahia TV full run failed"
-exit /b 1
+set "SEDA_CASAS_BAHIA_FAILED_PRODUCTS=%SEDA_CASAS_BAHIA_FAILED_PRODUCTS% TV"
+goto :start_ref
 
 :failed_ref
 call :log "[SEDA] Casas Bahia REF full run failed"
-exit /b 1
+set "SEDA_CASAS_BAHIA_FAILED_PRODUCTS=%SEDA_CASAS_BAHIA_FAILED_PRODUCTS% REF"
+goto :start_ldy
 
 :failed_ldy
 call :log "[SEDA] Casas Bahia LDY full run failed"
-exit /b 1
+set "SEDA_CASAS_BAHIA_FAILED_PRODUCTS=%SEDA_CASAS_BAHIA_FAILED_PRODUCTS% LDY"
+goto :finish
 
 :invalid_listing_mode
 echo [SEDA] Invalid listing mode. Use 1=REST API, 1-1=URL-first REST API, 2=hybrid, 3=UC+API, or 4=URL-first UC+API.

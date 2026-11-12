@@ -91,8 +91,9 @@ class CasasBatchResumeTests(unittest.TestCase):
             self.assertTrue(set(runtime).issubset(CAPTURE_FIELDS))
             child_env.update(runtime)
         if fail:
-            self.assertIn(fail, ("TV", "REF", "LDY"))
-            child_env[f"HARNESS_{fail}_EXIT"] = "7"
+            for category in ([fail] if isinstance(fail, str) else fail):
+                self.assertIn(category, ("TV", "REF", "LDY"))
+                child_env[f"HARNESS_{category}_EXIT"] = "7"
         self.capture.unlink(missing_ok=True)
         # cwd is the fixture root; avoiding a quoted nested absolute command
         # also avoids Windows' different CRT/CMD quote-escaping rules.
@@ -199,19 +200,24 @@ class CasasBatchResumeTests(unittest.TestCase):
             self.assertEqual(call["SEDA_DETAIL_OUTPUT_CSV"], "")
             self.assertEqual(call["SEDA_CASAS_BAHIA_ZENROWS_FIELD_FALLBACK"], "1")
 
-    def test_resume_failures_stop_at_first_failed_category(self):
-        for index, category in enumerate(("TV", "REF", "LDY"), 1):
+    def test_resume_failures_continue_remaining_categories(self):
+        for category in ("TV", "REF", "LDY"):
             with self.subTest(category=category):
                 result, calls = self.run_batch(["4", "--resume-tv-detail", "20260923", "308"], fail=category)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(len(calls), index, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 3, result.stdout + result.stderr)
+                self.assertIn(f"completed with failures: {category}", result.stdout)
 
-    def test_normal_failures_remain_fail_fast(self):
-        for index, category in enumerate(("TV", "REF", "LDY"), 1):
-            with self.subTest(category=category):
-                result, calls = self.run_batch(["4"], fail=category)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(len(calls), index, result.stdout + result.stderr)
+    def test_normal_failures_continue_and_aggregate_all_failed_categories(self):
+        for failures in (("TV",), ("REF",), ("LDY",), ("TV", "REF"),
+                         ("TV", "LDY"), ("REF", "LDY"), ("TV", "REF", "LDY")):
+            with self.subTest(failures=failures):
+                result, calls = self.run_batch(fail=failures)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual([call["ARGS"].split()[3] for call in calls], ["TV", "REF", "LDY"])
+                self.assertIn("completed with failures: " + " ".join(failures), result.stdout)
+                for category in failures:
+                    self.assertIn(f"{category} full run failed", result.stdout)
 
     def test_resume_rejects_legacy_modes_before_any_python(self):
         for mode in ("1", "1-1", "2", "3"):
@@ -253,7 +259,7 @@ class CasasBatchResumeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertEqual(calls, [])
 
-    def test_missing_preflight_file_stops_before_any_python(self):
+    def test_missing_tv_resume_file_skips_tv_but_runs_ref_ldy(self):
         for relative in PRECHECK_FILES:
             with self.subTest(relative=relative):
                 path = self.tv_root / relative
@@ -261,7 +267,8 @@ class CasasBatchResumeTests(unittest.TestCase):
                 try:
                     result, calls = self.run_batch(["4", "--resume-tv-detail", "20260923", "308"])
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(calls, [])
+                    self.assertEqual([call["ARGS"].split()[3] for call in calls], ["REF", "LDY"])
+                    self.assertIn("completed with failures: TV", result.stdout)
                 finally:
                     path.write_text("fixture-only\n", encoding="utf-8")
 

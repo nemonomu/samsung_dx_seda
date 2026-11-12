@@ -251,8 +251,9 @@ def _parser_context(data, requested):
 
 
 class _APISession:
-    def __init__(self):
+    def __init__(self, *, listing_recovery=False):
         self.browser = ProbeBrowserSession()
+        self.listing_recovery = listing_recovery
         self.request_session_id = str(uuid.uuid4())
         self.last_search_finished = None
         print("[seda] casas_bahia mode=3 uc_api execution_profile=successful_local_probe "
@@ -267,6 +268,11 @@ class _APISession:
 
     def close(self):
         self.browser.close()
+
+    def _restart_browser(self):
+        self.browser.close()
+        self.browser = ProbeBrowserSession()
+        return self.browser
 
     def _ssr_fallback(self, url, timeout, trace, *, recovery_pending=False):
         """Use hybrid's bounded navigation policy on this same owned browser."""
@@ -351,9 +357,13 @@ class _APISession:
         try:
             # Initial SSR products/offers are not collected output. Validate a
             # normal document here, then validate the actual API rows below.
-            result = self.browser.prepare_api(url, timeout=45)
+            if self.listing_recovery:
+                result = self.browser.prepare_api(url, timeout=45, restart_browser=self._restart_browser)
+            else:
+                result = self.browser.prepare_api(url, timeout=45)
             item["status_code"] = int(_bounded_number(result.get("status_code"), 0, 0, 599))
-            item["document_navigations"] = int(_bounded_number(result.get("document_navigations"), 0, 0, 4))
+            item["document_navigations"] = int(_bounded_number(
+                result.get("document_navigations"), 0, 0, 7 if self.listing_recovery else 4))
             item["homepage_ready"] = result.get("homepage_ready") is True
             try:
                 from .listing_diagnostic_evidence import _trace_projection
@@ -400,7 +410,8 @@ class _APISession:
         if self.ssr_recovery_required:
             return self._ssr_fallback(url, timeout, trace, recovery_pending=True)
         # An unprepared browser must not enter an SSR-output recovery loop.
-        # Preparation has bounded 3s/60s 403 retries on the same browser.
+        # Listing preparation has bounded fresh-browser 403 recovery;
+        # detail price recovery retains its existing preparation policy.
         initial = self._bootstrap(url, 45)
         if initial:
             trace.append(initial)
@@ -491,7 +502,7 @@ def fetch_listing(url, timeout=None):
         try:
             browser_listing._request_identity(url)
             if _SESSION is None:
-                _SESSION = _APISession()
+                _SESSION = _APISession(listing_recovery=True)
             return _SESSION.fetch(url, timeout=timeout)
         except Exception as exc:
             error = _safe_error(exc)
